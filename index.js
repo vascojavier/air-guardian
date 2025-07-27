@@ -100,11 +100,11 @@ io.emit('traffic-update', Object.entries(userLocations).map(([name, info]) => ({
   lat: info.latitude,
   lon: info.longitude,
   alt: info.alt,
-  heading: info.rumbo,              // usamos 'rumbo' como heading
-  type: info.tipo,                  // usamos 'tipo' como type
+  heading: info.heading,               // ✅ CORRECTO
+  type: info.type,                     // ✅ CORRECTO
   speed: info.speed || 0,
   callsign: info.callsign || '',
-  aircraftIcon: info.icono || '2.png'  // usamos 'icono' como aircraftIcon
+  aircraftIcon: info.icon || '2.png'  // ✅ CORRECTO
 })));
 
 
@@ -319,18 +319,18 @@ app.post('/air-guardian/update', (req, res) => {
     return res.status(400).json({ error: 'Datos inválidos' });
   }
 
-  userLocations[name] = {
-    latitude: lat,
-    longitude: lon,
-    alt,
-    rumbo: heading,
-    tipo: type,
-    icono: aircraftIcon,
-    speed,
-    callsign,
-    timestamp: Date.now(),
-    socketId: null  // Como viene por HTTP, no hay socket
-  };
+userLocations[name] = {
+  latitude,
+  longitude,
+  alt,
+  heading,
+  type,
+  speed,
+  callsign,
+  icon: aircraftIcon,
+  timestamp: Date.now(),
+  socketId: socket.id
+};
 
   detectarConflictosAereos();
   res.json({ status: 'ok' });
