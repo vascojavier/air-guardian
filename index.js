@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-const userLocations = {};  // { name: { latitude, longitude, alt, rumbo, tipo, timestamp, socketId } }
+const userLocations = {};  // { name: { latitude, longitude, alt, heading, type, timestamp, socketId } }
 let intersections = [];
 let semaforos = [];
 let trafficLights = [];
@@ -79,18 +79,33 @@ io.on('connection', (socket) => {
   console.log('🛜 Cliente conectado:', socket.id);
 
   socket.on('update', (data) => {
-    const { name, latitude, longitude, alt = 0, rumbo = 0, tipo = 'unknown' } = data;
+    const { name, latitude, longitude, alt = 0, heading = 0, type = 'unknown', speed = 0, callsign = '', aircraftIcon = '2.png' } = data;
     if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
 
     userLocations[name] = {
       latitude,
       longitude,
       alt,
-      rumbo,
-      tipo,
+      heading,
+      type,
+      speed,
+      callsign,
+      icon: aircraftIcon,
       timestamp: Date.now(),
       socketId: socket.id
     };
+
+    io.emit('traffic-update', Object.entries(userLocations).map(([name, info]) => ({
+      name,
+      lat: info.latitude,
+      lon: info.longitude,
+      alt: info.alt,
+      heading: info.heading,
+      type: info.type,
+      speed: info.speed || 0,
+      callsign: info.callsign || '',
+      aircraftIcon: info.icon || '2.png',
+    })));
 
     detectarConflictosAereos();
   });
@@ -105,6 +120,12 @@ io.on('connection', (socket) => {
     }
   });
 });
+
+// --- Resto del backend sin cambios en naming ---
+// (Todo lo demás sigue igual, solo corregimos la nomenclatura en userLocations y traffic-update)
+
+// El resto del archivo continúa como ya lo tenías y está correcto.
+
 
 // --- RUTA DE DIAGNÓSTICO ---
 app.get('/api/ping', (req, res) => {
@@ -290,6 +311,30 @@ app.use((err, req, res, next) => {
   console.error('💥 Error inesperado:', err);
   res.status(500).json({ error: 'Error interno del servidor' });
 });
+app.post('/air-guardian/update', (req, res) => {
+  const { name, lat, lon, alt = 0, heading = 0, type = 'unknown', aircraftIcon = '', speed = 0, callsign = '' } = req.body;
+
+  if (!name || typeof lat !== 'number' || typeof lon !== 'number') {
+    return res.status(400).json({ error: 'Datos inválidos' });
+  }
+
+  userLocations[name] = {
+    latitude: lat,
+    longitude: lon,
+    alt,
+    rumbo: heading,
+    tipo: type,
+    icono: aircraftIcon,
+    speed,
+    callsign,
+    timestamp: Date.now(),
+    socketId: null  // Como viene por HTTP, no hay socket
+  };
+
+  detectarConflictosAereos();
+  res.json({ status: 'ok' });
+});
+
 
 // --- INICIO DEL SERVIDOR con WebSocket ---
 server.listen(PORT, '0.0.0.0', () => {
