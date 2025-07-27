@@ -337,7 +337,8 @@ userLocations[name] = {
   callsign,
   icon: aircraftIcon,
   timestamp: Date.now(),
-  socketId: null  // o undefined, si no fue enviado por WebSocket
+  socketId: socket.id
+
 
 };
 
