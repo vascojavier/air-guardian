@@ -95,17 +95,18 @@ io.on('connection', (socket) => {
       socketId: socket.id
     };
 
-    io.emit('traffic-update', Object.entries(userLocations).map(([name, info]) => ({
-      name,
-      lat: info.latitude,
-      lon: info.longitude,
-      alt: info.alt,
-      heading: info.heading,
-      type: info.type,
-      speed: info.speed || 0,
-      callsign: info.callsign || '',
-      aircraftIcon: info.icon || '2.png',
-    })));
+io.emit('traffic-update', Object.entries(userLocations).map(([name, info]) => ({
+  name,
+  lat: info.latitude,
+  lon: info.longitude,
+  alt: info.alt,
+  heading: info.rumbo,              // usamos 'rumbo' como heading
+  type: info.tipo,                  // usamos 'tipo' como type
+  speed: info.speed || 0,
+  callsign: info.callsign || '',
+  aircraftIcon: info.icono || '2.png'  // usamos 'icono' como aircraftIcon
+})));
+
 
     detectarConflictosAereos();
   });
