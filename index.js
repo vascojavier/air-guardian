@@ -92,7 +92,8 @@ io.on('connection', (socket) => {
       callsign,
       icon: aircraftIcon,
       timestamp: Date.now(),
-      socketId: socket.id
+      socketId: null  // o undefined, si no fue enviado por WebSocket
+
     };
 
 io.emit('traffic-update', Object.entries(userLocations).map(([name, info]) => ({
@@ -329,7 +330,8 @@ userLocations[name] = {
   callsign,
   icon: aircraftIcon,
   timestamp: Date.now(),
-  socketId: socket.id
+  socketId: null  // o undefined, si no fue enviado por WebSocket
+
 };
 
   detectarConflictosAereos();
