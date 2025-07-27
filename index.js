@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-const userLocations = {};  // { name: { latitude, longitude, alt, heading, type, timestamp, socketId } }
+const userLocations = {};
 let intersections = [];
 let semaforos = [];
 let trafficLights = [];
@@ -74,11 +74,12 @@ function detectarConflictosAereos() {
   }
 }
 
-// --- WebSocket: conexión ---
 io.on('connection', (socket) => {
   console.log('🛜 Cliente conectado:', socket.id);
 
   socket.on('update', (data) => {
+    console.log('✈️ UPDATE recibido:', data);
+
     const { name, latitude, longitude, alt = 0, heading = 0, type = 'unknown', speed = 0, callsign = '', aircraftIcon = '2.png' } = data;
     if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
 
@@ -92,22 +93,26 @@ io.on('connection', (socket) => {
       callsign,
       icon: aircraftIcon,
       timestamp: Date.now(),
-      socketId: null  // o undefined, si no fue enviado por WebSocket
-
+      socketId: socket.id
     };
 
-io.emit('traffic-update', Object.entries(userLocations).map(([name, info]) => ({
-  name,
-  lat: info.latitude,
-  lon: info.longitude,
-  alt: info.alt,
-  heading: info.heading,               // ✅ CORRECTO
-  type: info.type,                     // ✅ CORRECTO
-  speed: info.speed || 0,
-  callsign: info.callsign || '',
-  aircraftIcon: info.icon || '2.png'  // ✅ CORRECTO
-})));
+    console.log('🗺️ Estado actual de userLocations:', userLocations);
 
+    const trafficData = Object.entries(userLocations).map(([name, info]) => ({
+      name,
+      lat: info.latitude,
+      lon: info.longitude,
+      alt: info.alt,
+      heading: info.heading,
+      type: info.type,
+      speed: info.speed || 0,
+      callsign: info.callsign || '',
+      aircraftIcon: info.icon || '2.png'
+    }));
+
+    console.log('📡 Emitiendo tráfico:', trafficData);
+
+    io.emit('traffic-update', trafficData);
 
     detectarConflictosAereos();
   });
@@ -122,6 +127,8 @@ io.emit('traffic-update', Object.entries(userLocations).map(([name, info]) => ({
     }
   });
 });
+
+// Resto del backend: rutas, lógica de semáforos, detección, etc.
 
 // --- Resto del backend sin cambios en naming ---
 // (Todo lo demás sigue igual, solo corregimos la nomenclatura en userLocations y traffic-update)
