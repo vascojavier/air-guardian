@@ -74,63 +74,66 @@ function detectarConflictosAereos() {
   }
 }
 
-socket.on('update', (data) => {
-  console.log('✈️ UPDATE recibido:', data);
+io.on('connection', (socket) => {
+  console.log('🟢 Cliente conectado vía WebSocket:', socket.id);
 
-  const {
-    name,
-    latitude,
-    longitude,
-    alt = 0,
-    heading = 0,
-    type = 'unknown',
-    speed = 0,
-    callsign = '',
-    aircraftIcon = '2.png'
-  } = data;
+  socket.on('update', (data) => {
+    console.log('✈️ UPDATE recibido:', data);
 
-  if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
+    const {
+      name,
+      latitude,
+      longitude,
+      alt = 0,
+      heading = 0,
+      type = 'unknown',
+      speed = 0,
+      callsign = '',
+      aircraftIcon = '2.png'
+    } = data;
 
-  // Guardar con socket.id como clave interna (más robusto)
-  userLocations[socket.id] = {
-    name,
-    latitude,
-    longitude,
-    alt,
-    heading,
-    type,
-    speed,
-    callsign,
-    icon: aircraftIcon,
-    timestamp: Date.now(),
-    socketId: socket.id
-  };
+    if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
 
-  console.log('🗺️ Estado actual de userLocations:', userLocations);
+    userLocations[socket.id] = {
+      name,
+      latitude,
+      longitude,
+      alt,
+      heading,
+      type,
+      speed,
+      callsign,
+      icon: aircraftIcon,
+      timestamp: Date.now(),
+      socketId: socket.id
+    };
 
-  // Emitir a todos los demás usuarios menos al emisor
-  const trafficData = Object.values(userLocations).filter(u => u.socketId !== socket.id).map((info) => ({
-    name: info.name,
-    lat: info.latitude,
-    lon: info.longitude,
-    alt: info.alt,
-    heading: info.heading,
-    type: info.type,
-    speed: info.speed,
-    callsign: info.callsign,
-    aircraftIcon: info.icon
-  }));
+    console.log('🗺️ Estado actual de userLocations:', userLocations);
 
-  console.log('📡 Emitiendo tráfico:', trafficData);
+    const trafficData = Object.values(userLocations)
+      .filter(u => u.socketId !== socket.id)
+      .map((info) => ({
+        name: info.name,
+        lat: info.latitude,
+        lon: info.longitude,
+        alt: info.alt,
+        heading: info.heading,
+        type: info.type,
+        speed: info.speed,
+        callsign: info.callsign,
+        aircraftIcon: info.icon
+      }));
 
-  socket.emit('traffic-update', trafficData); // Emití solo a este cliente
+    console.log('📡 Emitiendo tráfico:', trafficData);
+    socket.emit('traffic-update', trafficData);
 
-  detectarConflictosAereos();
-});
+    detectarConflictosAereos();
+  });
 
-socket.on('disconnect', () => {
-  console.log('🔌 Cliente desconectado:', socket.id);
-  delete userLocations[socket.id];
+  socket.on('disconnect', () => {
+    console.log('🔌 Cliente desconectado:', socket.id);
+    delete userLocations[socket.id];
+  });
 });
 
 
