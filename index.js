@@ -14,6 +14,7 @@ app.use(cors());
 app.use(express.json());
 
 const userLocations = {};
+const socketIdToName = {};
 
 function getDistance(lat1, lon1, lat2, lon2) {
   const toRad = d => d * Math.PI / 180;
@@ -89,7 +90,7 @@ io.on('connection', (socket) => {
 
     if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
 
-    userLocations[socket.id] = {
+    userLocations[name] = {
       name,
       latitude,
       longitude,
@@ -103,10 +104,12 @@ io.on('connection', (socket) => {
       socketId: socket.id
     };
 
+    socketIdToName[socket.id] = name;
+
     console.log('🗺️ Estado actual de userLocations:', userLocations);
 
     const trafficData = Object.values(userLocations)
-      .filter(u => u.socketId !== socket.id)
+      .filter(u => u.name !== name)
       .map((info) => ({
         name: info.name,
         lat: info.latitude,
@@ -127,7 +130,11 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log('🔌 Cliente desconectado:', socket.id);
-    delete userLocations[socket.id];
+    const name = socketIdToName[socket.id];
+    if (name) {
+      delete userLocations[name];
+      delete socketIdToName[socket.id];
+    }
   });
 });
 
@@ -143,9 +150,8 @@ app.get('/api/locations', (req, res) => {
 
 app.delete('/api/location/:name', (req, res) => {
   const { name } = req.params;
-  const entry = Object.entries(userLocations).find(([_, val]) => val.name === name);
-  if (entry) {
-    delete userLocations[entry[0]];
+  if (userLocations[name]) {
+    delete userLocations[name];
     return res.json({ status: 'deleted' });
   }
   res.status(404).json({ error: 'Usuario no encontrado' });
@@ -154,9 +160,9 @@ app.delete('/api/location/:name', (req, res) => {
 setInterval(() => {
   const now = Date.now();
   const INACTIVITY_LIMIT = 60000;
-  for (const [id, loc] of Object.entries(userLocations)) {
+  for (const [name, loc] of Object.entries(userLocations)) {
     if (now - loc.timestamp > INACTIVITY_LIMIT) {
-      delete userLocations[id];
+      delete userLocations[name];
     }
   }
 }, 30000);
@@ -164,7 +170,7 @@ setInterval(() => {
 // --- Ruta para obtener tráfico aéreo cercano ---
 app.get('/air-guardian/traffic/:name', (req, res) => {
   const { name } = req.params;
-  const user = Object.values(userLocations).find(loc => loc.name === name);
+  const user = userLocations[name];
   if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
   const nearby = [];
