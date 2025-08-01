@@ -28,7 +28,47 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function detectarConflictosAereos() {
+  const entries = Object.entries(userLocations);
 
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      const [nameA, locA] = entries[i];
+      const [nameB, locB] = entries[j];
+
+      const dist = getDistance(locA.latitude, locA.longitude, locB.latitude, locB.longitude);
+      const altDiff = Math.abs((locA.alt || 0) - (locB.alt || 0));
+
+      if (dist < 1000 && altDiff < 300) {
+        io.to(locA.socketId).emit('conflicto', {
+          tipo: 'RA',
+          con: nameB,
+          distancia: Math.round(dist),
+          altitudRelativa: (locB.alt || 0) - (locA.alt || 0)
+        });
+        io.to(locB.socketId).emit('conflicto', {
+          tipo: 'RA',
+          con: nameA,
+          distancia: Math.round(dist),
+          altitudRelativa: (locA.alt || 0) - (locB.alt || 0)
+        });
+      } else if (dist < 2500 && altDiff < 600) {
+        io.to(locA.socketId).emit('conflicto', {
+          tipo: 'TA',
+          con: nameB,
+          distancia: Math.round(dist),
+          altitudRelativa: (locB.alt || 0) - (locA.alt || 0)
+        });
+        io.to(locB.socketId).emit('conflicto', {
+          tipo: 'TA',
+          con: nameA,
+          distancia: Math.round(dist),
+          altitudRelativa: (locA.alt || 0) - (locB.alt || 0)
+        });
+      }
+    }
+  }
+}
 
 io.on('connection', (socket) => {
   console.log('🟢 Cliente conectado vía WebSocket:', socket.id);
@@ -85,23 +125,8 @@ io.on('connection', (socket) => {
     console.log('📡 Emitiendo tráfico:', trafficData);
     socket.emit('traffic-update', trafficData);
 
-    
+    detectarConflictosAereos();
   });
-
-  socket.on('warning', (warningData) => {
-  const sender = socketIdToName[socket.id];
-  if (!sender) return;
-
-  console.log(`⚠️ Warning recibido de ${sender}:`, warningData);
-
-  // Reenviar a todos los demás usuarios
-    for (const [name, info] of Object.entries(userLocations)) {
-      if (name !== sender) {
-        io.to(info.socketId).emit('conflicto', warningData);
-        }
-      }
-    });
-
 
   socket.on('disconnect', () => {
     console.log('🔌 Cliente desconectado:', socket.id);
