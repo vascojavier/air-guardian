@@ -84,24 +84,37 @@ io.on('connection', (socket) => {
 
     console.log('📡 Emitiendo tráfico:', trafficData);
     socket.emit('traffic-update', trafficData);
+  });
 
-    
+  socket.on('get-traffic', () => {
+    const activePlanes = Object.values(userLocations).map(info => ({
+      name: info.name,
+      latitude: info.latitude,
+      longitude: info.longitude,
+      alt: info.alt,
+      heading: info.heading,
+      type: info.type,
+      speed: info.speed,
+      callsign: info.callsign,
+      aircraftIcon: info.icon
+    }));
+
+    console.log('📦 Enviando tráfico inicial por get-traffic:', activePlanes);
+    socket.emit('initial-traffic', activePlanes);
   });
 
   socket.on('warning', (warningData) => {
-  const sender = socketIdToName[socket.id];
-  if (!sender) return;
+    const sender = socketIdToName[socket.id];
+    if (!sender) return;
 
-  console.log(`⚠️ Warning recibido de ${sender}:`, warningData);
+    console.log(`⚠️ Warning recibido de ${sender}:`, warningData);
 
-  // Reenviar a todos los demás usuarios
     for (const [name, info] of Object.entries(userLocations)) {
       if (name !== sender) {
         io.to(info.socketId).emit('conflicto', warningData);
-        }
       }
-    });
-
+    }
+  });
 
   socket.on('disconnect', () => {
     console.log('🔌 Cliente desconectado:', socket.id);
@@ -112,6 +125,7 @@ io.on('connection', (socket) => {
     }
   });
 });
+
 
 // --- RUTA DE DIAGNÓSTICO ---
 app.get('/api/ping', (req, res) => {
