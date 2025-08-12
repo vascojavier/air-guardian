@@ -28,8 +28,6 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-
-
 io.on('connection', (socket) => {
   console.log('🟢 Cliente conectado vía WebSocket:', socket.id);
 
@@ -49,6 +47,18 @@ io.on('connection', (socket) => {
     } = data;
 
     if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
+
+    // (4) Defenderse de cambio de nombre en vivo:
+    const existing = userLocations[name];
+    if (existing && existing.socketId && existing.socketId !== socket.id) {
+      // Limpiar la tabla inversa del socket anterior que estaba usando este "name"
+      for (const [sid, uname] of Object.entries(socketIdToName)) {
+        if (uname === name) {
+          delete socketIdToName[sid];
+          break;
+        }
+      }
+    }
 
     userLocations[name] = {
       name,
@@ -87,10 +97,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('get-traffic', () => {
+    // (3) Normalizar a lat/lon en initial-traffic
     const activePlanes = Object.values(userLocations).map(info => ({
       name: info.name,
-      latitude: info.latitude,
-      longitude: info.longitude,
+      lat: info.latitude,
+      lon: info.longitude,
       alt: info.alt,
       heading: info.heading,
       type: info.type,
@@ -112,7 +123,6 @@ io.on('connection', (socket) => {
 
     console.log(`⚠️ Warning recibido de ${sender}:`, warningData);
 
-    // Calculamos el nivel de alerta si no viene explícito
     const alertLevel =
       warningData.alertLevel ||
       (warningData.type === 'RA' && warningData.timeToImpact < 60
@@ -121,7 +131,6 @@ io.on('connection', (socket) => {
         ? 'RA_LOW'
         : 'TA');
 
-    // 🔧 Reconstrucción completa del warning enriquecido
     const enrichedWarning = {
       id: warningData.id || warningData.name,
       name: warningData.name,
@@ -140,24 +149,54 @@ io.on('connection', (socket) => {
     console.log(`📤 Enviando enrichedWarning a otros usuarios:`, enrichedWarning);
 
     for (const [name, info] of Object.entries(userLocations)) {
-      if (name !== sender) {
+      if (name !== sender && info.socketId) {
         io.to(info.socketId).emit('conflicto', enrichedWarning);
       }
     }
   });
 
+  // (1) Manejar air-guardian/leave
+  socket.on('air-guardian/leave', () => {
+    const name = socketIdToName[socket.id];
+    console.log('👋 air-guardian/leave desde', socket.id, '->', name);
+    if (name) {
+      delete userLocations[name];
+      delete socketIdToName[socket.id];
+      io.emit('user-removed', name);
+      console.log(`❌ Usuario ${name} eliminado por leave`);
+    }
+  });
 
-
+  // 🔌 Cliente se desconecta físicamente (cierra app o pierde conexión)
   socket.on('disconnect', () => {
     console.log('🔌 Cliente desconectado:', socket.id);
     const name = socketIdToName[socket.id];
     if (name) {
       delete userLocations[name];
       delete socketIdToName[socket.id];
+      io.emit('user-removed', name);
+      console.log(`❌ Usuario ${name} eliminado por desconexión`);
     }
   });
-});
 
+  // 🛑 Cliente pide ser eliminado manualmente (cambio de avión o sale de Radar)
+  socket.on('remove-user', (name) => {
+    console.log(`🛑 Remove-user recibido para: ${name}`);
+    if (userLocations[name]) {
+      delete userLocations[name];
+    }
+    // Buscar socketId y eliminar de la tabla inversa
+    for (const [sid, uname] of Object.entries(socketIdToName)) {
+      if (uname === name) {
+        delete socketIdToName[sid];
+        break;
+      }
+    }
+    io.emit('user-removed', name);
+    console.log(`❌ Usuario ${name} eliminado manualmente`);
+  });
+
+});
 
 // --- RUTA DE DIAGNÓSTICO ---
 app.get('/api/ping', (req, res) => {
@@ -173,17 +212,36 @@ app.delete('/api/location/:name', (req, res) => {
   const { name } = req.params;
   if (userLocations[name]) {
     delete userLocations[name];
+    // limpiar también la tabla inversa si existiera
+    for (const [sid, uname] of Object.entries(socketIdToName)) {
+      if (uname === name) {
+        delete socketIdToName[sid];
+        break;
+      }
+    }
+    io.emit('user-removed', name);
     return res.json({ status: 'deleted' });
   }
   res.status(404).json({ error: 'Usuario no encontrado' });
 });
 
+// (2) Purga de inactivos + emitir user-removed y limpiar tabla inversa
 setInterval(() => {
   const now = Date.now();
   const INACTIVITY_LIMIT = 60000;
   for (const [name, loc] of Object.entries(userLocations)) {
     if (now - loc.timestamp > INACTIVITY_LIMIT) {
       delete userLocations[name];
+      // limpiar tabla inversa
+      for (const [sid, uname] of Object.entries(socketIdToName)) {
+        if (uname === name) {
+          delete socketIdToName[sid];
+          break;
+        }
+      }
+      // avisar a todos
+      io.emit('user-removed', name);
+      console.log(`⏱️ Purga inactivo: ${name}`);
     }
   }
 }, 30000);
