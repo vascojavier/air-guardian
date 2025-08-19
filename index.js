@@ -16,6 +16,10 @@ app.use(express.json());
 const userLocations = {};
 const socketIdToName = {};
 
+// === Airfield (pista activa en memoria) ===
+let lastAirfield = null;
+
+
 // === Distancia Haversine unificada (metros) ===
 const EARTH_RADIUS_M = 6371008.8; // IUGG mean Earth radius
 const toRad = (d) => (d * Math.PI) / 180;
@@ -126,6 +130,30 @@ io.on('connection', (socket) => {
     socket.emit('initial-traffic', activePlanes);
   });
 
+    // === Airfield: upsert y get ===
+  socket.on('airfield-upsert', ({ airfield }) => {
+    try {
+      if (!airfield || typeof airfield !== 'object') return;
+      lastAirfield = airfield;
+      io.emit('airfield-update', { airfield: lastAirfield }); // broadcast a todos
+      console.log('🛬 airfield-upsert recibido y broadcast airfield-update');
+    } catch (e) {
+      console.error('airfield-upsert error:', e);
+    }
+  });
+
+  socket.on('airfield-get', () => {
+    try {
+      if (lastAirfield) {
+        socket.emit('airfield-update', { airfield: lastAirfield }); // solo al solicitante
+        console.log('📨 airfield-get → enviado airfield-update al solicitante');
+      }
+    } catch (e) {
+      console.error('airfield-get error:', e);
+    }
+  });
+
+
   socket.on('warning', (warningData) => {
     const sender = socketIdToName[socket.id];
     if (!sender) return;
@@ -219,6 +247,13 @@ app.get('/api/ping', (req, res) => {
 app.get('/api/locations', (req, res) => {
   res.json(userLocations);
 });
+
+// === REST opcional: obtener la pista publicada ===
+app.get('/api/airfield', (req, res) => {
+  if (!lastAirfield) return res.status(404).json({ error: 'No airfield set' });
+  res.json(lastAirfield);
+});
+
 
 app.delete('/api/location/:name', (req, res) => {
   const { name } = req.params;
