@@ -43,6 +43,156 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return EARTH_RADIUS_M * c;
 }
 
+/* =======================================================================================
+   ░█▀▀░█░█░█▄█░█░█░█▀▀░█░█░█▀▀░█▀▄░█░█      RUNWAY SCHEDULER (AGREGADO)
+   ======================================================================================= */
+const MIN_LDG_SEP_MIN = 5;      // separación mínima entre aterrizajes (min)
+const TKOF_OCCUPY_MIN = 5;      // ocupación estándar de pista para despegue (min)
+const TKOF_MAX_WAIT_MIN = 15;   // prioridad si esperó 15 min
+
+// Un solo scheduler “activo” (si más adelante manejás múltiples, podés mapear por airfieldId/runwayId)
+const runwayState = {
+  landings: [],   // {name, callsign, aircraft, type, emergency, altitude, etaSec, holding, requestedAt}
+  takeoffs: [],   // {name, callsign, aircraft, type, ready, waitedMin, requestedAt}
+  inUse: null,    // {action:'landing'|'takeoff', name, callsign, startedAt, slotMin}
+  timeline: [],   // próximos slots: [{action, name, at:Date, slotMin}]
+};
+
+// helper: cabecera activa (A o B) de lastAirfield
+function getActiveThresholdLatLon() {
+  if (!lastAirfield) return null;
+  const thrKey = lastAirfield.activeThreshold === 'B' ? 'thresholdB' : 'thresholdA';
+  const thr = lastAirfield[thrKey];
+  if (!thr || typeof thr.lat !== 'number' || typeof thr.lon !== 'number') return null;
+  return { lat: thr.lat, lon: thr.lon };
+}
+
+// estimar GS (m/s) desde userLocations; si no hay, fallback prudente
+function estimateGSms(name) {
+  const u = userLocations[name];
+  if (!u) return 25; // ~90 km/h
+  if (typeof u.speed === 'number' && u.speed > 3) return u.speed; // asumimos m/s desde GPS
+  // fallback por tipo
+  if ((u.type || '').toUpperCase().includes('GLIDER')) return 20; // ~72 km/h
+  return 25;
+}
+
+// ETA a cabecera activa (segundos)
+function computeETASeconds(name) {
+  const thr = getActiveThresholdLatLon();
+  const u = userLocations[name];
+  if (!thr || !u) return null;
+  const d = getDistance(u.latitude, u.longitude, thr.lat, thr.lon); // metros
+  const gs = estimateGSms(name); // m/s
+  if (!gs || !isFinite(gs) || gs <= 0) return null;
+  return Math.max(1, Math.round(d / gs));
+}
+
+// prioridad: menor es mejor
+function landingPriorityScore(item) {
+  if (item.emergency) return 0; // Emergencia primero
+  const isGlider = (item.type || '').toUpperCase().includes('GLIDER');
+  if (isGlider && (item.altitude ?? 999999) < 300) return 1; // planeador bajo
+  // resto por ETA
+  return 1000 + (item.etaSec ?? 1e9);
+}
+
+// limpiar inUse si venció
+function cleanupInUseIfDone() {
+  if (!runwayState.inUse) return;
+  const end = runwayState.inUse.startedAt + runwayState.inUse.slotMin * 60000;
+  if (Date.now() > end) runwayState.inUse = null;
+}
+
+// (re)planificar secuencia usando lastAirfield
+function planRunwaySequence() {
+  cleanupInUseIfDone();
+  runwayState.timeline = [];
+
+  // enriquecer landings
+  runwayState.landings.forEach(l => {
+    l.etaSec = computeETASeconds(l.name);
+    l.priority = landingPriorityScore(l);
+  });
+
+  // ordenar por prioridad y ETA
+  runwayState.landings.sort((a, b) =>
+    (a.priority - b.priority) || ((a.etaSec ?? 1e9) - (b.etaSec ?? 1e9))
+  );
+
+  // construir slots de aterrizaje con separación mínima
+  let lastLandingAt = null;
+  for (const l of runwayState.landings) {
+    if (l.etaSec == null) continue;
+    let etaAt = new Date(Date.now() + l.etaSec * 1000);
+
+    // si colisiona con el anterior, demorar y marcar holding
+    if (lastLandingAt && (etaAt - lastLandingAt) < MIN_LDG_SEP_MIN * 60000) {
+      etaAt = new Date(lastLandingAt.getTime() + MIN_LDG_SEP_MIN * 60000);
+      l.holding = true;
+    } else {
+      l.holding = false;
+    }
+
+    // si hay alguien antes y el ETA actual cae a < MIN_LDG_SEP_MIN → holding
+    if (lastLandingAt && ((etaAt - Date.now()) < MIN_LDG_SEP_MIN * 60000)) {
+      l.holding = true;
+    }
+
+    runwayState.timeline.push({
+      action: 'landing',
+      name: l.name,
+      at: etaAt,
+      slotMin: MIN_LDG_SEP_MIN
+    });
+    lastLandingAt = etaAt;
+  }
+
+  // actualizar waitedMin en despegues
+  const now = new Date();
+  runwayState.takeoffs.forEach(tk => {
+    tk.waitedMin = Math.max(0, Math.round((now - tk.requestedAt) / 60000));
+  });
+
+  // autorizar despegue si hay hueco suficiente o mucha espera
+  const nextLanding = runwayState.timeline.find(s => s.action === 'landing');
+  const canSlotNow = !runwayState.inUse;
+  const gapOk = nextLanding ? ((nextLanding.at - Date.now()) / 60000 >= TKOF_OCCUPY_MIN) : true;
+
+  const readyTakeoffs = runwayState.takeoffs.filter(t => t.ready);
+  readyTakeoffs.sort((a, b) => (b.waitedMin || 0) - (a.waitedMin || 0));
+
+  if (canSlotNow && readyTakeoffs.length) {
+    const first = readyTakeoffs[0];
+    if (gapOk || first.waitedMin >= TKOF_MAX_WAIT_MIN) {
+      runwayState.inUse = {
+        action: 'takeoff',
+        name: first.name,
+        callsign: first.callsign,
+        startedAt: Date.now(),
+        slotMin: TKOF_OCCUPY_MIN
+      };
+      runwayState.takeoffs = runwayState.takeoffs.filter(t => t.name !== first.name);
+    }
+  }
+}
+
+function publishRunwayState() {
+  io.emit('runway-state', {
+    airfield: lastAirfield || null,
+    state: {
+      landings: runwayState.landings,
+      takeoffs: runwayState.takeoffs,
+      inUse: runwayState.inUse,
+      timeline: runwayState.timeline,
+      serverTime: Date.now()
+    }
+  });
+}
+/* =======================================================================================
+   ░█▀▀░█░█░█▄█░█░█░█▀▀░█░█░█▀▀░█▀▄░█░█      FIN RUNWAY SCHEDULER (AGREGADO)
+   ======================================================================================= */
+
 
 io.on('connection', (socket) => {
   console.log('🟢 Cliente conectado vía WebSocket:', socket.id);
@@ -110,6 +260,12 @@ io.on('connection', (socket) => {
 
     console.log('📡 Emitiendo tráfico:', trafficData);
     socket.emit('traffic-update', trafficData);
+
+    // ►► (AGREGADO) replanificar si hay solicitudes pendientes y cambió la kinemática
+    if (runwayState.landings.length || runwayState.takeoffs.length) {
+      planRunwaySequence();
+      publishRunwayState();
+    }
   });
 
   socket.on('get-traffic', () => {
@@ -137,6 +293,12 @@ io.on('connection', (socket) => {
       lastAirfield = airfield;
       io.emit('airfield-update', { airfield: lastAirfield }); // broadcast a todos
       console.log('🛬 airfield-upsert recibido y broadcast airfield-update');
+
+      // ►► (AGREGADO) replanificar con nueva cabecera/airfield
+      if (runwayState.landings.length || runwayState.takeoffs.length) {
+        planRunwaySequence();
+        publishRunwayState();
+      }
     } catch (e) {
       console.error('airfield-upsert error:', e);
     }
@@ -148,6 +310,8 @@ io.on('connection', (socket) => {
         socket.emit('airfield-update', { airfield: lastAirfield }); // solo al solicitante
         console.log('📨 airfield-get → enviado airfield-update al solicitante');
       }
+      // ►► (AGREGADO) también enviar estado de pista al abrir cartel
+      publishRunwayState();
     } catch (e) {
       console.error('airfield-get error:', e);
     }
@@ -205,6 +369,12 @@ io.on('connection', (socket) => {
       io.emit('user-removed', name);
       console.log(`❌ Usuario ${name} eliminado por leave`);
     }
+
+    // ►► (AGREGADO) limpiar de colas si corresponde
+    runwayState.landings = runwayState.landings.filter(x => x.name !== name);
+    runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
+    planRunwaySequence();
+    publishRunwayState();
   });
 
   // 🔌 Cliente se desconecta físicamente (cierra app o pierde conexión)
@@ -217,6 +387,12 @@ io.on('connection', (socket) => {
       io.emit('user-removed', name);
       console.log(`❌ Usuario ${name} eliminado por desconexión`);
     }
+
+    // ►► (AGREGADO) limpiar de colas si corresponde
+    runwayState.landings = runwayState.landings.filter(x => x.name !== name);
+    runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
+    planRunwaySequence();
+    publishRunwayState();
   });
 
   // 🛑 Cliente pide ser eliminado manualmente (cambio de avión o sale de Radar)
@@ -234,7 +410,107 @@ io.on('connection', (socket) => {
     }
     io.emit('user-removed', name);
     console.log(`❌ Usuario ${name} eliminado manualmente`);
+
+    // ►► (AGREGADO) limpiar de colas si corresponde
+    runwayState.landings = runwayState.landings.filter(x => x.name !== name);
+    runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
+    planRunwaySequence();
+    publishRunwayState();
   });
+
+  /* =====================  LISTENERS NUEVOS: RUNWAY  ===================== */
+
+  // Solicitar aterrizaje o despegue / actualizar readiness
+  socket.on('runway-request', (msg) => {
+    try {
+      const { action, name, callsign, aircraft, type, emergency, altitude, ready } = msg || {};
+      if (!name || !action) return;
+
+      if (action === 'land') {
+        if (!runwayState.landings.some(x => x.name === name)) {
+          runwayState.landings.push({
+            name, callsign, aircraft, type,
+            emergency: !!emergency,
+            altitude: typeof altitude === 'number' ? altitude : 999999,
+            requestedAt: new Date()
+          });
+        }
+      } else if (action === 'takeoff') {
+        const idx = runwayState.takeoffs.findIndex(x => x.name === name);
+        if (idx === -1) {
+          runwayState.takeoffs.push({
+            name, callsign, aircraft, type,
+            ready: !!ready,
+            requestedAt: new Date()
+          });
+        } else {
+          runwayState.takeoffs[idx].ready = !!ready;
+        }
+      }
+
+      planRunwaySequence();
+      publishRunwayState();
+    } catch (e) {
+      console.error('runway-request error:', e);
+    }
+  });
+
+  // Cancelar solicitud
+  socket.on('runway-cancel', (msg) => {
+    try {
+      const { name } = msg || {};
+      if (!name) return;
+      runwayState.landings = runwayState.landings.filter(x => x.name !== name);
+      runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
+      planRunwaySequence();
+      publishRunwayState();
+    } catch (e) {
+      console.error('runway-cancel error:', e);
+    }
+  });
+
+  // Marcar pista ocupada (cuando inicia final corta o rueda para despegar)
+  socket.on('runway-occupy', (msg) => {
+    try {
+      const { action, name, callsign, slotMin } = msg || {};
+      if (!action || !name) return;
+      if (!runwayState.inUse) {
+        runwayState.inUse = {
+          action,
+          name,
+          callsign: callsign || '',
+          startedAt: Date.now(),
+          slotMin: slotMin || (action === 'takeoff' ? TKOF_OCCUPY_MIN : MIN_LDG_SEP_MIN)
+        };
+      }
+      publishRunwayState();
+    } catch (e) {
+      console.error('runway-occupy error:', e);
+    }
+  });
+
+  // Liberar pista
+  socket.on('runway-clear', () => {
+    try {
+      runwayState.inUse = null;
+      planRunwaySequence();
+      publishRunwayState();
+    } catch (e) {
+      console.error('runway-clear error:', e);
+    }
+  });
+
+  // Obtener estado de pista bajo demanda (al abrir el panel en Radar)
+  socket.on('runway-get', () => {
+    try {
+      cleanupInUseIfDone();
+      publishRunwayState();
+    } catch (e) {
+      console.error('runway-get error:', e);
+    }
+  });
+
+  /* =================== FIN LISTENERS NUEVOS: RUNWAY  ==================== */
 
 });
 
@@ -289,6 +565,12 @@ setInterval(() => {
       // avisar a todos
       io.emit('user-removed', name);
       console.log(`⏱️ Purga inactivo: ${name}`);
+
+      // ►► (AGREGADO) también limpiar de colas y replanificar
+      runwayState.landings = runwayState.landings.filter(x => x.name !== name);
+      runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
+      planRunwaySequence();
+      publishRunwayState();
     }
   }
 }, 30000);
