@@ -57,15 +57,67 @@ const runwayState = {
   inUse: null,    // {action:'landing'|'takeoff', name, callsign, startedAt, slotMin}
   timeline: [],   // próximos slots: [{action, name, at:Date, slotMin}]
 };
+// Guarda el último orden para detectar cambios de turno
+runwayState.lastOrder = { landings: [], takeoffs: [] };
 
-// helper: cabecera activa (A o B) de lastAirfield
-function getActiveThresholdLatLon() {
-  if (!lastAirfield) return null;
-  const thrKey = lastAirfield.activeThreshold === 'B' ? 'thresholdB' : 'thresholdA';
-  const thr = lastAirfield[thrKey];
-  if (!thr || typeof thr.lat !== 'number' || typeof thr.lon !== 'number') return null;
-  return { lat: thr.lat, lon: thr.lon };
+function emitToUser(name, event, payload) {
+  const sid = userLocations[name]?.socketId;
+  if (sid) io.to(sid).emit(event, payload);
 }
+
+
+
+// --- Geometría de pista activa según esquema del FRONT ---
+function activeRunwayGeom() {
+  const rw = lastAirfield?.runways?.[0];
+  if (!rw) return null;
+  const A = { lat: rw.thresholdA.lat, lon: rw.thresholdA.lng };
+  const B = { lat: rw.thresholdB.lat, lon: rw.thresholdB.lng };
+  const active = rw.active_end === 'B' ? 'B' : 'A';
+  const thr = active === 'A' ? A : B;
+  const opp = active === 'A' ? B : A;
+  return { rw, active, A, B, thr, opp };
+}
+
+// Radio de medio giro según tipo
+function halfTurnRadiusM(type='') {
+  const T = String(type).toUpperCase();
+  if (T.includes('GLIDER') || T.includes('PLANEADOR')) return 50;
+  if (T.includes('TWIN') || T.includes('BIMOTOR'))    return 100;
+  if (T.includes('JET')  || T.includes('LINEA'))      return 500;
+  return 50; // monomotor liviano
+}
+
+// Estimar GS en m/s (si >60 asumimos km/h y convertimos)
+function estimateGSms(name) {
+  const u = userLocations[name];
+  if (!u) return 25;
+  let v = Number(u.speed) || 0; // front manda km/h
+  if (v > 60) v = v * 1000 / 3600; // km/h -> m/s
+  if (v <= 3) {
+    const T = String(u.type || '').toUpperCase();
+    return T.includes('GLIDER') ? 20 : 25;
+  }
+  return v;
+}
+
+// === ETA a cabecera activa (seg) con penalidad si viene por la opuesta ===
+function computeETASeconds(name) {
+  const g = activeRunwayGeom();
+  const u = userLocations[name];
+  if (!g || !u) return null;
+
+  const v = estimateGSms(name); // m/s
+  if (!v || !isFinite(v) || v <= 0) return null;
+
+  const dThr = getDistance(u.latitude, u.longitude, g.thr.lat, g.thr.lon); // m
+  const dOpp = getDistance(u.latitude, u.longitude, g.opp.lat, g.opp.lon); // m
+
+  // Si está “entrando” por la opuesta, penalizamos con medio giro
+  const extra = dOpp < dThr ? Math.PI * halfTurnRadiusM(u.type || '') : 0;
+  return Math.max(1, Math.round((dThr + extra) / v));
+}
+
 
 // estimar GS (m/s) desde userLocations; si no hay, fallback prudente
 function estimateGSms(name) {
@@ -175,6 +227,32 @@ function planRunwaySequence() {
       runwayState.takeoffs = runwayState.takeoffs.filter(t => t.name !== first.name);
     }
   }
+
+  // --- avisar cambios de turno (después de armar timeline y actualizar prioridades) ---
+  const newLand = runwayState.landings.map(l => l.name);
+  const newTk   = runwayState.takeoffs.map(t => t.name);
+  const oldLand = runwayState.lastOrder.landings || [];
+  const oldTk   = runwayState.lastOrder.takeoffs || [];
+
+  // aterrizajes
+  newLand.forEach((name, idx) => {
+    if (oldLand.indexOf(name) !== idx) {
+      emitToUser(name, 'runway-msg', { text: `Su turno de aterrizaje ahora es #${idx+1}`, key: 'turn-land' });
+    }
+  });
+
+  // despegues
+  newTk.forEach((name, idx) => {
+    if (oldTk.indexOf(name) !== idx) {
+      emitToUser(name, 'runway-msg', { text: `Su turno de despegue ahora es #${idx+1}`, key: 'turn-tk' });
+    }
+  });
+
+  runwayState.lastOrder.landings = newLand;
+  runwayState.lastOrder.takeoffs = newTk;
+
+
+
 }
 
 function publishRunwayState() {
@@ -189,6 +267,18 @@ function publishRunwayState() {
     }
   });
 }
+
+
+// Recompute periódico de ETAs/orden por si cambian sin eventos explícitos
+setInterval(() => {
+  try {
+    if (runwayState.landings.length || runwayState.takeoffs.length) {
+      planRunwaySequence();
+      publishRunwayState();
+    }
+  } catch {}
+}, 3000);
+
 /* =======================================================================================
    ░█▀▀░█░█░█▄█░█░█░█▀▀░█░█░█▀▀░█▀▄░█░█      FIN RUNWAY SCHEDULER (AGREGADO)
    ======================================================================================= */
