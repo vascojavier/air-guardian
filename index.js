@@ -119,15 +119,46 @@ function computeETASeconds(name) {
 }
 
 
-// estimar GS (m/s) desde userLocations; si no hay, fallback prudente
+// estimar GS (m/s) desde userLocations (el frontend envía km/h)
 function estimateGSms(name) {
   const u = userLocations[name];
-  if (!u) return 25; // ~90 km/h
-  if (typeof u.speed === 'number' && u.speed > 3) return u.speed; // asumimos m/s desde GPS
-  // fallback por tipo
-  if ((u.type || '').toUpperCase().includes('GLIDER')) return 20; // ~72 km/h
+  if (!u) return 25; // ~90 km/h ≈ 25 m/s
+  if (typeof u.speed === 'number' && u.speed > 3) {
+    return u.speed / 3.6; // km/h → m/s
+  }
+  const t = (u.type || '').toUpperCase();
+  if (t.includes('GLIDER')) return 20; // ~72 km/h
+  if (t.includes('JET'))    return 70; // ~250 km/h
   return 25;
 }
+
+
+
+// helper: cabecera activa (A o B) soportando formato con runways[0] y 'lng'
+function getActiveThresholdLatLon() {
+  if (!lastAirfield) return null;
+
+  // Formato nuevo: airfield.runways[0].active_end + thresholdA/B { lat, lng }
+  if (Array.isArray(lastAirfield.runways) && lastAirfield.runways.length > 0) {
+    const rw = lastAirfield.runways[0];
+    const end = rw.active_end === 'B' ? 'thresholdB' : 'thresholdA';
+    const thr = rw[end];
+    if (thr && typeof thr.lat === 'number' && (typeof thr.lon === 'number' || typeof thr.lng === 'number')) {
+      return { lat: thr.lat, lon: (typeof thr.lon === 'number' ? thr.lon : thr.lng) };
+    }
+  }
+
+  // Fallback legado: lastAirfield.thresholdA/B {lat, lon|lng} + activeThreshold
+  const thrKey = lastAirfield.activeThreshold === 'B' ? 'thresholdB' : 'thresholdA';
+  const thr = lastAirfield[thrKey];
+  if (thr && typeof thr.lat === 'number' && (typeof thr.lon === 'number' || typeof thr.lng === 'number')) {
+    return { lat: thr.lat, lon: (typeof thr.lon === 'number' ? thr.lon : thr.lng) };
+  }
+
+  return null;
+}
+
+
 
 // ETA a cabecera activa (segundos)
 function computeETASeconds(name) {
@@ -156,6 +187,30 @@ function cleanupInUseIfDone() {
   if (Date.now() > end) runwayState.inUse = null;
 }
 
+// snapshot para avisar cambios de turno
+let lastTurnSnapshot = new Map(); // name -> turnIndex
+  // avisar si cambió el turno de alguien
+  const curr = new Map();
+  runwayState.landings.forEach(l => curr.set(l.name, l.turnIndex));
+
+  for (const [name, turn] of curr.entries()) {
+    const prev = lastTurnSnapshot.get(name);
+    if (prev == null || prev !== turn) {
+      // enviar banner sólo a ese usuario
+      const info = userLocations[name];
+      if (info && info.socketId) {
+        io.to(info.socketId).emit('runway-banners', [{
+          id: `turn-${Date.now()}`,
+          kind: 'turn',
+          text: `Tu turno ahora es ${turn}`,
+          ttlMs: 6000
+        }]);
+      }
+    }
+  }
+  lastTurnSnapshot = curr;
+
+  
 // (re)planificar secuencia usando lastAirfield
 function planRunwaySequence() {
   cleanupInUseIfDone();
@@ -171,6 +226,12 @@ function planRunwaySequence() {
   runwayState.landings.sort((a, b) =>
     (a.priority - b.priority) || ((a.etaSec ?? 1e9) - (b.etaSec ?? 1e9))
   );
+
+  // numerar turnos SIEMPRE según el orden actual
+  runwayState.landings.forEach((l, idx) => {
+    l.turnIndex = idx + 1;
+  });
+
 
   // construir slots de aterrizaje con separación mínima
   let lastLandingAt = null;
@@ -251,6 +312,7 @@ function planRunwaySequence() {
   runwayState.lastOrder.landings = newLand;
   runwayState.lastOrder.takeoffs = newTk;
 
+ 
 
 
 }
