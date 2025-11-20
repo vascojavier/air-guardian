@@ -108,35 +108,47 @@ export default function IndexScreen() {
     }
   }, [aircraftModel]);
 
-  useEffect(() => {
-    const modeloFinal = aircraftModel === 'otro' ? otroModelo.trim() : aircraftModel;
+useEffect(() => {
+  const modeloFinal = aircraftModel === 'otro' ? otroModelo.trim() : aircraftModel;
 
-    let icono = aircraftType === 'glider' ? '1' : '2'; // default depende del tipo
+  let icono = aircraftType === 'glider' ? '1' : '2'; // default depende del tipo
 
-    // Buscar en aircraftList
+  // 🪂 Casos especiales sin motor / con motor
+  if (modeloFinal === 'Parapente') {
+    icono = '8';
+  } else if (modeloFinal === 'Paramotor') {
+    icono = '9';
+  } else if (modeloFinal === 'Ala delta') {
+    icono = '10';
+  } else if (modeloFinal === 'Ala delta motor') {
+    icono = '11';
+  } else {
+    // Buscar en aircraftList (resto de modelos)
     const encontrado = aircraftList.find((a) => a.name === modeloFinal);
     if (encontrado) {
       icono = `${encontrado.category}`; // Ej: '3'
     }
+  }
 
-    // Si tiene ícono personalizado guardado, lo prioriza
-    const iconoGuardado = iconosPersonalizados[modeloFinal];
-    if (iconoGuardado) {
-      icono = iconoGuardado;
-    }
+  // Si tiene ícono personalizado guardado, lo prioriza
+  const iconoGuardado = iconosPersonalizados[modeloFinal];
+  if (iconoGuardado) {
+    icono = iconoGuardado;
+  }
 
-    // Si el usuario eligió un customIcon (manual), se usa
-    if (customIcon.trim() && iconMap[customIcon.trim()]) {
-      icono = customIcon.trim();
-    }
+  // Si el usuario eligió un customIcon (manual), se usa
+  if (customIcon.trim() && iconMap[customIcon.trim()]) {
+    icono = customIcon.trim();
+  }
 
-    // Fallback final a categoría 2 si nada es válido
-    if (!iconMap[icono]) {
-      icono = '2';
-    }
+  // Fallback final a categoría 2 si nada es válido
+  if (!iconMap[icono]) {
+    icono = '2';
+  }
 
-    setIconoPreview(icono);
-  }, [aircraftType, aircraftModel, otroModelo, customIcon, iconosPersonalizados]);
+  setIconoPreview(icono);
+}, [aircraftType, aircraftModel, otroModelo, customIcon, iconosPersonalizados]);
+
 
   const eliminarModelo = async (modelo: string) => {
     try {
@@ -280,13 +292,36 @@ export default function IndexScreen() {
         {aircraftType !== '' && (
           <>
             <Text style={styles.label}>Modelo de avión:</Text>
-            <Picker selectedValue={aircraftModel} onValueChange={setAircraftModel} style={styles.picker}>
+            <Picker
+              selectedValue={aircraftModel}
+              onValueChange={setAircraftModel}
+              style={styles.picker}
+            >
               <Picker.Item label="Seleccionar..." value="" />
+              {/* 👉 "Otro..." bien arriba, para evitar scroll eterno */}
+              <Picker.Item label="Otro..." value="otro" />
+
+              {aircraftType === 'glider' && (
+                <>
+                  {/* 🌬️ Sin motor */}
+                  <Picker.Item label="Parapente" value="Parapente" />
+                  <Picker.Item label="Ala delta" value="Ala delta" />
+                </>
+              )}
+
+              {aircraftType === 'motor' && (
+                <>
+                  {/* 🔥 Con motor */}
+                  <Picker.Item label="Paramotor" value="Paramotor" />
+                  <Picker.Item label="Ala delta motor" value="Ala delta motor" />
+                </>
+              )}
+
               {(aircraftType === 'motor' ? modelosMotor : modelosGlider).map((modelo) => (
                 <Picker.Item key={modelo} label={modelo} value={modelo} />
               ))}
-              <Picker.Item label="Otro..." value="otro" />
             </Picker>
+
 
             {aircraftModel === 'otro' && (
               <>
@@ -301,8 +336,8 @@ export default function IndexScreen() {
 
                 <Text style={styles.label}>Elegí una categoría de avión:</Text>
                 <View style={styles.iconGallery}>
-                  {[1, 2, 3, 4, 5, 6, 7].map((num) => {
-                    const iconName = `${num}`;
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((num) => {
+                    const iconName = `${num}`; // '1', '2', ..., '11'
                     return (
                       <TouchableOpacity key={iconName} onPress={() => setCustomIcon(iconName)}>
                         <Image
@@ -316,6 +351,7 @@ export default function IndexScreen() {
                     );
                   })}
                 </View>
+
               </>
             )}
 

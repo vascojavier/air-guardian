@@ -12,4 +12,5 @@ export type Warning = {
   aircraftIcon?: string;
   callsign?: string;
   type?: string;
+  ops?: string; 
 };

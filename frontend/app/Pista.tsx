@@ -116,6 +116,11 @@ export default function PistaScreen() {
   const [showDetails, setShowDetails] = useState(true);
   const [beaconB1, setBeaconB1] = useState<LatLng | null>(null);
   const [beaconB2, setBeaconB2] = useState<LatLng | null>(null);
+  // APRON (guardado y edición)
+  const [apron, setApron] = useState<LatLng | null>(null);          // pin guardado
+  const [apronEdit, setApronEdit] = useState(false);                // modo edición
+  const [tempApron, setTempApron] = useState<LatLng | null>(null);  // pin temporal
+
 
 
   // Asegurar conexión cuando entra a Pista
@@ -132,6 +137,12 @@ export default function PistaScreen() {
         if (afRaw) {
           const af: Airfield = JSON.parse(afRaw);
           const rw = af.runways?.[0];
+
+          // ⬇️ cargar APRON si existe
+          const afApron = (af as any)?.apron;
+          if (afApron && typeof afApron.lat === 'number' && typeof afApron.lng === 'number') {
+            setApron({ latitude: afApron.lat, longitude: afApron.lng });
+          }
           if (rw) {
             const A: LatLng = { latitude: rw.thresholdA.lat, longitude: rw.thresholdA.lng };
             const B: LatLng = { latitude: rw.thresholdB.lat, longitude: rw.thresholdB.lng };
@@ -159,6 +170,14 @@ export default function PistaScreen() {
               const { B1, B2 } = makeDefaultBeacons(A, B, active);
               setBeaconB1(B1); setBeaconB2(B2);
             }
+            // ← APRON desde airfield o desde runway, si existe
+              try {
+                const apr: any = (af as any)?.apron || (rw as any)?.apron;
+                if (apr && typeof apr.lat === 'number' && typeof apr.lng === 'number') {
+                  setApron({ latitude: apr.lat, longitude: apr.lng });
+                }
+              } catch {}
+
             // dentro de cargar(), justo después de calcular y setear A/B/activa/rumbo/beacons:
             try {
               socket.emit('airfield-upsert', { airfield: af });   // 👈 re-publicar
@@ -191,17 +210,26 @@ export default function PistaScreen() {
   }, [socket]);
 
   // ---------------------- Handlers ----------------------
-  const handleMapPress = async (event: MapPressEvent) => {
-    if (role !== 'aeroclub' || !modoSeteo) return;
-    const coords = event.nativeEvent.coordinate;
-    if (!cabeceraA) {
-      setCabeceraA(coords);
-      Alert.alert('Cabecera A definida');
-    } else if (!cabeceraB) {
-      setCabeceraB(coords);
-      setShowModal(true);
-    }
-  };
+const handleMapPress = async (event: MapPressEvent) => {
+  const coords = event.nativeEvent.coordinate;
+
+  // 1) Modo APRON tiene prioridad
+  if (apronEdit) {
+    setTempApron(coords);
+    return;
+  }
+
+  // 2) Modo seteo de pista (A/B)
+  if (role !== 'aeroclub' || !modoSeteo) return;
+  if (!cabeceraA) {
+    setCabeceraA(coords);
+    Alert.alert('Cabecera A definida');
+  } else if (!cabeceraB) {
+    setCabeceraB(coords);
+    setShowModal(true);
+  }
+};
+
 
 
 // Poné esto ARRIBA del componente (o justo antes de cambiarCabecera):
@@ -250,6 +278,7 @@ async function emitAirfieldUpsertReliable(af: Airfield, reuse?: ReturnType<typeo
 }
 
 async function persistBeaconsAndEmit(b1: LatLng, b2: LatLng) {
+  
   const raw = await AsyncStorage.getItem('airfieldActive');
   if (!raw) return;
   const af: Airfield = JSON.parse(raw);
@@ -264,6 +293,34 @@ async function persistBeaconsAndEmit(b1: LatLng, b2: LatLng) {
 
   try { socket?.emit?.('airfield-upsert', { airfield: af }); } catch {}
 }
+
+async function persistApronAndEmit(p: LatLng) {
+  const raw = await AsyncStorage.getItem('airfieldActive');
+  if (!raw) return;
+  const af: Airfield = JSON.parse(raw);
+  if (!af?.runways?.[0]) return;
+
+  // Guardar APRON a nivel airfield (recomendado)
+  (af as any).apron = { lat: p.latitude, lng: p.longitude };
+
+  af.lastUpdated = Date.now();
+  await AsyncStorage.setItem('airfieldActive', JSON.stringify(af));
+  try { socket?.emit?.('airfield-upsert', { airfield: af }); } catch {}
+}
+
+async function saveApronPoint() {
+  if (!tempApron) return;
+  setApron(tempApron);
+  await persistApronAndEmit(tempApron);
+  setApronEdit(false);
+  setTempApron(null);
+}
+
+function cancelApronEdit() {
+  setApronEdit(false);
+  setTempApron(null);
+}
+
 
 
 const cambiarCabecera = async () => {
@@ -358,7 +415,12 @@ const cambiarCabecera = async () => {
       runways: [runway],
       lastUpdated: Date.now(),
       source: 'manual',
+      ...(apron
+        ? { apron: { lat: apron.latitude, lng: apron.longitude } }
+        : {}),
     };
+
+    if (apron) (airfield as any).apron = { lat: apron.latitude, lng: apron.longitude };
 
     try {
       // Guardar NUEVO modelo
@@ -474,6 +536,24 @@ const cambiarCabecera = async () => {
           </Marker>
         )}
 
+        {/* APRON definitivo */}
+        {apron && (
+          <Marker coordinate={apron} title="APRON">
+            <View style={{ backgroundColor: '#FF9800', padding: 4, borderRadius: 10 }}>
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 10 }}>APRON</Text>
+            </View>
+          </Marker>
+        )}
+
+        {/* APRON temporal (cuando estás marcando) */}
+        {apronEdit && tempApron && (
+          <Marker coordinate={tempApron} title="APRON (nuevo)">
+            <View style={{ backgroundColor: '#FFC107', padding: 4, borderRadius: 10 }}>
+              <Text style={{ color: '#333', fontWeight: '700', fontSize: 10 }}>APRON*</Text>
+            </View>
+          </Marker>
+        )}
+
 
 
         {cabeceraA && cabeceraB && cabeceraActiva && (
@@ -531,6 +611,15 @@ const cambiarCabecera = async () => {
             />
 
             <Button
+              title={apronEdit ? 'Cancelar marcado de APRON' : '📍 Marcar APRON'}
+              onPress={() => {
+                setApronEdit(!apronEdit);
+                setTempApron(null);
+              }}
+            />
+
+
+            <Button
               title={modoSeteo ? 'Cancelar Seteo de Pista' : 'Setear nueva pista'}
               onPress={() => {
                 setCabeceraA(null);
@@ -544,7 +633,24 @@ const cambiarCabecera = async () => {
             />
           </>
         )}
+
+
+
+
       </View>
+
+      {apronEdit && tempApron && (
+  <View style={styles.toolbar}>
+    <Text style={{ fontWeight: '700', marginBottom: 8 }}>
+      Nueva posición de APRON seleccionada
+    </Text>
+    <View style={{ flexDirection: 'row', gap: 8 }}>
+      <Button title="Guardar" onPress={saveApronPoint} />
+      <Button title="Cancelar" onPress={cancelApronEdit} />
+    </View>
+  </View>
+)}
+
 
     </View>
   );
@@ -611,4 +717,18 @@ const styles = StyleSheet.create({
     padding: 20,
     elevation: 5,
   },
+  toolbar: {
+  position: 'absolute',
+  left: 10,
+  right: 10,
+  bottom: 120,
+  backgroundColor: 'white',
+  borderRadius: 12,
+  padding: 10,
+  elevation: 4,
+  shadowColor: '#000',
+  shadowOpacity: 0.1,
+  shadowRadius: 4,
+},
+
 });

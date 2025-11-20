@@ -3,37 +3,36 @@ import { View, Text, StyleSheet } from 'react-native';
 import { Plane } from '../../types/Plane';
 
 type Props = {
-  aircraft: Plane;
+  // Permitimos que el objeto traiga opcionalmente "ops"
+  aircraft: Plane & { ops?: string };
   distance: number;
 };
 
 export default function TrafficWarningCard({ aircraft, distance }: Props) {
   if (!aircraft) return null;
 
-    // Determinar estilos y texto según el nivel de alerta
-    // Determinar estilos y texto según el nivel de alerta
-    let bgColor = '#ffffff'; // valor neutro por defecto
-    let borderColor = '#cccccc';
-    let textColor = '#333333';
-    let title = aircraft.name || 'Avión seleccionado';
+  // Estilos y título según alerta
+  let bgColor = '#ffffff';
+  let borderColor = '#cccccc';
+  let textColor = '#333333';
+  let title = aircraft.name || 'Avión seleccionado';
 
-    if (aircraft.alertLevel === 'TA') {
-      bgColor = '#fff3cd'; // amarillo claro
-      borderColor = '#ffeeba';
-      textColor = '#856404';
-      title = '⚠️ Tráfico cercano (TA)';
-    } else if (aircraft.alertLevel === 'RA_LOW') {
-      bgColor = '#ffe5b4'; // naranja claro
-      borderColor = '#ffbb66';
-      textColor = '#7a3e00';
-      title = '⚠️ Conflicto potencial (RA < 3 min)';
-    } else if (aircraft.alertLevel === 'RA_HIGH') {
-      bgColor = '#f8d7da'; // rojo claro
-      borderColor = '#f5c6cb';
-      textColor = '#721c24';
-      title = '🚨 Riesgo inminente (RA < 1 min)';
-    }
-
+  if (aircraft.alertLevel === 'TA') {
+    bgColor = '#fff3cd';
+    borderColor = '#ffeeba';
+    textColor = '#856404';
+    title = '⚠️ Tráfico cercano (TA)';
+  } else if (aircraft.alertLevel === 'RA_LOW') {
+    bgColor = '#ffe5b4';
+    borderColor = '#ffbb66';
+    textColor = '#7a3e00';
+    title = '⚠️ Conflicto potencial (RA < 3 min)';
+  } else if (aircraft.alertLevel === 'RA_HIGH') {
+    bgColor = '#f8d7da';
+    borderColor = '#f5c6cb';
+    textColor = '#721c24';
+    title = '🚨 Riesgo inminente (RA < 1 min)';
+  }
 
   return (
     <View style={[styles.container, { backgroundColor: bgColor, borderColor }]}>
@@ -47,6 +46,13 @@ export default function TrafficWarningCard({ aircraft, distance }: Props) {
       <Text style={[styles.label, { color: textColor }]}>
         Piloto: <Text style={styles.value}>{aircraft.name}</Text>
       </Text>
+
+      {/* ✅ NUEVO: línea con el estado OPS si viene disponible */}
+      {aircraft.ops ? (
+        <Text style={[styles.label, { color: textColor }]}>
+          OPS: <Text style={styles.value}>{aircraft.ops}</Text>
+        </Text>
+      ) : null}
 
       <Text style={[styles.label, { color: textColor }]}>
         Distancia: <Text style={styles.value}>{Math.round(distance)} m</Text>

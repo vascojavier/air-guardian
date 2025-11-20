@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react';
-import { View, Text, StyleSheet, Dimensions, TouchableOpacity, Image, Alert, Platform, AppState, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, Dimensions, TouchableOpacity, Image, Image as RNImage, Alert, Platform, AppState, ScrollView } from 'react-native';
+//                                             ^^^^^^^^^^^^^^  agrega esto
+
 import MapView, { Marker, PROVIDER_GOOGLE, Polyline } from 'react-native-maps';
 import Slider from '@react-native-community/slider';
 import * as Location from 'expo-location';
@@ -10,7 +12,7 @@ import { normalizeModelToIcon } from '../utils/normalizeModelToIcon';
 import TrafficWarningCard from './components/TrafficWarningCard';
 import { Plane } from '../types/Plane';
 export const BACKEND_URL = 'https://air-guardian-backend.onrender.com';
-export const SERVER_URL  = BACKEND_URL; // alias
+export const SERVER_URL  = BACKEND_URL; // aliass
 import io from "socket.io-client";
 import { socket } from '../utils/socket';
 //import { calcularWarningLocalMasPeligroso } from '../data/WarningSelector';
@@ -19,6 +21,91 @@ import { useFocusEffect } from "@react-navigation/native";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Airfield } from '../types/airfield';
 import * as Speech from 'expo-speech';
+import { iconMap } from '../utils/iconMap';
+
+function iconKeyFor(aircraftIcon?: string, alert?: 'none'|'TA'|'RA_LOW'|'RA_HIGH') {
+  // normaliza: saca .png si viene como '2.png'
+  const base = (aircraftIcon || '2').replace(/\.png$/i, '');
+  if (alert === 'RA_HIGH') return `${base}red`;
+  if (alert === 'RA_LOW')  return `${base}orange`;
+  if (alert === 'TA')      return `${base}yellow`;
+  return base; // none
+}
+
+// === PlaneIcon: rota el bitmap en su centro (arregla descentrado en tablet/rotación) ===
+const ICON_SIZE = 56;
+
+const PlaneIcon = ({ source, heading = 0 }: { source: any; heading?: number }) => {
+  const hdg = Number.isFinite(heading) ? heading : 0;
+
+  let ok = false;
+  try {
+    ok = !!RNImage.resolveAssetSource(source);
+  } catch {
+    ok = false;
+  }
+
+  if (!ok) {
+    // fallback visible SIEMPRE
+    return (
+      <View
+        style={{
+          width: ICON_SIZE,
+          height: ICON_SIZE,
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+        collapsable={false}
+        pointerEvents="none"
+      >
+        <View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: '#2979FF' }} />
+      </View>
+    );
+  }
+
+  return (
+    <View
+      style={{
+        width: ICON_SIZE,
+        height: ICON_SIZE,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+      collapsable={false}
+      pointerEvents="none"
+    >
+      <RNImage
+        source={source}
+        style={{
+          width: ICON_SIZE,
+          height: ICON_SIZE,
+          transform: [
+            { rotate: `${hdg}deg` },
+            { scale: 0.4 },             // ⬅️ hace el avión más chico dentro de esos 40 px
+          ],
+          backfaceVisibility: 'hidden',
+        }}
+
+        resizeMode="contain"
+      />
+
+      {/* 🔴 PUNTO MAGENTA EN EL CENTRO DEL PNG */}
+      <View
+        style={{
+          position: 'absolute',
+          width: 6,
+          height: 6,
+          borderRadius: 3,
+          backgroundColor: 'magenta',
+        }}
+      />
+    </View>
+  );
+};
+
+
+
+
 
 
 type OpsState =
@@ -73,7 +160,57 @@ const RA_MIN_DIST_M = 2000;   // antes 1500 m
 const RA_VSEP_MAX_M = 300;    // igual que antes
 const RA_HIGH_TTI_S = 60;
 const RA_LOW_TTI_S  = 180;
+// --- Parámetros de TA ---
+const TA_RADIUS_M = 2000; // antes se usaban 3000m hardcodeados
 
+// TA extra
+const TA_HYPER_M = 300;    // hiper-cercanía: siempre importante, aunque se aleje
+const TA_VSEP_MAX_M = 400; // máx diferencia vertical para considerar TA
+
+
+// --- Touch & Go / pegajosidad de tierra ---
+const TOUCHGO_AGL_M = 12;          // margen por error GPS (~10–15 m)
+const TOUCHGO_HYST_MS = 3000;      // sostener AGL>umbral 3 s
+const TOUCHGO_MIN_SPEED_KMH = 70;  // velocidad mínima “de vuelo”
+const GROUND_STICK_MS = 12000;     // no “volver a volar” dentro de 12 s tras estar en tierra
+
+const lightMapStyle = [
+  { elementType: 'geometry', stylers: [{ color: '#f5f5f5' }] },
+  { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#616161' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#f5f5f5' }] },
+
+  {
+    featureType: 'poi',
+    elementType: 'geometry',
+    stylers: [{ color: '#eeeeee' }],
+  },
+  {
+    featureType: 'poi.park',
+    elementType: 'geometry',
+    stylers: [{ color: '#e5f5e0' }],
+  },
+  {
+    featureType: 'road',
+    elementType: 'geometry',
+    stylers: [{ color: '#ffffff' }],
+  },
+  {
+    featureType: 'road.highway',
+    elementType: 'geometry',
+    stylers: [{ color: '#dadada' }],
+  },
+  {
+    featureType: 'transit',
+    elementType: 'geometry',
+    stylers: [{ color: '#e5e5e5' }],
+  },
+  {
+    featureType: 'water',
+    elementType: 'geometry',
+    stylers: [{ color: '#c9e6ff' }],
+  },
+];
 
 
 const Radar = () => {
@@ -89,6 +226,12 @@ const Radar = () => {
   const lastWarningTimeRef = useRef<Record<string, number>>({});
   const backendDistanceRef = useRef<Record<string, number>>({});
   const selectedHoldUntilRef = useRef<number>(0);
+  const groundRefAltMSLRef = useRef<number | null>(null);
+  const lastGroundAtRef = useRef<number>(0);
+  const airborneCandidateSinceRef = useRef<number | null>(null);
+  const lastGroundSeenAtRef = useRef<number>(Date.now());
+
+
   
 
 
@@ -146,8 +289,31 @@ const Radar = () => {
       timeline?: any[];
       serverTime?: number;
     }
+    
   }>(null);
   
+
+  // === Helper: forzar emisión inmediata de OPS ===
+function emitOpsNow(next: OpsState) {
+  const now = Date.now();
+  if (lastOpsStateRef.current !== next) {
+    lastOpsStateRef.current = next;
+    lastOpsStateTsRef.current = now;
+    socketRef.current?.emit('ops/state', {
+      name: username,
+      state: next,
+      aux: {
+        airportId: (airfield as any)?.icao || (airfield as any)?.id || (airfield as any)?.name || '',
+        rwyIdent: (rw?.active_end === 'B' ? (rw?.identB ?? '') : (rw?.identA ?? '')) || '',
+        aglM: getAGLmeters(),
+        onRunway: isOnRunwayStrip(),
+        nearHoldShort: isNearThreshold((rw?.active_end === 'B' ? 'B' : 'A') as any, 100),
+      },
+    });
+    console.log('[OPS] Forced emit', next);
+  }
+}
+
 
 
   const [zoom, setZoom] = useState({ latitudeDelta: 0.1, longitudeDelta: 0.1 });
@@ -228,6 +394,8 @@ useEffect(() => {
 
 const [track, setTrack] = useState<LatLon[]>([]);
 const [traffic, setTraffic] = useState<Plane[]>([]);
+
+
 // Secuencia/slots (de sequence-update)
 const [slots, setSlots] = useState<Array<{opId:string; type:'ARR'|'DEP'; name:string; startMs:number; endMs:number; frozen:boolean;}>>([]);
 // Target de navegación que llega por ATC (o por tu lógica local)
@@ -243,6 +411,11 @@ const finalLockedRef = useRef(false);
 const lastOpsStateRef = useRef<OpsState | null>(null);
 const lastOpsStateTsRef = useRef<number>(0);
 const OPS_DWELL_MS = 4000; // permanecer 4s antes de anunciar cambio
+// Mantener visible el APRON hasta volver a volar
+const apronLatchRef = useRef(false);
+const lastOnRunwayAtRef = useRef<number>(0);
+
+
 
 
 
@@ -284,6 +457,55 @@ const runwayMid = (A_runway && B_runway)
     if (!rw) return null;
     return rw.active_end === 'B' ? B_runway : A_runway;
   }, [rw, A_runway, B_runway]);
+
+    // === APRON/MANGA: punto objetivo para liberar pista/taxiar ===
+  function getApronPoint() : LatLon | null {
+    // 1) Preferencia: runway.apron si existe
+    const apr = (rw as any)?.apron;
+    if (apr && typeof apr.lat === 'number' && typeof apr.lng === 'number') {
+      return { latitude: apr.lat, longitude: apr.lng };
+    }
+    // 2) Alternativa: airfield.apron
+    const afApr = (airfield as any)?.apron;
+    if (afApr && typeof afApr.lat === 'number' && typeof afApr.lng === 'number') {
+      return { latitude: afApr.lat, longitude: afApr.lng };
+    }
+    // 3) Fallback: pequeño offset lateral desde la cabecera activa
+    if (activeThreshold) {
+      return {
+        latitude: activeThreshold.latitude + 0.001, // ~110 m
+        longitude: activeThreshold.longitude + 0.001
+      };
+    }
+    return null;
+  }
+
+  // === Helper: distancia a APRON (m) ===
+function apronDistanceM(p:{lat:number; lon:number}): number {
+  const apr = getApronPoint();
+  if (!apr) return Infinity;
+  return getDistance(p.lat, p.lon, apr.latitude, apr.longitude);
+}
+
+// Mostrar APRON sólo en cabecera o al liberar pista, y mantenerlo (latch) hasta despegar
+const shouldShowApronMarker = useMemo(() => {
+  if (!rw) return false;
+
+  // 1) Estados de tierra visibles
+  const st = lastOpsStateRef.current as OpsState | null;
+  if (st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON' || st === 'APRON_STOP') return true;
+
+  // 2) Liberando pista (sobre pista y lento)
+  const freeingRunway = isOnRunwayStrip() && (myPlane?.speed ?? 0) < 40;
+  if (freeingRunway) return true;
+
+  // 3) Latch activo → mantener visible hasta despegar/taxiar a cabecera
+  if (apronLatchRef.current) return true;
+
+  return false;
+}, [rw, myPlane.lat, myPlane.lon, myPlane.speed, runwayState]);
+
+
 
   // --- NAV: anti-histeresis ---
 const navPhaseRef = useRef<'B2'|'B1'|'FINAL'|null>(null);
@@ -389,7 +611,9 @@ function isOnRunwayStrip(): boolean {
     { lat: B_runway.latitude, lon: B_runway.longitude }
   );
   // ancho de pista + margen (aprox 40m)
-  return d <= 40;
+// ancho de pista + margen (ajustado a 30 m para menos falsos positivos)
+  return d <= 30;
+
 }
 
 function isNearThreshold(end:'A'|'B', radiusM=60): boolean {
@@ -398,11 +622,21 @@ function isNearThreshold(end:'A'|'B', radiusM=60): boolean {
   return getDistance(myPlane.lat, myPlane.lon, thr.latitude, thr.longitude) <= radiusM;
 }
 
-function getAGLmeters(): number {
-  const elev = (airfield as any)?.elevation ?? (runwayState?.airfield?.elevation ?? 0);
-  const altMSL = myPlane?.alt ?? 0;
-  return Math.max(0, altMSL - elev);
-}
+  function getAGLmeters(): number {
+    // preferí elevación del aeródromo; si no existe, usá la ref de suelo
+    const elevFromField = (airfield as any)?.elevation ?? (runwayState?.airfield?.elevation ?? null);
+    const altMSL = myPlane?.alt ?? 0;
+
+    // si estoy sobre la pista y a baja velocidad, "calibro" referencia de suelo
+    if (isOnRunwayStrip() && (myPlane?.speed ?? 0) < 80) {
+      groundRefAltMSLRef.current = altMSL;
+    }
+
+    const ref = elevFromField ?? groundRefAltMSLRef.current;
+    const agl = ref != null ? (altMSL - ref) : altMSL; // fallback: MSL si no hay ref
+    return Math.max(0, agl);
+  }
+
 
 function isStopped(): boolean {
   // velocidad del estado está en km/h
@@ -485,6 +719,52 @@ const PERMIT_RADIUS_M: Record<Cat, number> = {
   AIRLINER:    8000,   // línea (sugerencia)
 };
 
+  // ⬇️ PEGAR DEBAJO de const PERMIT_RADIUS_M
+  const GROUND_OPS = new Set<OpsState>([
+    'RUNWAY_CLEAR',
+    'TAXI_APRON',
+    'APRON_STOP',
+    'RUNWAY_OCCUPIED',
+    'TAXI_TO_RWY',
+    'HOLD_SHORT'
+  ]);
+
+
+function iAmGroundish(): boolean {
+  const ops = lastOpsStateRef.current as OpsState | null;
+  if (ops && GROUND_OPS.has(ops)) return true;
+
+  const agl = getAGLmeters();
+  // Sólo considerar tierra por geometría de pista + AGL bajo
+  if (isOnRunwayStrip() && agl < 30) return true;
+
+  return false;
+}
+
+
+
+function getOpsOf(name: string): OpsState | null {
+  // El backend manda un mapa opsStates opcional dentro de runwayState.state
+  const map = (runwayState as any)?.state?.opsStates || {};
+  const st = map?.[name];
+  return (typeof st === 'string') ? (st as OpsState) : null;
+}
+
+function inferOpsForDisplay(p: Plane): OpsState | null {
+  const fieldElev = (airfield as any)?.elevation ?? (runwayState?.airfield?.elevation ?? 0);
+  const aglP = Math.max(0, (p.alt ?? 0) - fieldElev);
+  const nearApron = apronDistanceM({ lat: p.lat, lon: p.lon }) <= 30;
+
+  // Para "onRunway" sólo podemos inferirlo bien para MI avión
+  const onRunwayApprox = isOnRunwayStrip() && p.id === (myPlane?.id || username);
+
+  if (onRunwayApprox && aglP < 10) return 'RUNWAY_OCCUPIED';
+  if (nearApron) return 'APRON_STOP';
+  if (!onRunwayApprox && aglP < 30 && (p.speed ?? 0) >= 5) return 'TAXI_APRON';
+  return null;
+}
+
+
 function distToActiveThresholdM(): number | null {
   if (!rw) return null;
   const end = rw.active_end === 'B' ? 'B' : 'A';
@@ -495,14 +775,16 @@ function distToActiveThresholdM(): number | null {
 
 
 // === RUNWAY: acción por defecto según altura relativa ===
-const defaultActionForMe = () => {
-  const planeAlt = (myPlane?.alt ?? 0);
+// Usamos function declaration para que se hoistee y pueda usarse antes.
+function defaultActionForMe(): 'land' | 'takeoff' {
+  const planeAlt = myPlane?.alt ?? 0;
   const fieldElev =
     (airfield as any)?.elevation ??
     (runwayState?.airfield?.elevation ?? 0); // si no hay, usamos 0
   const altRel = Math.max(0, planeAlt - fieldElev);
   return altRel > 10 ? 'land' : 'takeoff';
-};
+}
+
 
 // === RUNWAY: pedidos al backend ===
 const requestLanding = () => {
@@ -558,11 +840,19 @@ const markRunwayClear = () => {
 };
 
 
-// === RUNWAY: wrappers para setear flags y banners ===
-const requestLandingLabel = () => {
-  requestLanding();
-  landingRequestedRef.current = true;
-};
+  // === RUNWAY: wrappers para setear flags y banners ===
+  const requestLandingLabel = () => {
+    // 🔓 soltar APRON al iniciar aproximación
+    apronLatchRef.current = false;
+
+    // “romper” cualquier pegajosidad de tierra por AGL ruidoso
+    lastGroundSeenAtRef.current = 0;
+    airborneCandidateSinceRef.current = Date.now();
+
+    requestLanding();
+    landingRequestedRef.current = true;
+  };
+
 
 const requestTakeoffLabel = () => {
   requestTakeoff(false);
@@ -650,16 +940,7 @@ useFocusEffect(
   }, [])
 );
 
-//   useEffect(() => {
-//     if (
-//       prioritizedWarning &&
-//       socketRef.current &&
-//       ['TA', 'RA_LOW', 'RA_HIGH'].includes(prioritizedWarning.alertLevel)
-//     ) {
-//       socketRef.current.emit('warning', prioritizedWarning);
-//       console.log('📡 Warning enviado al backend:', prioritizedWarning);
-//     }
-//   }, [prioritizedWarning]);
+
 
 const toggleFollowMe = () => setFollowMe(prev => !prev);
 const hasWarning = !!(prioritizedWarning || selected || conflict);
@@ -677,16 +958,25 @@ const getDistanceTo = (plane: Plane): number => {
 const blockUpdateUntil = useRef<number>(0);
 
 useEffect(() => {
-  const trafficWithoutMe = planes.filter(p => p.id !== myPlane?.id);
-  if (!myPlane || trafficWithoutMe.length === 0) return;
+  if (!myPlane) return;
+
+  const trafficWithoutMe = traffic.filter(p => p.id !== myPlane.id);
+  if (trafficWithoutMe.length === 0) {
+    setPlanes([]);
+    return;
+  }
 
   const timeSteps = Array.from({ length: 36 }, (_, i) => (i + 1) * 5);
   let selectedConflict: Plane | null = null;
   let selectedConflictLevel: 'RA_HIGH' | 'RA_LOW' | undefined = undefined;
 
-  let selectedNearby: Plane | null = null;
   let minTimeToImpact = Infinity;
-  let minProxDist = Infinity;
+  let bestTA: {
+    plane: Plane;
+    distance: number;
+    tauSec: number;
+    score: number;
+  } | null = null;
 
   const toRad = (deg: number) => (deg * Math.PI) / 180;
   const toDeg = (rad: number) => (rad * 180) / Math.PI;
@@ -702,26 +992,129 @@ useEffect(() => {
     return d > 180 ? 360 - d : d;
   };
 
+  // Guard: si ya estoy en tierra/taxi, no calcules TA/RA y limpia UI
+  {
+    const myOps = lastOpsStateRef.current as OpsState | null;
+    if (myOps && GROUND_OPS.has(myOps)) {
+      if (prioritizedWarning) setPrioritizedWarning(null);
+      if (conflict) setConflict(null);
+      if (selected) setSelected(null);
+      setPlanes(prev =>
+        prev.map(p => ({ ...p, alertLevel: 'none', timeToImpact: undefined }))
+      );
+      return;
+    }
+  }
+
   for (const plane of trafficWithoutMe) {
     const distanceNow = getDistance(myPlane.lat, myPlane.lon, plane.lat, plane.lon);
 
-    // TA: tráfico cercano
-    if (distanceNow < 3000 && plane.speed > 30) {
-      if (distanceNow < minProxDist) {
-        selectedNearby = plane;
-        minProxDist = distanceNow;
+    // ⛔️ No consideres TA/RA contra aviones que ya están fuera de pista (en tierra)
+    const otherOps = getOpsOf(plane.id);
+    if (otherOps && GROUND_OPS.has(otherOps)) {
+      continue;
+    }
+
+    // === TA: tráfico cercano con prioridad tipo TCAS ===
+    {
+      const myAgl = getAGLmeters();
+      const otherOps2 = getOpsOf(plane.id);
+      const otherIsGround = otherOps2 && GROUND_OPS.has(otherOps2);
+
+      const fieldElev =
+        (airfield as any)?.elevation ?? (runwayState?.airfield?.elevation ?? 0);
+      const otherAgl = Math.max(0, (plane.alt ?? 0) - fieldElev);
+
+      const vertSep = Math.abs((plane.alt ?? 0) - (myPlane.alt ?? 0));
+      const hyperClose = distanceNow <= TA_HYPER_M;
+      const withinVertical = vertSep <= TA_VSEP_MAX_M;
+
+      // Estimación de tau (tiempo hasta mínima distancia) usando las mismas muestras que RA
+      const futureDistancesTA: number[] = [];
+      for (const t of timeSteps) {
+        const myF = getFuturePosition(
+          myPlane.lat,
+          myPlane.lon,
+          myPlane.heading,
+          myPlane.speed,
+          t
+        );
+        const thF = getFuturePosition(
+          plane.lat,
+          plane.lon,
+          plane.heading || 0,
+          plane.speed || 0,
+          t
+        );
+        futureDistancesTA.push(
+          getDistance(myF.latitude, myF.longitude, thF.latitude, thF.longitude)
+        );
+      }
+      const minDistTA = Math.min(...futureDistancesTA);
+      const idxMinTA  = futureDistancesTA.indexOf(minDistTA);
+      const tauSec    = timeSteps[idxMinTA]; // tiempo hasta la mínima separación
+
+      const distance5s = futureDistancesTA[0] ?? distanceNow;
+      const approaching = distance5s < (distanceNow - 15); // se acerca si en 5s está sensiblemente más cerca
+
+      // Condición de TA: en rango, separación vertical razonable y ambos "en vuelo"
+      const TAeligible =
+        distanceNow < TA_RADIUS_M &&
+        withinVertical &&
+        (plane.speed ?? 0) > 30 &&
+        myAgl > 50 &&                  // yo "en vuelo"
+        !otherIsGround &&              // el otro no marcado en tierra
+        (otherOps2 ? true : otherAgl > 50); // si no hay ops, exigimos también AGL>50 m
+
+      // Sólo consideramos:
+      // - los que se acercan, o
+      // - los hiper-cercanos (< TA_HYPER_M) aunque se alejen
+      if (TAeligible && (approaching || hyperClose)) {
+        let score =
+          (TA_RADIUS_M - distanceNow) * 1.2 +   // más cerca = más prioridad
+          (approaching ? 800 : -200);           // bonus si se acerca
+
+        if (Number.isFinite(tauSec) && tauSec > 0) {
+          score += (1 / tauSec) * 200_000;      // tau chico = mucha prioridad
+        }
+
+        if (hyperClose) {
+          score += 1_000_000;                   // hiper-cercanía domina la lista
+        }
+
+        if (!bestTA || score > bestTA.score) {
+          bestTA = {
+            plane,
+            distance: distanceNow,
+            tauSec: tauSec ?? Infinity,
+            score,
+          };
+        }
       }
     }
 
-    // RA: trayectorias convergentes
     // === RA: trayectorias convergentes (más sensible y robusto) ===
 
     // 1) Distancia futura en 5..180 s
     const futureDistances: number[] = [];
     for (const t of timeSteps) {
-      const myF = getFuturePosition(myPlane.lat, myPlane.lon, myPlane.heading, myPlane.speed, t);
-      const thF = getFuturePosition(plane.lat, plane.lon, plane.heading || 0, plane.speed || 0, t);
-      futureDistances.push(getDistance(myF.latitude, myF.longitude, thF.latitude, thF.longitude));
+      const myF = getFuturePosition(
+        myPlane.lat,
+        myPlane.lon,
+        myPlane.heading,
+        myPlane.speed,
+        t
+      );
+      const thF = getFuturePosition(
+        plane.lat,
+        plane.lon,
+        plane.heading || 0,
+        plane.speed || 0,
+        t
+      );
+      futureDistances.push(
+        getDistance(myF.latitude, myF.longitude, thF.latitude, thF.longitude)
+      );
     }
     const minDistance = Math.min(...futureDistances);
     const idxMin      = futureDistances.indexOf(minDistance);
@@ -743,8 +1136,20 @@ useEffect(() => {
       const b = (Math.atan2(y, x) * 180) / Math.PI;
       return (b + 360) % 360;
     };
-    const myAtMin    = getFuturePosition(myPlane.lat, myPlane.lon, myPlane.heading, myPlane.speed, timeOfMin);
-    const theirAtMin = getFuturePosition(plane.lat, plane.lon, plane.heading || 0, plane.speed || 0, timeOfMin);
+    const myAtMin    = getFuturePosition(
+      myPlane.lat,
+      myPlane.lon,
+      myPlane.heading,
+      myPlane.speed,
+      timeOfMin
+    );
+    const theirAtMin = getFuturePosition(
+      plane.lat,
+      plane.lon,
+      plane.heading || 0,
+      plane.speed || 0,
+      timeOfMin
+    );
 
     const diffNow = (() => {
       const bNow = bearingDeg(myPlane.lat, myPlane.lon, plane.lat, plane.lon);
@@ -752,7 +1157,12 @@ useEffect(() => {
       return d;
     })();
     const diffAtMin = (() => {
-      const bMin = bearingDeg(myAtMin.latitude, myAtMin.longitude, theirAtMin.latitude, theirAtMin.longitude);
+      const bMin = bearingDeg(
+        myAtMin.latitude,
+        myAtMin.longitude,
+        theirAtMin.latitude,
+        theirAtMin.longitude
+      );
       const d = Math.abs(((myPlane.heading - bMin + 540) % 360) - 180);
       return d;
     })();
@@ -776,122 +1186,142 @@ useEffect(() => {
       }
     }
 
+    // 🟢 Guardar distancia actual para la próxima iteración
+    lastDistanceRef.current[plane.id] = currentDistance;
+  }
 
-      lastDistanceRef.current[plane.id] = currentDistance;
-    }
+  let nuevoWarningLocal: Warning | null = null;
 
-    let nuevoWarningLocal: Warning | null = null;
+  if (selectedConflict && selectedConflictLevel) {
+    setConflict({
+      ...selectedConflict,
+      alertLevel: selectedConflictLevel,
+      timeToImpact: minTimeToImpact,
+    });
+    setSelected({
+      ...selectedConflict,
+      alertLevel: selectedConflictLevel,
+      timeToImpact: minTimeToImpact,
+    });
 
-    if (selectedConflict && selectedConflictLevel) {
-      setConflict({
-        ...selectedConflict,
-        alertLevel: selectedConflictLevel,
-        timeToImpact: minTimeToImpact,
-      });
-      setSelected({
-        ...selectedConflict,
-        alertLevel: selectedConflictLevel,
-        timeToImpact: minTimeToImpact,
-      });
+    const distSel = getDistance(
+      myPlane.lat,
+      myPlane.lon,
+      selectedConflict.lat,
+      selectedConflict.lon
+    );
 
-      const distSel = getDistance(myPlane.lat, myPlane.lon, selectedConflict.lat, selectedConflict.lon);
+    nuevoWarningLocal = {
+      id: selectedConflict.id,
+      name: selectedConflict.name,
+      lat: selectedConflict.lat,
+      lon: selectedConflict.lon,
+      alt: selectedConflict.alt,
+      heading: selectedConflict.heading,
+      speed: selectedConflict.speed,
+      alertLevel: selectedConflictLevel,
+      timeToImpact: minTimeToImpact,
+      distanceMeters: distSel,
+      type: selectedConflict.type,
+      aircraftIcon: selectedConflict.aircraftIcon || '2.png',
+      callsign: selectedConflict.callsign || '',
+    };
+  } else if (bestTA) {
+    const p = bestTA.plane;
+    setSelected({ ...p, alertLevel: 'TA' as 'TA' });
+    setConflict(null);
 
+    const distTa = bestTA.distance;
+    const ttiTa  = Number.isFinite(bestTA.tauSec) ? bestTA.tauSec : undefined;
 
-      nuevoWarningLocal = {
-        id: selectedConflict.id,
-        name: selectedConflict.name,
-        lat: selectedConflict.lat,
-        lon: selectedConflict.lon,
-        alt: selectedConflict.alt,
-        heading: selectedConflict.heading,
-        speed: selectedConflict.speed,
-        alertLevel: selectedConflictLevel,
-        timeToImpact: minTimeToImpact,
-        distanceMeters: distSel,   // ✅ agregado
-        type: selectedConflict.type,            // 👈 AÑADIR
-        aircraftIcon: selectedConflict.aircraftIcon || '2.png',
-        callsign: selectedConflict.callsign || '',
-      };
-    } else if (selectedNearby) {
-      setSelected({ ...selectedNearby, alertLevel: 'TA' as 'TA' });
-      setConflict(null);
-      const distTa = getDistance(myPlane.lat, myPlane.lon, selectedNearby.lat, selectedNearby.lon);
-
-      nuevoWarningLocal = {
-        id: selectedNearby.id,
-        name: selectedNearby.name,
-        lat: selectedNearby.lat,
-        lon: selectedNearby.lon,
-        alt: selectedNearby.alt,
-        heading: selectedNearby.heading,
-        speed: selectedNearby.speed,
-        alertLevel: 'TA',
-        timeToImpact: undefined,
-        distanceMeters: distTa,
-        type: selectedNearby.type,  
-        aircraftIcon: selectedNearby.aircraftIcon || '2.png',
-        callsign: selectedNearby.callsign || '',
-      };
-    } else {
-      setConflict(null);
-       setSelected(prev =>
+    nuevoWarningLocal = {
+      id: p.id,
+      name: p.name,
+      lat: p.lat,
+      lon: p.lon,
+      alt: p.alt,
+      heading: p.heading,
+      speed: p.speed,
+      alertLevel: 'TA',
+      timeToImpact: ttiTa,
+      distanceMeters: distTa,
+      type: p.type,
+      aircraftIcon: p.aircraftIcon || '2.png',
+      callsign: p.callsign || '',
+    };
+  } else {
+    setConflict(null);
+    setSelected(prev =>
       Date.now() < selectedHoldUntilRef.current ? prev : null
-      );
-    }
-    setLocalWarning(nuevoWarningLocal);
+    );
+  }
 
-    // ⬇️ recordar el último RA local
-    if (
-      nuevoWarningLocal &&
-      (nuevoWarningLocal.alertLevel === 'RA_LOW' || nuevoWarningLocal.alertLevel === 'RA_HIGH')
-    ) {
-      lastRAIdRef.current = nuevoWarningLocal.id;
-    }
+  setLocalWarning(nuevoWarningLocal);
 
-    // ⬇️ salir si está corriendo el hold de RA o el bloqueador temporal
-    if (holdTimerRef.current || Date.now() < blockUpdateUntil.current) return;
+  // ⬇️ recordar el último RA local
+  if (
+    nuevoWarningLocal &&
+    (nuevoWarningLocal.alertLevel === 'RA_LOW' ||
+      nuevoWarningLocal.alertLevel === 'RA_HIGH')
+  ) {
+    lastRAIdRef.current = nuevoWarningLocal.id;
+  }
 
-    // ⬇️ evita re-mostrar el mismo avión mientras dura el snooze
-    const candId = (nuevoWarningLocal?.id) || (backendWarning?.id);
-    if (snoozeIdRef.current && Date.now() < snoozeUntilRef.current && candId === snoozeIdRef.current) {
-      return;
-    }
+  // ⬇️ salir si está corriendo el hold de RA o el bloqueador temporal
+  if (holdTimerRef.current || Date.now() < blockUpdateUntil.current) return;
 
+  // ⬇️ evita re-mostrar el mismo avión mientras dura el snooze
+  const candId = (nuevoWarningLocal?.id) || (backendWarning?.id);
+  if (
+    snoozeIdRef.current &&
+    Date.now() < snoozeUntilRef.current &&
+    candId === snoozeIdRef.current
+  ) {
+    return;
+  }
 
+  const prioridades = { RA_HIGH: 3, RA_LOW: 2, TA: 1 };
 
-
-    const prioridades = { RA_HIGH: 3, RA_LOW: 2, TA: 1 };
-
-    // Si no hay warnings, limpiamos
-    if (!nuevoWarningLocal && !backendWarning) {
-      setPrioritizedWarning(null);
-      return;
-    }
-
-    // Si solo hay local
-    if (nuevoWarningLocal && !backendWarning) {
-      if (nuevoWarningLocal.alertLevel === 'TA') {
-        setPrioritizedWarning(nuevoWarningLocal);
-        maybeEmitWarning(nuevoWarningLocal);
-        return;
-      }
-      if (holdTimerRef.current && nuevoWarningLocal.alertLevel.startsWith('RA')) return;
+  // Si no hay warnings, limpiamos
+  if (!nuevoWarningLocal && !backendWarning) {
+    setPrioritizedWarning(null);
+    // ⚠️ Aun así actualizamos los planes visualmente con alertLevel 'none'
+  } else if (nuevoWarningLocal && !backendWarning) {
+    // Solo local
+    if (nuevoWarningLocal.alertLevel === 'TA') {
       setPrioritizedWarning(nuevoWarningLocal);
       maybeEmitWarning(nuevoWarningLocal);
-      return;
-    }
-
-    // Si solo hay backend
-    if (!nuevoWarningLocal && backendWarning) {
-      if (backendWarning.alertLevel === 'TA') {
-        setPrioritizedWarning(backendWarning);
-        maybeEmitWarning(backendWarning);
-        return;
+    } else {
+      if (holdTimerRef.current && nuevoWarningLocal.alertLevel.startsWith('RA')) {
+        // no pisar RA en hold
+      } else {
+        setPrioritizedWarning(nuevoWarningLocal);
+        maybeEmitWarning(nuevoWarningLocal);
       }
-      if (holdTimerRef.current && backendWarning.alertLevel.startsWith('RA')) return;
+    }
+  } else if (!nuevoWarningLocal && backendWarning) {
+    // Solo backend
+    if (backendWarning.alertLevel === 'TA') {
       setPrioritizedWarning(backendWarning);
       maybeEmitWarning(backendWarning);
-      return;
+    } else {
+      if (holdTimerRef.current && backendWarning.alertLevel.startsWith('RA')) {
+        // no pisar RA en hold
+      } else {
+        setPrioritizedWarning(backendWarning);
+        maybeEmitWarning(backendWarning);
+      }
+    }
+  } else if (nuevoWarningLocal && backendWarning) {
+    // 🚫 Silenciar TA/RA cuando ya liberé pista o estoy taxiando
+    {
+      const ops = lastOpsStateRef.current as OpsState | null;
+      if (ops && GROUND_OPS.has(ops)) {
+        if (prioritizedWarning) setPrioritizedWarning(null);
+        if (conflict) setConflict(null);
+        if (selected) setSelected(null);
+        // igual después actualizamos planes
+      }
     }
 
     // Si llegamos aquí, ambos existen
@@ -925,26 +1355,45 @@ useEffect(() => {
         }
       }
     }
+  }
 
+  // === ACTUALIZACIÓN VISUAL: traffic (backend) → planes (mapa) ===
+  const taPlaneId = bestTA?.plane.id ?? null;
 
+  const updatedTraffic: Plane[] = trafficWithoutMe.map((plane) => {
+    let alertLevel: Plane['alertLevel'] = 'none';
+    let timeToImpact: number | undefined = undefined;
 
-
-    // Visual update
-    const updatedTraffic = trafficWithoutMe.map((plane) => {
-      if (selectedConflict && plane.id === selectedConflict.id) {
-        return { ...plane, alertLevel: selectedConflictLevel as 'RA_LOW' | 'RA_HIGH' };
-      } else if (selectedNearby && plane.id === selectedNearby.id) {
-        return { ...plane, alertLevel: 'TA' as 'TA'};
-      } else {
-        return { ...plane, alertLevel: 'none' as 'none' };
-      }
-    });
-
-    const isEqual = JSON.stringify(updatedTraffic) === JSON.stringify(trafficWithoutMe);
-    if (!isEqual) {
-      setPlanes([...updatedTraffic]);
+    // RA local
+    if (selectedConflict && selectedConflictLevel && plane.id === selectedConflict.id) {
+      alertLevel = selectedConflictLevel;
+      timeToImpact = minTimeToImpact;
     }
-  }, [planes, myPlane, backendWarning]);
+    // TA local elegido (bestTA)
+    else if (taPlaneId && plane.id === taPlaneId) {
+      alertLevel = 'TA';
+      timeToImpact =
+        bestTA && Number.isFinite(bestTA.tauSec) ? bestTA.tauSec : undefined;
+    }
+    // RA/TA que vienen del backend para ese avión (si no hay override local)
+    else if (backendWarning && plane.id === backendWarning.id) {
+      const lvl = backendWarning.alertLevel;
+      if (lvl === 'RA_HIGH' || lvl === 'RA_LOW' || lvl === 'TA') {
+        alertLevel = lvl;
+        timeToImpact = backendWarning.timeToImpact;
+      }
+    }
+
+    return {
+      ...plane,
+      alertLevel,
+      timeToImpact,
+    };
+  });
+
+  setPlanes(updatedTraffic);
+}, [traffic, myPlane, backendWarning]);
+
 
   useEffect(() => {
     if (!username) return;
@@ -1015,8 +1464,55 @@ useEffect(() => {
 s.on('conflicto', (data: any) => {
   console.log('⚠️ Conflicto recibido vía WebSocket:', data);
 
+  const me = myPlane?.id || username;
+
+  // 1) Detectar si es RA
+  const isRAEvent =
+    data.alertLevel === 'RA_HIGH' ||
+    data.alertLevel === 'RA_LOW' ||
+    data.type === 'RA';
+
+  const from = String(data.from || '');
+  const to   = String(data.to   || '');
+
+  // 2) Si es RA y yo no soy ni from ni to → ignorar
+  if (isRAEvent && from && to && from !== me && to !== me) {
+    return;
+  }
+
+  // 3) Si YO estoy en tierra/pista, ignorar conflictos entrantes
+  if (iAmGroundish()) {
+    return;
+  }
+
+  // 4) Si el otro ya está en RUNWAY_CLEAR / TAXI_APRON / APRON_STOP, ignorá el conflicto
+  const otherNameRaw = String(data?.id || data?.name || '');
+  if (otherNameRaw) {
+    const otherOps = getOpsOf(otherNameRaw);
+    if (otherOps && GROUND_OPS.has(otherOps)) {
+      clearWarningFor(otherNameRaw);
+      setBackendWarning(prev => (prev && prev.id === otherNameRaw) ? null : prev);
+      setPrioritizedWarning(prev => (prev && prev.id === otherNameRaw) ? null : prev);
+      return;
+    }
+  }
+
+  // 5) Determinar quién es "el otro" avión del par
+  const otherId =
+    from && to
+      ? (from === me ? to : (to === me ? from : null))
+      : null;
+
+  // 6) Buscar en planes usando preferentemente otherId
   const match =
-    planes.find(p => p.id === data.id || p.id === data.name || p.name === data.name) || null;
+    planes.find(p =>
+      (otherId && p.id === otherId) ||
+      p.id === data.id ||
+      p.id === data.name ||
+      p.name === data.name
+    ) || null;
+
+  const effectiveId = String(otherId || match?.id || data.id || data.name || '');
 
   const distNow =
     typeof data.distanceMeters === 'number' ? data.distanceMeters :
@@ -1025,38 +1521,36 @@ s.on('conflicto', (data: any) => {
       ? getDistance(myPlane.lat, myPlane.lon, match.lat, match.lon)
       : NaN);
 
-  if (match) {
-    backendDistanceRef.current[match.id] = distNow;
+  if (match && effectiveId) {
+    backendDistanceRef.current[effectiveId] = distNow;
   }
 
-  // Si la tarjeta pinneada es este mismo avión, refrescá la distancia al toque
+  // Si la tarjeta pinneada es este mismo avión, refrescá la distancia
   setPrioritizedWarning(prev =>
-    prev && (prev.id === (match?.id ?? data.id ?? data.name))
+    prev && prev.id === effectiveId
       ? { ...prev, distanceMeters: distNow }
       : prev
   );
 
-  const level = (data.alertLevel === 'RA_HIGH' || data.alertLevel === 'RA_LOW' || data.alertLevel === 'TA')
-    ? data.alertLevel
-    : (data.type === 'RA' ? 'RA_LOW' : 'TA');
+  const level =
+    (data.alertLevel === 'RA_HIGH' || data.alertLevel === 'RA_LOW' || data.alertLevel === 'TA')
+      ? data.alertLevel
+      : (data.type === 'RA' ? 'RA_LOW' : 'TA');
 
-    // ID unificado del “otro” avión y hold por RA (6s)
-    const id = String(match?.id ?? data.id ?? data.name);
-    if (level === 'RA_LOW' || level === 'RA_HIGH') {
-      raHoldUntilRef.current[id] = Date.now() + 6000;
-    }
-
+  // ID para hold por RA
+  if (level === 'RA_LOW' || level === 'RA_HIGH') {
+    raHoldUntilRef.current[effectiveId] = Date.now() + 6000;
+  }
 
   const enrichedWarning: Warning = {
-    id: match?.id ?? data.id ?? data.name,
-    name: match?.name ?? data.name,
+    id: effectiveId,
+    name: match?.name ?? effectiveId,
     lat: match?.lat ?? data.lat,
     lon: match?.lon ?? data.lon,
     alt: match?.alt ?? data.alt,
     heading: match?.heading ?? data.heading,
     speed: match?.speed ?? data.speed,
-    alertLevel: data.alertLevel
-    ?? (data.type === 'RA' ? 'RA_LOW' : 'TA'),
+    alertLevel: level,
     timeToImpact: typeof data.timeToImpact === 'number' ? data.timeToImpact : 999,
     distanceMeters: distNow,
     aircraftIcon: match?.aircraftIcon ?? data.aircraftIcon ?? '2.png',
@@ -1064,21 +1558,21 @@ s.on('conflicto', (data: any) => {
     type: match?.type ?? data.type,
   };
 
-    setWarnings(prev => ({ ...prev, [enrichedWarning.id]: enrichedWarning }));
-    setBackendWarning(enrichedWarning);
-      // ⏳ TTL: si no se renueva el 'conflicto' en 4s, se limpia
+  setWarnings(prev => ({ ...prev, [enrichedWarning.id]: enrichedWarning }));
+  setBackendWarning(enrichedWarning);
+
+  // TTL backendWarning (esto lo dejas igual que ya tenías)
   const BW_TTL_MS = 4000;
   if ((s as any).__bwTtlTimer) clearTimeout((s as any).__bwTtlTimer);
   (s as any).__bwTtlTimer = setTimeout(() => {
-    // ⚠️ si todavía hay hold activo para este id, no limpies
-    const holdUntil = raHoldUntilRef.current[id] ?? 0;
+    const holdUntil = raHoldUntilRef.current[effectiveId] ?? 0;
     if (Date.now() < holdUntil) return;
 
-    setBackendWarning(prev => (prev && prev.id === id) ? null : prev);
-    setPrioritizedWarning(prev => (prev && prev.id === id) ? null : prev);
+    setBackendWarning(prev => (prev && prev.id === effectiveId) ? null : prev);
+    setPrioritizedWarning(prev => (prev && prev.id === effectiveId) ? null : prev);
   }, BW_TTL_MS);
+});
 
-  });
 
   // ⬇️ PEGAR ESTO JUSTO AQUÍ
   s.on('conflicto-clear', (msg: any) => {
@@ -1315,33 +1809,117 @@ s.on('conflicto', (data: any) => {
 
     // Señales de contexto
     const agl = getAGLmeters();              // m sobre aeródromo
-    const onRunway = isOnRunwayStrip();      // eje pista ±40 m
+    // ⚠️ NO me digas “sobre pista” si estoy por encima de 10 m AGL
+    const onRunway = isOnRunwayStrip() && agl < 10;
     const activeEnd = rw?.active_end === 'B' ? 'B' : 'A';
     const nearHold = isNearThreshold(activeEnd as 'A'|'B', 100); // 100 m cabecera activa
     const stopped  = isStopped();
     const speedKmh = myPlane?.speed ?? 0;
 
+
+          // ⛳️ Si tengo latch hacia APRON y no estoy en pista, me mantengo en tierra
+      if (apronLatchRef.current && !onRunway) {
+        const forced: OpsState = stopped ? 'APRON_STOP' : 'TAXI_APRON';
+        if (lastOpsStateRef.current !== forced) {
+          lastOpsStateRef.current = forced;
+          lastOpsStateTsRef.current = now;
+          socketRef.current?.emit('ops/state', {
+            name: username,
+            state: forced,
+            aux: {
+              airportId: (airfield as any)?.icao || (airfield as any)?.id || (airfield as any)?.name || '',
+              rwyIdent: activeIdent ?? (rw?.identA ?? rw?.identB ?? ''),
+              aglM: agl,
+              onRunway,
+              nearHoldShort: nearHold,
+            }
+          });
+          console.log('[OPS] Forced by APRON latch →', forced);
+        }
+        return; // 📌 No dejamos que este tick evalúe “AIRBORNE”
+      }
+
+
+        // --- Gating de AIRBORNE / FINAL por AGL ruidoso (pegajosidad de tierra) ---
+   
+    const fastEnough = speedKmh >= TOUCHGO_MIN_SPEED_KMH;
+
+    // 1) Si estoy en pista o muy bajo o muy lento → registro “vi tierra recién”
+    if (onRunway || agl < (TOUCHGO_AGL_M / 2) || speedKmh < 10) {
+      lastGroundSeenAtRef.current = now;
+    }
+
+    // 2) “Candidato a vuelo”: sólo si estoy fuera de pista, rápido y AGL supera umbral
+    if (!onRunway && fastEnough && agl > TOUCHGO_AGL_M) {
+      if (!airborneCandidateSinceRef.current) {
+        airborneCandidateSinceRef.current = now;
+      }
+    } else {
+      // reset por histéresis: si bajo mucho, vuelvo a pista o me quedo lento
+      if (agl < (TOUCHGO_AGL_M / 2) || onRunway || speedKmh < 40) {
+        airborneCandidateSinceRef.current = null;
+      }
+    }
+
+    // 3) Ventana OK para “de verdad” estar volando
+    const airborneWindowOk =
+      airborneCandidateSinceRef.current != null &&
+      (now - airborneCandidateSinceRef.current) >= TOUCHGO_HYST_MS;
+
+    // 4) Pegajosidad de tierra tras haber estado en piso hace poco
+    const groundSticky = (now - lastGroundSeenAtRef.current) < GROUND_STICK_MS;
+
+
+    // ⏱️ timestamp de última vez sobre pista + flag “acabo de salir de pista”
+    if (onRunway) {
+      lastOnRunwayAtRef.current = Date.now();
+    }
+    const justLeftRunway = !onRunway && (Date.now() - lastOnRunwayAtRef.current < 15000); // 15 s
+
+
     // Estados sticky de aproximación que ya tenés en front
     const inFinalLock = finalLockedRef.current === true;
 
-    // Candidatos (prioridad por “más específicos” primero)
-    let next: OpsState | null = null;
+// Cercanía a APRON (más tolerante)
+const aprDist = apronDistanceM({ lat: myPlane.lat, lon: myPlane.lon });
+const nearApron120 = aprDist <= 120;   // antes 30m — subimos para que detecte mejor
+const nearApron60  = aprDist <= 60;    // “muy cerca”
+const nearApron50  = aprDist <= 50; // radio de APRON “parado”
 
+
+
+
+    // Candidatos (prioridad por “más específicos” primero)
+      let next: OpsState | null = null;
+
+    // --- ORDEN DE PRIORIDAD ---
     if (onRunway && agl < 10) {
+      if (finalLockedRef.current) finalLockedRef.current = false; // 🔓 al tocar pista
       next = 'RUNWAY_OCCUPIED';
+    } else if (justLeftRunway) {
+      next = 'RUNWAY_CLEAR';
+    } else if (!onRunway && nearApron50 && agl < 10 && speedKmh <= 1) {
+      // ✅ dentro de 50 m del APRON, a muy baja altura y virtualmente detenido
+      next = 'APRON_STOP';
+    } else if (!onRunway && nearApron120 && speedKmh > 1) {
+      // ✅ cerca del APRON pero con movimiento → TAXI_APRON
+      next = 'TAXI_APRON';
+    } else if (!onRunway && agl < 30 && speedKmh >= 5) {
+      // rodando fuera de pista, lejos del APRON
+      next = 'TAXI_APRON';
+    } else if (stopped && !onRunway) {
+      // detenido en tierra fuera de la pista (fuera del radio de 50 m del APRON)
+      next = 'APRON_STOP';
     } else if (nearHold && agl < 20 && speedKmh < 35 && !onRunway) {
       next = 'HOLD_SHORT';
-    } else if (agl > 50) {
+    } else if (airborneWindowOk && !groundSticky && speedKmh >= TOUCHGO_MIN_SPEED_KMH) {
+      // Sólo pasamos a vuelo si:
+      // - superé el AGL umbral sostenido (histéresis), y
+      // - no “vengo de tierra” en los últimos GROUND_STICK_MS
       next = inFinalLock ? 'FINAL' : 'AIRBORNE';
-    } else if (stopped && !onRunway) {
-      next = 'APRON_STOP';
-    } else if (!onRunway && agl < 30 && speedKmh >= 35) {
-      next = nearHold ? 'TAXI_TO_RWY' : 'TAXI_APRON';
-    } else if (!onRunway && agl < 30 && speedKmh >= 5) {
-      next = 'TAXI_APRON';
-    } else if (!onRunway && agl < 30 && speedKmh < 5) {
-      next = 'RUNWAY_CLEAR';
     }
+
+
 
     // Estados de aproximación si pediste aterrizaje (opcional, conservamos sticky)
     if (!next && landingRequestedRef.current) {
@@ -1357,14 +1935,39 @@ s.on('conflicto', (data: any) => {
 
     if (!next) return;
 
-    // Dwell 4s
+    // Dwell 4s salvo tierra (RUNWAY_CLEAR/TAXI_APRON/APRON_STOP deben salir YA)
     const last = lastOpsStateRef.current;
-    if (last !== next) {
+    const instant = next === 'RUNWAY_CLEAR' || next === 'TAXI_APRON' || next === 'APRON_STOP';
+    if (last !== next && !instant) {
       if (now - lastOpsStateTsRef.current < OPS_DWELL_MS) return;
     }
 
+
     // Cambió (o confirmó) estado → emitimos
     if (last !== next) {
+      // 📌 efectos de transición
+      if (next === 'RUNWAY_CLEAR') {
+        // salir definitivamente del modo aproximación
+        landingRequestedRef.current = false;
+        finalLockedRef.current = false;
+
+        // guía y latch hacia APRON
+        const apr = getApronPoint();
+        if (apr) { setNavTarget(apr); apronLatchRef.current = true; }
+
+        // limpiar TA/RA inmediatamente
+        setPrioritizedWarning(null);
+        setConflict(null);
+        setSelected(null);
+      }
+
+      // si entro a cualquier estado "de tierra", limpio alertas
+      if (GROUND_OPS.has(next)) {
+        setPrioritizedWarning(null);
+        setConflict(null);
+        setSelected(null);
+      }
+
       lastOpsStateRef.current = next;
       lastOpsStateTsRef.current = now;
 
@@ -1372,7 +1975,6 @@ s.on('conflicto', (data: any) => {
         name: username,
         state: next,
         aux: {
-          // ⬇️ Compatibles con tus tipos (sin 'ident' inexistentes):
           airportId: (airfield as any)?.icao || (airfield as any)?.id || (airfield as any)?.name || '',
           rwyIdent: activeIdent ?? (rw?.identA ?? rw?.identB ?? ''),
           aglM: agl,
@@ -1380,9 +1982,10 @@ s.on('conflicto', (data: any) => {
           nearHoldShort: nearHold,
         }
       });
-
       console.log('[OPS] Emitted', next);
     }
+
+
   })();
 
     
@@ -1440,152 +2043,7 @@ s.on('conflicto', (data: any) => {
   // === AG: fin background ===
 
 
-  useEffect(() => {
-    if (!myPlane || traffic.length === 0) return;
 
-    const trafficWithoutMe = traffic.filter(p => p.id !== myPlane.id);
-
-    const timeSteps = Array.from({ length: 36 }, (_, i) => (i + 1) * 5);
-    let selectedConflict: Plane | null = null;
-    let selectedConflictLevel: 'RA_HIGH' | 'RA_LOW' | undefined = undefined;
-
-    let selectedNearby: Plane | null = null;
-    let minTimeToImpact = Infinity;
-    let minProxDist = Infinity;
-
-    const toRad = (deg: number) => (deg * Math.PI) / 180;
-    const toDeg = (rad: number) => (rad * 180) / Math.PI;
-    const angleBetween = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-      const dLon = toRad(lon2 - lon1);
-      const y = Math.sin(dLon) * Math.cos(toRad(lat2));
-      const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
-                Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
-      return (toDeg(Math.atan2(y, x)) + 360) % 360;
-    };
-    const angleDiff = (a: number, b: number) => {
-      const d = Math.abs(a - b) % 360;
-      return d > 180 ? 360 - d : d;
-    };
-
-    for (const plane of trafficWithoutMe) {
-      const distanceNow = getDistance(myPlane.lat, myPlane.lon, plane.lat, plane.lon);
-
-      // TA: tráfico cercano
-      if (distanceNow < 3000 && plane.speed > 30) {
-        if (distanceNow < minProxDist) {
-          selectedNearby = plane;
-          minProxDist = distanceNow;
-        }
-      }
-
-      // RA: trayectorias convergentes
-// === RA: trayectorias convergentes (más sensible y robusto) ===
-
-// 1) Distancia futura en 5..180 s
-const futureDistances: number[] = [];
-for (const t of timeSteps) {
-  const myF = getFuturePosition(myPlane.lat, myPlane.lon, myPlane.heading, myPlane.speed, t);
-  const thF = getFuturePosition(plane.lat, plane.lon, plane.heading || 0, plane.speed || 0, t);
-  futureDistances.push(getDistance(myF.latitude, myF.longitude, thF.latitude, thF.longitude));
-}
-const minDistance = Math.min(...futureDistances);
-const idxMin      = futureDistances.indexOf(minDistance);
-const timeOfMin   = timeSteps[idxMin];
-
-const futureAltDelta = Math.abs(myPlane.alt - plane.alt);
-
-// 2) “Acercamiento” simple: distancia a 5s menor que ahora
-const currentDistance = getDistance(myPlane.lat, myPlane.lon, plane.lat, plane.lon);
-const distance5s  = futureDistances[0] ?? distanceNow;
-const closingSoon = distance5s < (distanceNow - 15); // margen 15 m
-
-// 3) Cono de RA: bearing ahora y en el punto de mínimo
-const bearingDeg = (lat1:number, lon1:number, lat2:number, lon2:number) => {
-  const dLon = toRad(lon2 - lon1);
-  const y = Math.sin(dLon) * Math.cos(toRad(lat2));
-  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
-            Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
-  const b = (Math.atan2(y, x) * 180) / Math.PI;
-  return (b + 360) % 360;
-};
-const myAtMin    = getFuturePosition(myPlane.lat, myPlane.lon, myPlane.heading, myPlane.speed, timeOfMin);
-const theirAtMin = getFuturePosition(plane.lat, plane.lon, plane.heading || 0, plane.speed || 0, timeOfMin);
-
-const diffNow = (() => {
-  const bNow = bearingDeg(myPlane.lat, myPlane.lon, plane.lat, plane.lon);
-  const d = Math.abs(((myPlane.heading - bNow + 540) % 360) - 180);
-  return d;
-})();
-const diffAtMin = (() => {
-  const bMin = bearingDeg(myAtMin.latitude, myAtMin.longitude, theirAtMin.latitude, theirAtMin.longitude);
-  const d = Math.abs(((myPlane.heading - bMin + 540) % 360) - 180);
-  return d;
-})();
-const withinCone = (diffNow <= RA_CONE_DEG) || (diffAtMin <= RA_CONE_DEG);
-
-// 4) Criterio RA final
-if (
-  minDistance < RA_MIN_DIST_M &&
-  futureAltDelta <= RA_VSEP_MAX_M &&
-  closingSoon &&
-  withinCone
-) {
-  if (timeOfMin < RA_HIGH_TTI_S && timeOfMin < minTimeToImpact) {
-    selectedConflict = plane;
-    selectedConflictLevel = 'RA_HIGH';
-    minTimeToImpact = timeOfMin;
-  } else if (timeOfMin < RA_LOW_TTI_S && selectedConflictLevel !== 'RA_HIGH') {
-    selectedConflict = plane;
-    selectedConflictLevel = 'RA_LOW';
-    minTimeToImpact = timeOfMin;
-  }
-}
-
-
-      // 🟢 Guardar distancia actual para la próxima iteración
-      lastDistanceRef.current[plane.id] = currentDistance;
-    }
-
-    // Limpiar conflictos si no hay ninguno nuevo
-    if (!selectedConflict && !selectedNearby) {
-      if (conflict !== null) setConflict(null);
-        setSelected(prev =>
-         Date.now() < selectedHoldUntilRef.current ? prev : null
-      );
-    } else if (selectedConflict && selectedConflictLevel) {
-      setConflict({
-        ...selectedConflict,
-        alertLevel: selectedConflictLevel,
-        timeToImpact: minTimeToImpact,
-      });
-      setSelected({
-        ...selectedConflict,
-        alertLevel: selectedConflictLevel,
-        timeToImpact: minTimeToImpact,
-      });
-    } else if (selectedNearby) {
-      setSelected({ ...selectedNearby, alertLevel: 'TA' });
-        setSelected(prev =>
-      Date.now() < selectedHoldUntilRef.current ? prev : null
-      );
-    }
-
-    // Estado visual (marcar los íconos)
-    const updatedTraffic = trafficWithoutMe.map((plane) => {
-      if (selectedConflict && plane.id === selectedConflict.id) {
-        return { ...plane, alertLevel: selectedConflictLevel as 'RA_LOW' | 'RA_HIGH' };
-      } else if (selectedNearby && plane.id === selectedNearby.id) {
-        return { ...plane, alertLevel: 'TA' as 'TA' };
-      } else {
-        return { ...plane, alertLevel: 'none' as 'none' };
-      }
-    });
-
-    const isEqual = JSON.stringify(updatedTraffic) === JSON.stringify(trafficWithoutMe);
-    if (!isEqual) {
-      setPlanes([...updatedTraffic]);
-    }
-  }, [myPlane, traffic]);
 
   const centerMap = (lat = myPlane.lat, lon = myPlane.lon) => {
     if (mapRef.current) {
@@ -1603,15 +2061,23 @@ if (
   }, [myPlane]);
 
   // Mantener cualquier prioritizedWarning durante 6s y bloquear recálculos
-  useEffect(() => {
-    if (!prioritizedWarning) return;
+useEffect(() => {
+  if (!prioritizedWarning) return;
 
-  // Solo RA tiene hold de 6s
-  if (prioritizedWarning.alertLevel === 'RA_LOW' || prioritizedWarning.alertLevel === 'RA_HIGH') {
+  // Duración del warning en pantalla: 6s para RA Y para TA
+  const isRA =
+    prioritizedWarning.alertLevel === 'RA_LOW' ||
+    prioritizedWarning.alertLevel === 'RA_HIGH';
+
+  if (
+    prioritizedWarning.alertLevel === 'RA_LOW' ||
+    prioritizedWarning.alertLevel === 'RA_HIGH' ||
+    prioritizedWarning.alertLevel === 'TA'
+  ) {
     if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
     blockUpdateUntil.current = Date.now() + 6000;
 
-    const pwId = prioritizedWarning.id; // capturo el id mostrado
+    const pwId = prioritizedWarning.id; // capturamos el id y si era RA
 
     holdTimerRef.current = setTimeout(() => {
       setSelectedWarning(null);
@@ -1629,39 +2095,111 @@ if (
       holdTimerRef.current = null;
       lastSentWarningRef.current = null;
 
-      // 🔕 avisar al resto que este RA terminó
-      try {
-        const id = lastRAIdRef.current || pwId; // usa el que tengas más confiable
-        lastRAIdRef.current = null;
-        if (id) socketRef.current?.emit('warning-clear', { id });
-      } catch {}
+      // 🔕 avisar al resto que este RA terminó (solo si era RA)
+      if (isRA) {
+        try {
+          const id = lastRAIdRef.current || pwId; // usa el que tengas más confiable
+          lastRAIdRef.current = null;
+          if (id) socketRef.current?.emit('warning-clear', { id });
+        } catch {}
+      }
     }, 6000);
-
-
   }
-  // TA no setea hold (puede ser preempted por RA)
-  }, [prioritizedWarning?.id, prioritizedWarning?.alertLevel]);
+}, [prioritizedWarning?.id, prioritizedWarning?.alertLevel]);
+
+
+
+    // Mantener visible el APRON hasta volver a volar (despegar)
+  useEffect(() => {
+    if (!rw) return;
+
+    const st = lastOpsStateRef.current as OpsState | null;
+    const activeEnd = rw.active_end === 'B' ? 'B' : 'A';
+
+    // ✅ Encender latch SOLO al liberar pista (rodando lento sobre la pista)
+    const freeingRunway = isOnRunwayStrip() && (myPlane?.speed ?? 0) < 40;
+    if (freeingRunway) {
+      apronLatchRef.current = true;
+    }
+
+// 🔓 Apagar latch al volver a volar o cuando estoy taxiando a cabecera para despegar
+
+    // Se apaga el latch cuando:
+    // - vuelvo a estar en vuelo (despegue)
+    // - estoy taxiando hacia cabecera para despegar
+    if (st === 'AIRBORNE' || st === 'TAXI_TO_RWY') {
+      apronLatchRef.current = false;
+    }
+  }, [rw, myPlane.lat, myPlane.lon, myPlane.speed, runwayState]);
+
+// Silenciar/limpiar TA/RA cuando ya liberé pista o estoy taxiando al APRON
+useEffect(() => {
+  const ops = lastOpsStateRef.current as OpsState | null;
+  if (ops && GROUND_OPS.has(ops)) {
+    setPrioritizedWarning(null);
+    setConflict(null);
+    setSelected(null);
+    setPlanes(prev =>
+      prev.map(p => ({ ...p, alertLevel: 'none', timeToImpact: undefined }))
+    );
+  }
+
+}, [runwayState, myPlane.lat, myPlane.lon, myPlane.speed]);
 
 
   // === RUNWAY: Automatismos de avisos y ocupación/liberación ===
 useEffect(() => {
   if (!rw) return;
 
-  // 1) "Liberar pista" si estoy sobre la pista (sin botón)
-  if (isOnRunwayStrip()) {
-    flashBanner('¡Liberar pista!', 'free-runway');
-    // si estoy aterrizando y aún no marqué occupy, marcar
-    if (landingRequestedRef.current && iAmOccupyingRef.current !== 'landing' && defaultActionForMe()==='land') {
-      markRunwayOccupy('landing');
-      iAmOccupyingRef.current = 'landing';
-    }
-  } else {
-    // si yo ocupaba, y ya salí de la pista -> clear
-    if (iAmOccupyingRef.current) {
-      markRunwayClear();
-      iAmOccupyingRef.current = null;
-    }
+// 1) "Liberar pista" solo si voy lento sobre la pista (< 50 km/h)
+if (isOnRunwayStrip() && ((myPlane && typeof myPlane.speed === 'number' ? myPlane.speed : 0) < 50)) {
+  flashBanner('¡Liberar pista!', 'free-runway');
+
+  // Guía al APRON inmediatamente (línea azul cambia YA)
+  const apr = getApronPoint();
+  if (apr) { setNavTarget(apr); apronLatchRef.current = true; }
+
+  // Forzar OPS a RUNWAY_OCCUPIED si aún estaba en FINAL
+  emitOpsNow('RUNWAY_OCCUPIED');
+
+  // Si estoy aterrizando y aún no marqué occupy, marcar
+  if (landingRequestedRef.current && iAmOccupyingRef.current !== 'landing' && defaultActionForMe() === 'land') {
+    markRunwayOccupy('landing');
+    iAmOccupyingRef.current = 'landing';
+
+    // 🚨 En el touchdown pierdo el turno de aterrizaje
+    try { cancelMyRequest(); } catch {}
+    landingRequestedRef.current = false;
+    finalLockedRef.current = false;
+    socketRef.current?.emit('runway-get'); // refresco estado del server
   }
+} else {
+  // Versión conservadora: hacer "clear" solo si venías ocupando
+  // o si estás en un estado de tierra real cerca de la cabecera activa
+  let activeEnd: 'A' | 'B' | null = null;
+  if (rw && (rw as any).active_end === 'B') activeEnd = 'B';
+  else if (rw) activeEnd = 'A';
+
+  const nearActiveThreshold =
+    activeEnd ? isNearThreshold(activeEnd, 200) : false;
+
+  if (iAmOccupyingRef.current || (iAmGroundish() && nearActiveThreshold)) {
+    markRunwayClear();
+
+    // Reset de aproximación y OPS visible
+    landingRequestedRef.current = false;
+    finalLockedRef.current = false;
+    emitOpsNow('RUNWAY_CLEAR');
+
+    // Guía a APRON al salir de pista / tierra real
+    const apr2 = getApronPoint();
+    if (apr2) { setNavTarget(apr2); apronLatchRef.current = true; }
+
+    iAmOccupyingRef.current = null;
+  }
+  // Si no se cumple la condición conservadora, NO limpies nada.
+}
+
 
   // 2) Permisos según turno y huecos
   const me = myPlane?.id || username;
@@ -1728,6 +2266,27 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
 
   // === NAV: guía simple con B2 → B1 → Umbral, según turno en cola (con voz) ===
   useEffect(() => {
+    // ⛳️ Si el latch al APRON está activo, fijamos SIEMPRE el navTarget al APRON
+    {
+      const apr = getApronPoint();
+      if (apronLatchRef.current && apr) {
+        setNavTarget(apr);
+        return; // no dejes que el resto del efecto pise el target
+      }
+    }
+
+    // 👉 Si estoy en RUNWAY_CLEAR / TAXI_APRON / APRON_STOP: guiar a APRON (aunque no haya latch)
+    {
+      const myOps = lastOpsStateRef.current as OpsState | null;
+      if (!landingRequestedRef.current && myOps && GROUND_OPS.has(myOps)) {
+        const apr = getApronPoint();
+        setNavTarget(apr ?? null);
+        return;
+      }
+    }
+
+
+
     if (serverATCRef.current) { setNavTarget(null); return; }   // ⬅️ INSERTAR AQUÍ
     if (!rw || !beaconB1 || !beaconB2) { setNavTarget(null); return; }
     // Sólo guiamos si pediste aterrizaje y estás “volando”
@@ -1859,12 +2418,21 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
     };
   }, []);
 
+    const shouldShowBeaconGuide = (() => {
+    const st = lastOpsStateRef.current as OpsState | null;
+    return !(st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON' || st === 'APRON_STOP');
+    })();
+
+
 
   return (
     <View style={styles.container}>
       <MapView
         ref={mapRef}
         provider={PROVIDER_GOOGLE}
+          mapType="standard"
+          customMapStyle={lightMapStyle}
+
         style={styles.map}
         initialRegion={{
           latitude: myPlane.lat,
@@ -1881,97 +2449,95 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
           }
         }}
       >
-        <Marker
-          coordinate={{ latitude: myPlane.lat, longitude: myPlane.lon }}
-          anchor={{ x: 0.5, y: 1 }}
-          rotation={myPlane.heading}
-          flat
-        >
-          <Image
-            source={getOwnPlaneIcon(aircraftIcon)}
-            style={{ width: 35, height: 40, marginRight: 1 }}
-            resizeMode="contain" //
-          />
-        </Marker>
-
-        {planes
-          .filter(plane => plane.id !== username)
-          .map((plane) => {
-            console.log('plane', plane.id, 'alertLevel', plane.alertLevel);
-            return (
-              <Marker
-                key={plane.id}
-                coordinate={{ latitude: plane.lat, longitude: plane.lon }}
-                anchor={{ x: 0.5, y: 0.5 }}
-                rotation={plane.heading}
-                flat
-                onPress={() => {
-                  setSelected(plane);
-
-                  const warning = warnings[plane.id];
-
-                  const isPureInfo =
-                  !warning &&
-                  (plane.alertLevel === 'none' || !plane.alertLevel);
-                  // si el tap es informativo, holdeamos 5s
-                  selectedHoldUntilRef.current = isPureInfo ? Date.now() + 5000 : 0;
-                                  
-                  if (warning) {
-                    priorizarWarningManual(warning);
-                    maybeEmitWarning(warning);       // suma
-                  } else if (
-                    plane.alertLevel === 'TA' ||
-                    plane.alertLevel === 'RA_LOW' ||
-                    plane.alertLevel === 'RA_HIGH'
-                  ) {
-                    priorizarWarningManual({
-                      
-                      alertLevel: plane.alertLevel,
-                      timeToImpact: plane.timeToImpact || Infinity,
-                      distanceMeters: getDistance(myPlane.lat, myPlane.lon, plane.lat, plane.lon),
-                      id: plane.id,
-                      name: plane.name,
-                      lat: plane.lat,
-                      lon: plane.lon,
-                      alt: plane.alt,
-                      heading: plane.heading,
-                      speed: plane.speed,
-                      type: plane.type,
-                      callsign: plane.callsign,
-                      aircraftIcon: plane.aircraftIcon,
-                    });
-                  }
-
-                  if (hideSelectedTimeout.current) {
-                    clearTimeout(hideSelectedTimeout.current);
-                  }
-
-                  hideSelectedTimeout.current = setTimeout(() => {
-                    setSelected(null);
-                  }, 6000);
-
-                  if (isPureInfo) {
-                  hideSelectedTimeout.current = setTimeout(() => {
-                    setSelected(null);
-                    selectedHoldUntilRef.current = 0;
-                    hideSelectedTimeout.current = null;
-                  }, 5000); // ⬅️ 5s
-                  }
+{/* === MI AVIÓN — RENDERIZACIÓN PROFESIONAL SIN RECORTES === */}
+<Marker
+  key={"my-aircraft"}
+  coordinate={{
+    latitude: myPlane.lat,
+    longitude: myPlane.lon,
+  }}
+  anchor={{ x: 0.5, y: 0.5 }}               // centro exacto del PNG
+  flat                                     // pega el ícono al mapa
+  rotation={myPlane.heading || 0}          // rotación nativa (sin View)
+  image={getOwnPlaneIcon(aircraftIcon)}    // PNG nativo con require()
+  tracksViewChanges={false}                // performance óptima
+/>
 
 
-                }}
-              >
-                <Image
-                  source={getRemotePlaneIcon(
-                    plane.aircraftIcon || plane.type || '2.png',
-                    plane.alertLevel
-                  )}
-                  style={{ width: 30, height: 30 }}
-                  resizeMode="contain"
-                />
-              </Marker>
-            );
-          })}
+
+
+
+
+{planes
+  .filter(plane => plane.id !== username)
+  .map((plane) => {
+    console.log('plane', plane.id, 'alertLevel', plane.alertLevel);
+    return (
+      <Marker
+        key={plane.id}
+        coordinate={{ latitude: plane.lat, longitude: plane.lon }}
+        anchor={{ x: 0.5, y: 0.5 }}
+        flat
+        rotation={plane.heading || 0}
+        tracksViewChanges={false}
+        image={getRemotePlaneIcon(
+          plane.aircraftIcon || plane.type || '2.png',
+          plane.alertLevel
+        )}
+        onPress={() => {
+          let ops = getOpsOf(plane.id) as OpsState | null;
+          ops = ops || inferOpsForDisplay(plane);
+          setSelected({ ...plane, ops } as any);
+          const warning = warnings[plane.id];
+          const isPureInfo =
+            !warning &&
+            (plane.alertLevel === 'none' || !plane.alertLevel);
+          selectedHoldUntilRef.current = isPureInfo ? Date.now() + 5000 : 0;
+          if (warning) {
+            const w = { ...warning, ops } as any;
+            priorizarWarningManual(w);
+            maybeEmitWarning(w);
+          } else if (
+            plane.alertLevel === 'TA' ||
+            plane.alertLevel === 'RA_LOW' ||
+            plane.alertLevel === 'RA_HIGH'
+          ) {
+            priorizarWarningManual({
+              alertLevel: plane.alertLevel as any,
+              timeToImpact: plane.timeToImpact || Infinity,
+              distanceMeters: getDistance(myPlane.lat, myPlane.lon, plane.lat, plane.lon),
+              id: plane.id,
+              name: plane.name,
+              lat: plane.lat,
+              lon: plane.lon,
+              alt: plane.alt,
+              heading: plane.heading,
+              speed: plane.speed,
+              type: plane.type,
+              callsign: plane.callsign,
+              aircraftIcon: plane.aircraftIcon,
+              ops,
+            } as any);
+          }
+          if (hideSelectedTimeout.current) {
+            clearTimeout(hideSelectedTimeout.current);
+          }
+          hideSelectedTimeout.current = setTimeout(() => {
+            setSelected(null);
+          }, 6000);
+          if (isPureInfo) {
+            hideSelectedTimeout.current = setTimeout(() => {
+              setSelected(null);
+              selectedHoldUntilRef.current = 0;
+              hideSelectedTimeout.current = null;
+            }, 5000);
+          }
+        }}
+      />
+    );
+  })}
+
+
 
                   {/* === RUNWAY (Airfield) === */}
           {A_runway && B_runway && (
@@ -2016,12 +2582,26 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
               </View>
             </Marker>
           )}
+
+          {/* === APRON marker: solo si estoy en cabecera o liberando pista === */}
+          {shouldShowApronMarker && (() => {
+            const apr = getApronPoint();
+            if (!apr) return null;
+            return (
+              <Marker coordinate={apr} title="APRON">
+                <View style={{ backgroundColor: '#FF9800', padding: 4, borderRadius: 10 }}>
+                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: 10 }}>APRON</Text>
+                </View>
+              </Marker>
+            );
+          })()}
+
           {/* === FIN RUNWAY === */}
 
         <Polyline coordinates={track} strokeColor="blue" strokeWidth={2} />
 
-        {/* === BEACONS: Línea guía B2 -> B1 -> Umbral activo === */}
-        {beaconB1 && beaconB2 && (
+        {/* === BEACONS: Línea guía B2 -> B1 -> Umbral activo (oculta si ya vas a manga) === */}
+        {shouldShowBeaconGuide && beaconB1 && beaconB2 && (
           <Polyline
             coordinates={[
               beaconB2,
@@ -2032,6 +2612,7 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
             strokeWidth={2}
           />
         )}
+
         {/* B2 */}
         {beaconB2 && (
           <Marker coordinate={beaconB2} title="B2">
@@ -2065,16 +2646,28 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
 
 
 
+
       </MapView>
 
-      <View style={styles.controlsBox}>
-        <Text style={styles.label}>✈️ heading: {myPlane.heading.toFixed(0)}°</Text>
-        <Slider minimumValue={0} maximumValue={359} step={1} value={myPlane.heading} onValueChange={val => setMyPlane(prev => ({ ...prev, heading: val }))} />
-        <Text style={styles.label}>🛫 Altitud: {myPlane.alt.toFixed(0)} m</Text>
-        <Slider minimumValue={0} maximumValue={2000} step={10} value={myPlane.alt} onValueChange={val => setMyPlane(prev => ({ ...prev, alt: val }))} />
-        <Text style={styles.label}>💨 Velocidad: {myPlane.speed.toFixed(0)} km/h</Text>
-        <Slider minimumValue={0} maximumValue={400} step={5} value={myPlane.speed} onValueChange={val => setMyPlane(prev => ({ ...prev, speed: val }))} />
-      </View>
+        <View style={styles.controlsBox}>
+          <Text style={styles.label}>✈️ heading: {myPlane.heading.toFixed(0)}°</Text>
+          <Slider minimumValue={0} maximumValue={359} step={1} value={myPlane.heading} onValueChange={val => setMyPlane(prev => ({ ...prev, heading: val }))} />
+
+          <Text style={styles.label}>🛫 Altitud: {myPlane.alt.toFixed(0)} m</Text>
+          {/* 👇 AGL visible en B2/B1/FINAL */}
+          {(() => {
+            const st = lastOpsStateRef.current as OpsState | null;
+            const showAGL = st === 'B2' || st === 'B1' || st === 'FINAL';
+            if (!showAGL) return null;
+            const agl = Math.round(getAGLmeters());
+            return <Text style={styles.label}>📏 Altura sobre suelo: {agl} m AGL</Text>;
+          })()}
+
+          <Slider minimumValue={0} maximumValue={2000} step={10} value={myPlane.alt} onValueChange={val => setMyPlane(prev => ({ ...prev, alt: val }))} />
+          <Text style={styles.label}>💨 Velocidad: {myPlane.speed.toFixed(0)} km/h</Text>
+          <Slider minimumValue={0} maximumValue={400} step={5} value={myPlane.speed} onValueChange={val => setMyPlane(prev => ({ ...prev, speed: val }))} />
+        </View>
+
 
       {prioritizedWarning ? (
         // prioritizedWarning es Warning: tiene distanceMeters ✅
@@ -2248,6 +2841,7 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
 
       if (!list.length) return <Text style={{fontSize:12}}>(vacío)</Text>;
 
+      const opsMap = (runwayState as any)?.state?.opsStates || {};
       return list.map((x:any, i:number) => {
         const mine   = x?.name === me;
         const etaMin = typeof x?.etaSec === 'number' ? Math.round(x.etaSec/60) : null;
@@ -2258,6 +2852,8 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
           (action==='takeoff' && x?.ready)   ? 'LISTO' : null,
           (action==='takeoff' && waited!=null) ? `+${waited}m` : null,
         ].filter(Boolean).join(' · ');
+
+        const opsStr = opsMap[x?.name] ? ` · OPS: ${opsMap[x.name]}` : '';
 
         return (
           <Text
@@ -2270,13 +2866,32 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
           >
             #{i+1} {x?.name}{x?.callsign ? ` (${x.callsign})` : ''}
             {etaMin!=null ? ` — ETA ${etaMin} min` : ''}
-            {tags ? ` — [${tags}]` : ''}
+            {tags ? ` — [${tags}]` : ''}{opsStr}
           </Text>
         );
       });
+
+
     })()}
   </ScrollView>
 </View>
+
+        {/* OPS pill fija (estado del propio avión) */}
+        <View style={{
+          position:'absolute',
+          right: 10,
+          bottom: Platform.OS === 'android' ? 120 : 90,
+          backgroundColor:'#FFFFFF',
+          borderRadius:12,
+          paddingHorizontal:12,
+          paddingVertical:6,
+          elevation:3,
+          borderWidth: StyleSheet.hairlineWidth,
+          borderColor: '#ddd'
+        }}>
+          <Text style={{fontWeight:'700'}}>OPS: {lastOpsStateRef.current ?? '—'}</Text>
+        </View>
+
 
 
   </View>

@@ -1114,74 +1114,116 @@ io.on('connection', (socket) => {
   });
 
 
-socket.on('warning', (warningData) => {
-  const sender = socketIdToName[socket.id];
-  if (!sender) return;
+  socket.on('warning', (warningData) => {
+    const sender = socketIdToName[socket.id];   // quién emite el warning
+    if (!sender) return;
 
-  const senderInfo = userLocations[sender];
-  if (!senderInfo) return;
+    const senderInfo = userLocations[sender];
+    if (!senderInfo) return;
 
-  const level =
-    warningData.alertLevel ||
-    (warningData.type === 'RA' && warningData.timeToImpact < 60 ? 'RA_HIGH'
-     : warningData.type === 'RA' ? 'RA_LOW'
-     : 'TA');
+    // Nivel (igual que antes)
+    const level =
+      warningData.alertLevel ||
+      (warningData.type === 'RA' && warningData.timeToImpact < 60 ? 'RA_HIGH'
+       : warningData.type === 'RA' ? 'RA_LOW'
+       : 'TA');
 
-  // Broadcast del conflicto “como lo ve el emisor” (objetivo = warningData.name/id)
-  const enrichedWarning = {
-    id: warningData.id || warningData.name,
-    name: warningData.name,
-    lat: warningData.lat,
-    lon: warningData.lon,
-    alt: warningData.alt ?? 0,
-    heading: warningData.heading ?? 0,
-    speed: warningData.speed ?? 0,
-    alertLevel: level,
-    kind: level.startsWith('RA') ? 'RA' : 'TA',
-    timeToImpact: warningData.timeToImpact ?? 999,
-    aircraftIcon: warningData.aircraftIcon ?? senderInfo.icon ?? '2.png',
-    callsign: warningData.callsign ?? senderInfo.callsign ?? '',
-    type: warningData.aircraftType || warningData.type || 'unknown',
-  };
+    const isRA = level === 'RA_HIGH' || level === 'RA_LOW';
 
-    // ✅ Broadcast personalizado por receptor (RA espejado para el target)
-    for (const [recvName, recvInfo] of Object.entries(userLocations)) {
-      if (recvName === sender || !recvInfo?.socketId) continue;
+    // El objetivo que detectó el frontend (el "otro" avión)
+    const targetName = String(warningData.id || warningData.name || '');
+    if (!targetName) return;
 
-      const targetName = enrichedWarning.name;              // el “otro” que mandó el emisor
-      const otherName  = (recvName === targetName) ? sender : targetName;
+    const targetInfo = userLocations[targetName];
+    if (!targetInfo) return;
 
+    const timeToImpact = warningData.timeToImpact ?? 999;
+
+    // Función helper: enviar a un receptor info del "otro" avión
+    function emitConflictFor(recipientName, otherName, fromName, toName) {
+      const me    = userLocations[recipientName];
       const other = userLocations[otherName];
-      const me    = userLocations[recvName];
-      if (!other || !me) continue;
+      if (!me || !other) return;
 
-      // ¿RA o TA?
-     const isRA = level === 'RA_HIGH' || level === 'RA_LOW';
-
-
-      // Distancia entre el receptor y el “otro”
-      const distance = getDistance(me.latitude, me.longitude, other.latitude, other.longitude);
+      const distance = getDistance(
+        me.latitude,
+        me.longitude,
+        other.latitude,
+        other.longitude
+      );
 
       const payload = {
         id: otherName,
         name: otherName,
         lat: other.latitude,
         lon: other.longitude,
-        alt: other.alt,
-        heading: other.heading,
-        speed: other.speed,
-        // IMPORTANTE: tu frontend chequea data.type === 'RA'
-        type: isRA ? 'RA' : 'TA',
-        alertLevel: level,                  // además mandamos el nivel exacto
-        timeToImpact: enrichedWarning.timeToImpact,
-        distance,                         // útil para refrescos en UI
+        alt: other.alt ?? 0,
+        heading: other.heading ?? 0,
+        speed: other.speed ?? 0,
+        type: isRA ? 'RA' : 'TA',           // el frontend mira data.type === 'RA'
+        alertLevel: level,
+        timeToImpact,
+        distanceMeters: distance,
+        distance,                           // (compat)
         aircraftIcon: other.icon || '2.png',
         callsign: other.callsign || '',
+        from: fromName,
+        to: toName,
       };
 
-      io.to(recvInfo.socketId).emit('conflicto', payload);
+      emitToUser(recipientName, 'conflicto', payload);
+    }
+
+    if (isRA) {
+      // 🔴 RA: sólo para los dos implicados
+      const fromName = sender;      // el que calculó y envió el RA
+      const toName   = targetName;  // el que va de frente para él
+
+      // 1) al emisor: le mostramos al "otro"
+      emitConflictFor(fromName, toName, fromName, toName);
+
+      // 2) al objetivo: le mostramos al emisor
+      emitConflictFor(toName, fromName, fromName, toName);
+    } else {
+      // 🟡 TA: dejamos el comportamiento estilo broadcast (como antes)
+      for (const [recvName, recvInfo] of Object.entries(userLocations)) {
+        if (recvName === sender || !recvInfo?.socketId) continue;
+
+        const other = userLocations[targetName];
+        const me    = userLocations[recvName];
+        if (!other || !me) continue;
+
+        const distance = getDistance(
+          me.latitude,
+          me.longitude,
+          other.latitude,
+          other.longitude
+        );
+
+        const payload = {
+          id: targetName,
+          name: targetName,
+          lat: other.latitude,
+          lon: other.longitude,
+          alt: other.alt ?? 0,
+          heading: other.heading ?? 0,
+          speed: other.speed ?? 0,
+          type: 'TA',
+          alertLevel: level,
+          timeToImpact,
+          distanceMeters: distance,
+          distance,
+          aircraftIcon: other.icon || '2.png',
+          callsign: other.callsign || '',
+          from: sender,
+          to: targetName,
+        };
+
+        io.to(recvInfo.socketId).emit('conflicto', payload);
+      }
     }
   });
+
 
 
   socket.on('warning-clear', (msg) => {
