@@ -1121,25 +1121,30 @@ io.on('connection', (socket) => {
     const senderInfo = userLocations[sender];
     if (!senderInfo) return;
 
-    // Nivel (igual que antes)
+    // Nivel normalizado
     const level =
       warningData.alertLevel ||
       (warningData.type === 'RA' && warningData.timeToImpact < 60 ? 'RA_HIGH'
        : warningData.type === 'RA' ? 'RA_LOW'
        : 'TA');
 
-    const isRA = level === 'RA_HIGH' || level === 'RA_LOW';
+    // ✅ Solo procesamos RA. Cualquier cosa que no sea RA se ignora.
+    const isRA =
+      level === 'RA_HIGH' ||
+      level === 'RA_LOW'  ||
+      warningData.type === 'RA';
+
+    if (!isRA) {
+      return; // ⛔️ no difundimos TA ni nada que no sea RA
+    }
 
     // El objetivo que detectó el frontend (el "otro" avión)
     const targetName = String(warningData.id || warningData.name || '');
     if (!targetName) return;
 
-    const targetInfo = userLocations[targetName];
-    if (!targetInfo) return;
-
     const timeToImpact = warningData.timeToImpact ?? 999;
 
-    // Función helper: enviar a un receptor info del "otro" avión
+    // Helper: enviar a un receptor info del "otro" avión (RA espejado)
     function emitConflictFor(recipientName, otherName, fromName, toName) {
       const me    = userLocations[recipientName];
       const other = userLocations[otherName];
@@ -1160,11 +1165,11 @@ io.on('connection', (socket) => {
         alt: other.alt ?? 0,
         heading: other.heading ?? 0,
         speed: other.speed ?? 0,
-        type: isRA ? 'RA' : 'TA',           // el frontend mira data.type === 'RA'
-        alertLevel: level,
+        type: 'RA',                 // 👈 el frontend mira data.type === 'RA'
+        alertLevel: level,          // RA_LOW / RA_HIGH
         timeToImpact,
         distanceMeters: distance,
-        distance,                           // (compat)
+        distance,
         aircraftIcon: other.icon || '2.png',
         callsign: other.callsign || '',
         from: fromName,
@@ -1174,54 +1179,15 @@ io.on('connection', (socket) => {
       emitToUser(recipientName, 'conflicto', payload);
     }
 
-    if (isRA) {
-      // 🔴 RA: sólo para los dos implicados
-      const fromName = sender;      // el que calculó y envió el RA
-      const toName   = targetName;  // el que va de frente para él
+    // 🔴 RA: sólo para los dos implicados (sender y target)
+    const fromName = sender;      // el que calculó y mandó el RA
+    const toName   = targetName;  // el que va de frente para él
 
-      // 1) al emisor: le mostramos al "otro"
-      emitConflictFor(fromName, toName, fromName, toName);
+    // 1) al emisor: le mostramos al "otro"
+    emitConflictFor(fromName, toName, fromName, toName);
 
-      // 2) al objetivo: le mostramos al emisor
-      emitConflictFor(toName, fromName, fromName, toName);
-    } else {
-      // 🟡 TA: dejamos el comportamiento estilo broadcast (como antes)
-      for (const [recvName, recvInfo] of Object.entries(userLocations)) {
-        if (recvName === sender || !recvInfo?.socketId) continue;
-
-        const other = userLocations[targetName];
-        const me    = userLocations[recvName];
-        if (!other || !me) continue;
-
-        const distance = getDistance(
-          me.latitude,
-          me.longitude,
-          other.latitude,
-          other.longitude
-        );
-
-        const payload = {
-          id: targetName,
-          name: targetName,
-          lat: other.latitude,
-          lon: other.longitude,
-          alt: other.alt ?? 0,
-          heading: other.heading ?? 0,
-          speed: other.speed ?? 0,
-          type: 'TA',
-          alertLevel: level,
-          timeToImpact,
-          distanceMeters: distance,
-          distance,
-          aircraftIcon: other.icon || '2.png',
-          callsign: other.callsign || '',
-          from: sender,
-          to: targetName,
-        };
-
-        io.to(recvInfo.socketId).emit('conflicto', payload);
-      }
-    }
+    // 2) al objetivo: le mostramos al emisor
+    emitConflictFor(toName, fromName, fromName, toName);
   });
 
 
