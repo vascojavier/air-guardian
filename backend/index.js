@@ -161,12 +161,14 @@ function resetLandingState(name, to='ORD') {
 
 // ========= Configuración ATC =========
 const NM_TO_M = 1852;
-const B1_DIST_NM = 3.5;       // ~3–4 NM
-const B2_DIST_NM = 7.0;       // ~6–8 NM
+const B1_DIST_NM = 2.5;       // ~3–4 NM
+const B2_DIST_NM = 3.5;       // ~6–8 NM
+const STACK_SPACING_NM = 1.5; // separación extra entre aviones en la radial de B2
 const B1_FREEZE_RADIUS_M = 2500;   // a este radio de B1 se congela el turno
 const BEACON_REACHED_M = 600;      // umbral para considerar “llegó” a un beacon
 const INTERLEAVE_WINDOW_S = 120;   // ventana de intercalado ±2 min
 const MAX_DELAY_SHIFT_S = 60;      // máximo corrimiento permitido de slots no-frozen
+
 
 // ROT por categoría (segundos)
 const ROT_BY_CAT = {
@@ -292,13 +294,44 @@ function activeRunwayGeom() {
 function assignBeaconsFor(name) {
   const g = activeRunwayGeom();
   if (!g) return null;
+
+  // B1 siempre igual para todos
+  const baseB1 = g.B1;
+
+  // B2 base (el nominal que ya tenías)
+  const baseB2 = g.B2;
+
+  // Distancia actual de B2 al umbral de pista
+  const distB2FromThr = getDistance(g.thr.lat, g.thr.lon, baseB2.lat, baseB2.lon);
+
+  // Índice del avión en la cola de aterrizajes (0 = primero, 1 = segundo, etc.)
+  const idx = runwayState.landings.findIndex(l => l.name === name);
+  const stackIndex = idx >= 0 ? idx : 0;
+
+  // Distancia final para este avión: B2 + n * STACK_SPACING_NM
+  const stackedDistM = distB2FromThr + stackIndex * STACK_SPACING_NM * NM_TO_M;
+
+  // Nuevo B2 “extendido” sobre la misma radial de aproximación
+  const stackedB2 = destinationPoint(
+    g.thr.lat,
+    g.thr.lon,
+    g.app_brg,     // misma dirección de aproximación
+    stackedDistM   // distancia aumentada
+  );
+
+  // Usamos un objeto por avión, pero dejamos que se actualice si cambia el orden
   let asg = approachAssign.get(name);
   if (!asg) {
-    asg = { b1: g.B1, b2: g.B2 };
+    asg = { b1: baseB1, b2: stackedB2 };
     approachAssign.set(name, asg);
+  } else {
+    asg.b1 = baseB1;
+    asg.b2 = stackedB2;
   }
+
   return asg;
 }
+
 
 function getLandingByName(name) {
   return runwayState.landings.find(l => l.name === name);
