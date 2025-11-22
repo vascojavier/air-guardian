@@ -1114,6 +1114,7 @@ io.on('connection', (socket) => {
   });
 
 
+  // === RA espejo: sólo para el par implicado. TA se ignora (solo frontend) ===
   socket.on('warning', (warningData) => {
     const sender = socketIdToName[socket.id];   // quién emite el warning
     if (!sender) return;
@@ -1121,30 +1122,29 @@ io.on('connection', (socket) => {
     const senderInfo = userLocations[sender];
     if (!senderInfo) return;
 
-    // Nivel normalizado
     const level =
       warningData.alertLevel ||
       (warningData.type === 'RA' && warningData.timeToImpact < 60 ? 'RA_HIGH'
        : warningData.type === 'RA' ? 'RA_LOW'
        : 'TA');
 
-    // ✅ Solo procesamos RA. Cualquier cosa que no sea RA se ignora.
-    const isRA =
-      level === 'RA_HIGH' ||
-      level === 'RA_LOW'  ||
-      warningData.type === 'RA';
+    const isRA = level === 'RA_HIGH' || level === 'RA_LOW';
 
+    // 🟡 TA: NO se reenvía. Cada cliente maneja su propio TA local.
     if (!isRA) {
-      return; // ⛔️ no difundimos TA ni nada que no sea RA
+      return;
     }
 
-    // El objetivo que detectó el frontend (el "otro" avión)
+    // 🔴 RA: sólo para los dos implicados
     const targetName = String(warningData.id || warningData.name || '');
     if (!targetName) return;
 
+    const targetInfo = userLocations[targetName];
+    if (!targetInfo) return;
+
     const timeToImpact = warningData.timeToImpact ?? 999;
 
-    // Helper: enviar a un receptor info del "otro" avión (RA espejado)
+    // helper: enviar a un receptor la info del "otro" avión
     function emitConflictFor(recipientName, otherName, fromName, toName) {
       const me    = userLocations[recipientName];
       const other = userLocations[otherName];
@@ -1165,8 +1165,8 @@ io.on('connection', (socket) => {
         alt: other.alt ?? 0,
         heading: other.heading ?? 0,
         speed: other.speed ?? 0,
-        type: 'RA',                 // 👈 el frontend mira data.type === 'RA'
-        alertLevel: level,          // RA_LOW / RA_HIGH
+        type: 'RA',                    // el frontend mira data.type === 'RA'
+        alertLevel: level,             // RA_LOW o RA_HIGH
         timeToImpact,
         distanceMeters: distance,
         distance,
@@ -1179,8 +1179,7 @@ io.on('connection', (socket) => {
       emitToUser(recipientName, 'conflicto', payload);
     }
 
-    // 🔴 RA: sólo para los dos implicados (sender y target)
-    const fromName = sender;      // el que calculó y mandó el RA
+    const fromName = sender;      // el que calculó y envió el RA
     const toName   = targetName;  // el que va de frente para él
 
     // 1) al emisor: le mostramos al "otro"
@@ -1189,6 +1188,7 @@ io.on('connection', (socket) => {
     // 2) al objetivo: le mostramos al emisor
     emitConflictFor(toName, fromName, fromName, toName);
   });
+
 
 
 
