@@ -933,7 +933,14 @@ function cleanupInUseIfDone() {
     newLand.forEach((name, idx) => {
       if (oldLand.indexOf(name) !== idx) {
         const st = getOpsState(name);
-        const allowTurnMsg = !(st === 'FINAL' || st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'APRON_STOP');
+              const allowTurnMsg = !(
+        st === 'FINAL' ||
+        st === 'RUNWAY_OCCUPIED' ||
+        st === 'RUNWAY_CLEAR' ||
+        st === 'APRON_STOP' ||
+        st === 'TAXI_APRON'
+      );
+
         if (allowTurnMsg) {
           emitToUser(name, 'runway-msg', { text: `Su turno de aterrizaje ahora es #${idx+1}`, key: 'turn-land' });
         }
@@ -1080,11 +1087,29 @@ io.on('connection', (socket) => {
         runwayState.inUse = null;
       }
 
+    // ✅ Apenas toca pista (o la libera), ya NO pertenece más a la cola de aterrizajes.
+    //    Así no sigue recibiendo cambios de turno de landing.
+    if (state === 'RUNWAY_OCCUPIED' || state === 'RUNWAY_CLEAR') {
+      runwayState.landings = runwayState.landings.filter(l => l.name !== name);
+    }
+
+
       // Congelar reorden al tocar B1/FINAL
       if (state === 'B1' || state === 'FINAL') {
         const L = runwayState.landings.find(l => l.name === name);
         if (L) L.frozenLevel = 1;
       }
+
+          // ✅ Si ya está taxiando al apron o detenido en él, ya terminó su aterrizaje:
+    //    - sacarlo de la cola de aterrizajes
+    //    - marcarlo como IN_STANDS en el estado sticky
+    if (state === 'TAXI_APRON' || state === 'APRON_STOP') {
+      runwayState.landings = runwayState.landings.filter(l => l.name !== name);
+      setLandingStateForward(name, 'IN_STANDS');
+    }
+
+  
+
 
       // Replanificar/publicar con el nuevo estado
       if (runwayState.landings.length || runwayState.takeoffs.length) {
