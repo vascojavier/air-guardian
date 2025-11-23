@@ -295,42 +295,54 @@ function assignBeaconsFor(name) {
   const g = activeRunwayGeom();
   if (!g) return null;
 
-  // B1 siempre igual para todos
+  // B1 siempre igual para todos (fijo)
   const baseB1 = g.B1;
 
-  // B2 base (el nominal que ya tenías)
+  // B2 base desde la geometría de pista
   const baseB2 = g.B2;
 
   // Distancia actual de B2 al umbral de pista
   const distB2FromThr = getDistance(g.thr.lat, g.thr.lon, baseB2.lat, baseB2.lon);
 
-  // Índice del avión en la cola de aterrizajes (0 = primero, 1 = segundo, etc.)
+  // Índice del avión en la cola de aterrizajes (ya ordenada por planRunwaySequence)
   const idx = runwayState.landings.findIndex(l => l.name === name);
-  const stackIndex = idx >= 0 ? idx : 0;
+  const stackIndex = Math.max(0, idx); // 0 = primero, 1 = segundo, etc.
 
-  // Distancia final para este avión: B2 + n * STACK_SPACING_NM
-  const stackedDistM = distB2FromThr + stackIndex * STACK_SPACING_NM * NM_TO_M;
+  // Queremos:
+  //  - el 1º en la cola → B2 (distancia base)
+  //  - el 2º → B3 = B2 + 1 * STACK_SPACING
+  //  - el 3º → B4 = B2 + 2 * STACK_SPACING
+  //
+  // O sea: offset = stackIndex * STACK_SPACING
+  const distOffsetM = stackIndex * STACK_SPACING_NM * NM_TO_M;
+  const stackedDistM = distB2FromThr + distOffsetM;
 
-  // Nuevo B2 “extendido” sobre la misma radial de aproximación
+  // Nuevo punto “Bn” sobre la misma radial de aproximación
   const stackedB2 = destinationPoint(
     g.thr.lat,
     g.thr.lon,
     g.app_brg,     // misma dirección de aproximación
-    stackedDistM   // distancia aumentada
+    stackedDistM
   );
 
-  // Usamos un objeto por avión, pero dejamos que se actualice si cambia el orden
+  // Nombre lógico del beacon para este avión: B2, B3, B4...
+  const beaconOrdinal = 2 + stackIndex;    // 2,3,4,...
+  const beaconName = `B${beaconOrdinal}`;
+
   let asg = approachAssign.get(name);
   if (!asg) {
-    asg = { b1: baseB1, b2: stackedB2 };
+    asg = { b1: baseB1, b2: stackedB2, beaconName, beaconIndex: beaconOrdinal };
     approachAssign.set(name, asg);
   } else {
     asg.b1 = baseB1;
     asg.b2 = stackedB2;
+    asg.beaconName = beaconName;
+    asg.beaconIndex = beaconOrdinal;
   }
 
   return asg;
 }
+
 
 
 function getLandingByName(name) {
@@ -765,19 +777,27 @@ function maybeSendInstruction(opId, opsById) {
   // 0) Si ya está CLRD, nunca emitir algo que retroceda
   if (phaseNow === 'CLRD') return;
 
-  // 1) Ir a B2 SOLO si aún estamos en TO_B2, no pedimos antes B1 y sticky < B1
-  if (phaseNow === 'TO_B2' && dB2 > BEACON_REACHED_M && !stickyReachedB1 && mem.phase !== 'B1') {
-    if (mem.phase !== 'B2') {
+  // 1) Ir a B2/B3/B4... SOLO si aún estamos en TO_B2, no pedimos antes B1 y sticky < B1
+  if (phaseNow === 'TO_B2' &&
+      dB2 > BEACON_REACHED_M &&
+      !stickyReachedB1 &&
+      mem.phase !== 'B1') {
+
+    const beaconName = asg.beaconName || 'B2';
+
+    if (mem.phase !== beaconName) {
       emitToUser(op.name, 'atc-instruction', {
         type: 'goto-beacon',
-        beacon: 'B2',
-        lat: asg.b2.lat, lon: asg.b2.lon,
-        text: 'Proceda a B2'
+        beacon: beaconName,
+        lat: asg.b2.lat,
+        lon: asg.b2.lon,
+        text: `Proceda a ${beaconName}`
       });
-      lastInstr.set(op.name, { phase: 'B2', ts: now });
+      lastInstr.set(op.name, { phase: beaconName, ts: now });
     }
     return;
   }
+
 
   // 2) Ventana para B1, pero NUNCA si ya estás en FINAL/CLRD o sticky >= FINAL
   if ((phaseNow === 'TO_B2' || phaseNow === 'TO_B1') &&
@@ -860,38 +880,57 @@ function publishRunwayState() {
 
   // Secuencia “avanzada” + beacons para guiar
   const g = activeRunwayGeom();
-io.emit('sequence-update', {
-  serverTime: now,
-  airfield,
-  beacons: g ? { B1: g.B1, B2: g.B2 } : null,
-  slots: slots.map((s, idx) => {
-    const op = lastOpsById.get(s.opId) || {};
-    const prev = idx > 0 ? slots[idx-1] : null;
-    const prevOp = prev ? lastOpsById.get(prev.opId) : null;
 
-    // rot y wake efectivo con el anterior (si hay)
-    const rotSec = ROT_BY_CAT[op.category] ?? 100;
-    const wakePrevNextSec = (prevOp ? (wakeExtraSeconds(prevOp.category, op.category) || 0) : 0);
+  // Construir beacons “apilados” para cada llegada en orden
+  let stackedBeacons = [];
+  if (g) {
+    const arrSlots = slots.filter(s => s.type === 'ARR');
+    stackedBeacons = arrSlots.map((s, idx) => {
+      const name = (s.opId || '').split('#')[1];
+      const asg = assignBeaconsFor(name);
+      const beaconName = asg?.beaconName || `B${idx + 2}`;
+      return {
+        name,               // nombre del avión
+        beacon: beaconName, // 'B2','B3','B4',...
+        lat: asg?.b2.lat ?? g.B2.lat,
+        lon: asg?.b2.lon ?? g.B2.lon,
+      };
+    });
+  }
 
-    return {
-      opId: s.opId,
-      type: s.type,
-      name: (s.opId || '').split('#')[1],
-      startMs: s.startMs,
-      endMs: s.endMs,
-      frozen: s.frozen,
+  io.emit('sequence-update', {
+    serverTime: now,
+    airfield,
+    beacons: g ? {
+      B1: g.B1,
+      B2: g.B2,          // base
+      stack: stackedBeacons,  // 👈 NUEVO: beacons B2/B3/B4... por avión
+    } : null,
+    slots: slots.map((s, idx) => {
+      const op = lastOpsById.get(s.opId) || {};
+      const prev = idx > 0 ? slots[idx-1] : null;
+      const prevOp = prev ? lastOpsById.get(prev.opId) : null;
 
-      // 👇 enriquecido para la UI
-      category: op.category || null,
-      priority: op.priority ?? null,
-      etaB1: op.etaB1 ?? null,
-      etaB2: op.etaB2 ?? null,
-      rotSec,
-      wakePrevNextSec,
-      shiftAccumMs: shiftAccumMsByOpId.get(s.opId) || 0,
-    };
-  }),
-});
+      const rotSec = ROT_BY_CAT[op.category] ?? 100;
+      const wakePrevNextSec = (prevOp ? (wakeExtraSeconds(prevOp.category, op.category) || 0) : 0);
+
+      return {
+        opId: s.opId,
+        type: s.type,
+        name: (s.opId || '').split('#')[1],
+        startMs: s.startMs,
+        endMs: s.endMs,
+        frozen: s.frozen,
+        category: op.category || null,
+        priority: op.priority ?? null,
+        etaB1: op.etaB1 ?? null,
+        etaB2: op.etaB2 ?? null,
+        rotSec,
+        wakePrevNextSec,
+        shiftAccumMs: shiftAccumMsByOpId.get(s.opId) || 0,
+      };
+    }),
+  });
 
 }
 
