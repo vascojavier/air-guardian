@@ -1289,22 +1289,27 @@ io.on('connection', (socket) => {
 
 
 
-  socket.on('warning-clear', (msg) => {
-    const sender = socketIdToName[socket.id];   // quién está avisando el clear
-    if (!sender) return;
+socket.on('warning-clear', (msg) => {
+  const sender = socketIdToName[socket.id];   // quién está avisando el clear
+  if (!sender) return;
 
-    const target = String(msg?.id || '');       // contra quién fue el RA original
-    if (!target) return;
+  const target = String(msg?.id || '');       // contra quién fue el RA original (el otro avión)
+  if (!target) return;
 
-    for (const [recvName, info] of Object.entries(userLocations)) {
-      if (recvName === sender || !info?.socketId) continue;
+  // Sólo los dos implicados en el RA
+  const involved = [sender, target];
 
-      // espejo: si el receptor es el target, debe limpiar al sender; si no, limpia al target
-      const otherName = (recvName === target) ? sender : target;
+  for (const recvName of involved) {
+    const info = userLocations[recvName];
+    if (!info?.socketId) continue;
 
-      io.to(info.socketId).emit('conflicto-clear', { id: otherName });
-    }
-  });
+    // Para cada uno, limpiamos el RA que ve del "otro"
+    const otherName = (recvName === sender) ? target : sender;
+
+    io.to(info.socketId).emit('conflicto-clear', { id: otherName });
+  }
+});
+
 
 
   // (1) Manejar air-guardian/leave
