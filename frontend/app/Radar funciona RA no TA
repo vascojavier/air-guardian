@@ -1,17 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  Dimensions,
-  TouchableOpacity,
-  Image as RNImage,
-  Alert,
-  Platform,
-  AppState,
-  ScrollView,
-} from 'react-native';
-
+import { View, Text, StyleSheet, Dimensions, TouchableOpacity, Image, Image as RNImage, Alert, Platform, AppState, ScrollView } from 'react-native';
 //                                             ^^^^^^^^^^^^^^  agrega esto
 
 import MapView, { Marker, PROVIDER_GOOGLE, Polyline } from 'react-native-maps';
@@ -344,43 +332,29 @@ function emitOpsNow(next: OpsState) {
   const lastRAIdRef = useRef<string | null>(null);
   // Hold por RA de 6s por avión (evita que TA local “pise” al RA backend)
   const raHoldUntilRef = useRef<Record<string, number>>({});
-    // RA actual emitido por *este* avión (mi avión)
-  const activeRAIdRef = useRef<string | null>(null);
-
 
 
   
 
-const maybeEmitWarning = (w: Warning) => {
-  // ⚠️ Nunca mandamos TA al backend: sólo RA
-  if (w.alertLevel === 'TA') {
-    return;
-  }
+  const maybeEmitWarning = (w: Warning) => {
+    // solo emitimos TA/RA válidos
+    if (!w || !['TA','RA_LOW','RA_HIGH'].includes(w.alertLevel)) return;
+    const s = socketRef.current;
+    if (!s) return;
 
-  // a partir de acá, sólo RA_LOW / RA_HIGH
-  const socket = socketRef.current;
-  if (!socket) return;
-
-  // lo que ya tengas para throttle / evitar duplicados, etc.
-  // (ejemplo genérico)
-  const payload = {
-    id: w.id,
-    name: w.name,
-    lat: w.lat,
-    lon: w.lon,
-    alt: w.alt,
-    heading: w.heading,
-    speed: w.speed,
-    alertLevel: w.alertLevel,  // RA_LOW / RA_HIGH
-    timeToImpact: w.timeToImpact,
-    aircraftIcon: w.aircraftIcon,
-    callsign: w.callsign,
-    type: 'RA',                // 👈 importante: marcamos RA
+    const sig = `${w.id}|${w.alertLevel}`;
+    const now = Date.now();
+    // re-emití si cambia la firma o pasaron 3s desde el último envío
+    if (
+      !lastSentWarningRef.current ||
+      lastSentWarningRef.current.sig !== sig ||
+      now - lastSentWarningRef.current.t > 3000
+    ) {
+      s.emit('warning', w);
+      lastSentWarningRef.current = { sig, t: now };
+      console.log('📡 Enviado warning (forzado):', w);
+    }
   };
-
-  socket.emit('warning', payload);
-};
-
 
 
   const clearWarningFor = (planeId: string) => {
@@ -1300,38 +1274,13 @@ useEffect(() => {
     );
   }
 
-    setLocalWarning(nuevoWarningLocal);
+  setLocalWarning(nuevoWarningLocal);
 
-  // === Ciclo de vida del RA emitido por ESTE avión ===
-  {
-    const prevId =
-      activeRAIdRef.current; // avión contra el que yo estaba emitiendo RA antes
-
-    const currentId =
-      nuevoWarningLocal &&
-      (nuevoWarningLocal.alertLevel === 'RA_LOW' ||
-       nuevoWarningLocal.alertLevel === 'RA_HIGH')
-        ? nuevoWarningLocal.id
-        : null;
-
-    // Si antes había RA y ahora cambió de avión o desapareció → warning-clear
-    if (prevId && prevId !== currentId) {
-      try {
-        socketRef.current?.emit('warning-clear', { id: prevId });
-        console.log('[RA] warning-clear emitido para', prevId);
-      } catch (e) {
-        console.warn('[RA] error emitiendo warning-clear', e);
-      }
-    }
-
-    // Actualizar el RA activo (o null si ya no hay RA)
-    activeRAIdRef.current = currentId;
-  }
-
-  // ⬇️ recordar el último RA local (opcional, si aún lo querés)
+  // ⬇️ recordar el último RA local
   if (
     nuevoWarningLocal &&
-    (nuevoWarningLocal.alertLevel === 'RA_LOW' || nuevoWarningLocal.alertLevel === 'RA_HIGH')
+    (nuevoWarningLocal.alertLevel === 'RA_LOW' ||
+      nuevoWarningLocal.alertLevel === 'RA_HIGH')
   ) {
     lastRAIdRef.current = nuevoWarningLocal.id;
   }
@@ -1339,46 +1288,17 @@ useEffect(() => {
   // ⬇️ salir si está corriendo el hold de RA o el bloqueador temporal
   if (holdTimerRef.current || Date.now() < blockUpdateUntil.current) return;
 
+  // ⬇️ evita re-mostrar el mismo avión mientras dura el snooze
+  const candId = (nuevoWarningLocal?.id) || (backendWarning?.id);
+  if (
+    snoozeIdRef.current &&
+    Date.now() < snoozeUntilRef.current &&
+    candId === snoozeIdRef.current
+  ) {
+    return;
+  }
 
-  // ⬇️ recordar el último RA local
-    // ⬇️ recordar el último RA local
-    if (
-      nuevoWarningLocal &&
-      (nuevoWarningLocal.alertLevel === 'RA_LOW' || nuevoWarningLocal.alertLevel === 'RA_HIGH')
-    ) {
-      lastRAIdRef.current = nuevoWarningLocal.id;
-    }
-
-    // ⬇️ salir si está corriendo el hold de RA o el bloqueador temporal
-    if (holdTimerRef.current || Date.now() < blockUpdateUntil.current) return;
-
-    // ⬇️ evita re-mostrar el mismo avión mientras dura el snooze
-    const candId = (nuevoWarningLocal?.id) || (backendWarning?.id);
-    if (snoozeIdRef.current && Date.now() < snoozeUntilRef.current && candId === snoozeIdRef.current) {
-      return;
-    }
-
-    // 🟥 PRIORIDAD: si ya tengo un RA en hold, un TA NO puede pisarlo
-    if (
-      holdTimerRef.current &&                     // hay hold activo
-      prioritizedWarning &&                       // hay algo en pantalla
-      (prioritizedWarning.alertLevel === 'RA_LOW' ||
-       prioritizedWarning.alertLevel === 'RA_HIGH')
-    ) {
-      // Solo permitimos reemplazarlo por otro RA, nunca por TA
-      const candidato = nuevoWarningLocal || backendWarning;
-      const candidatoEsRA =
-        candidato &&
-        (candidato.alertLevel === 'RA_LOW' || candidato.alertLevel === 'RA_HIGH');
-
-      if (!candidatoEsRA) {
-        // candidato es TA (o nada) → NO tocar el RA actual
-        return;
-      }
-    }
-
-    const prioridades = { RA_HIGH: 3, RA_LOW: 2, TA: 1 };
-
+  const prioridades = { RA_HIGH: 3, RA_LOW: 2, TA: 1 };
 
   // Si no hay warnings, limpiamos
   if (!nuevoWarningLocal && !backendWarning) {
@@ -2193,7 +2113,14 @@ useEffect(() => {
       holdTimerRef.current = null;
       lastSentWarningRef.current = null;
 
-
+      // 🔕 avisar al resto que este RA terminó (solo si era RA)
+      if (isRA) {
+        try {
+          const id = lastRAIdRef.current || pwId; // usa el que tengas más confiable
+          lastRAIdRef.current = null;
+          if (id) socketRef.current?.emit('warning-clear', { id });
+        } catch {}
+      }
     }, 6000);
   }
 }, [prioritizedWarning?.id, prioritizedWarning?.alertLevel]);
@@ -2345,7 +2272,6 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
   }
 
   // 3) Separación <5 min entre dos aterrizajes => al segundo: giro 360 por derecha
-   /*
   const myETA = etaToActiveThresholdSec();
   if (landingRequestedRef.current && typeof myETA === 'number') {
     const others = (st.landings||[]).filter((l:any)=>l.name!==me && typeof l.etaSec==='number');
@@ -2354,7 +2280,6 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
       flashBanner('Haga un giro de 360° por derecha en espera', 'orbit-right');
     }
   }
-      */
 }, [myPlane.lat, myPlane.lon, myPlane.alt, myPlane.speed, runwayState, rw]);
 
   // === NAV: guía simple con B2 → B1 → Umbral, según turno en cola (con voz) ===
