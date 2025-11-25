@@ -295,53 +295,68 @@ function assignBeaconsFor(name) {
   const g = activeRunwayGeom();
   if (!g) return null;
 
-  // B1 siempre igual para todos (fijo)
-  const baseB1 = g.B1;
+  const baseB1 = g.B1;   // Fijo: 2.5 NM aprox
+  const baseB2 = g.B2;   // Fijo: 3.5 NM aprox
 
-  // B2 base desde la geometría de pista
-  const baseB2 = g.B2;
+  // 1) Orden “oficial” de la cola de aterrizajes
+  const arrOrder = runwayState.lastOrder?.landings || [];
+  let queueIdx = arrOrder.indexOf(name);
 
-  // Distancia actual de B2 al umbral de pista
+  // 2) Fallback: por si todavía no está en lastOrder pero sí en landings
+  if (queueIdx === -1) {
+    queueIdx = runwayState.landings.findIndex(l => l.name === name);
+  }
+
+  // 3) Si no está en cola, no asignamos beacons
+  if (queueIdx === -1) return null;
+
+  // 🔹 Lógica de posiciones:
+  //   - queueIdx = 0  → PRIMERO en cola → se gestiona con B1 (FINAL).
+  //     Los beacons de “espera” B2/B3/B4 empiezan recién en el segundo.
+  //
+  //   - queueIdx = 1 → stackIndex = 0 → B2
+  //   - queueIdx = 2 → stackIndex = 1 → B3
+  //   - queueIdx = 3 → stackIndex = 2 → B4
+  const stackIndex = Math.max(0, queueIdx - 1);   // 0->B2, 1->B3, 2->B4...
+
+  // Distancia de B2 al umbral de pista
   const distB2FromThr = getDistance(g.thr.lat, g.thr.lon, baseB2.lat, baseB2.lon);
 
-  // Índice del avión en la cola de aterrizajes (ya ordenada por planRunwaySequence)
-  const idx = runwayState.landings.findIndex(l => l.name === name);
-  const stackIndex = Math.max(0, idx); // 0 = primero, 1 = segundo, etc.
-
-  // Queremos:
-  //  - el 1º en la cola → B2 (distancia base)
-  //  - el 2º → B3 = B2 + 1 * STACK_SPACING
-  //  - el 3º → B4 = B2 + 2 * STACK_SPACING
-  //
-  // O sea: offset = stackIndex * STACK_SPACING
+  // Offset extra según posición en la cola (solo para 2.º, 3.º, 4.º…)
   const distOffsetM = stackIndex * STACK_SPACING_NM * NM_TO_M;
   const stackedDistM = distB2FromThr + distOffsetM;
 
-  // Nuevo punto “Bn” sobre la misma radial de aproximación
-  const stackedB2 = destinationPoint(
+  // Punto Bn sobre la misma radial de aproximación
+  const stackedBn = destinationPoint(
     g.thr.lat,
     g.thr.lon,
-    g.app_brg,     // misma dirección de aproximación
+    g.app_brg,
     stackedDistM
   );
 
-  // Nombre lógico del beacon para este avión: B2, B3, B4...
-  const beaconOrdinal = 2 + stackIndex;    // 2,3,4,...
+  // Nombre lógico del beacon: B2, B3, B4...
+  const beaconOrdinal = 2 + stackIndex;      // 2,3,4,...
   const beaconName = `B${beaconOrdinal}`;
 
   let asg = approachAssign.get(name);
   if (!asg) {
-    asg = { b1: baseB1, b2: stackedB2, beaconName, beaconIndex: beaconOrdinal };
+    asg = {
+      b1: baseB1,           // B1 fijo, cerca de la pista
+      b2: stackedBn,        // B2/B3/B4... según stackIndex
+      beaconName,
+      beaconIndex: beaconOrdinal
+    };
     approachAssign.set(name, asg);
   } else {
     asg.b1 = baseB1;
-    asg.b2 = stackedB2;
+    asg.b2 = stackedBn;
     asg.beaconName = beaconName;
     asg.beaconIndex = beaconOrdinal;
   }
 
   return asg;
 }
+
 
 
 
