@@ -295,62 +295,45 @@ function assignBeaconsFor(name) {
   const g = activeRunwayGeom();
   if (!g) return null;
 
-  const baseB1 = g.B1;   // Fijo: 2.5 NM aprox
-  const baseB2 = g.B2;   // Fijo: 3.5 NM aprox
+  const baseB1 = g.B1;
+  const baseB2 = g.B2;
 
-  // 1) Orden “oficial” de la cola de aterrizajes
-  const arrOrder = runwayState.lastOrder?.landings || [];
-  let queueIdx = arrOrder.indexOf(name);
-
-  // 2) Fallback: por si todavía no está en lastOrder pero sí en landings
-  if (queueIdx === -1) {
-    queueIdx = runwayState.landings.findIndex(l => l.name === name);
-  }
-
-  // 3) Si no está en cola, no asignamos beacons
-  if (queueIdx === -1) return null;
-
-  // 🔹 Lógica de posiciones:
-  //   - queueIdx = 0  → PRIMERO en cola → se gestiona con B1 (FINAL).
-  //     Los beacons de “espera” B2/B3/B4 empiezan recién en el segundo.
-  //
-  //   - queueIdx = 1 → stackIndex = 0 → B2
-  //   - queueIdx = 2 → stackIndex = 1 → B3
-  //   - queueIdx = 3 → stackIndex = 2 → B4
-  const stackIndex = Math.max(0, queueIdx - 1);   // 0->B2, 1->B3, 2->B4...
-
-  // Distancia de B2 al umbral de pista
-  const distB2FromThr = getDistance(g.thr.lat, g.thr.lon, baseB2.lat, baseB2.lon);
-
-  // Offset extra según posición en la cola (solo para 2.º, 3.º, 4.º…)
-  const distOffsetM = stackIndex * STACK_SPACING_NM * NM_TO_M;
-  const stackedDistM = distB2FromThr + distOffsetM;
-
-  // Punto Bn sobre la misma radial de aproximación
-  const stackedBn = destinationPoint(
-    g.thr.lat,
-    g.thr.lon,
-    g.app_brg,
-    stackedDistM
-  );
-
-  // Nombre lógico del beacon: B2, B3, B4...
-  const beaconOrdinal = 2 + stackIndex;      // 2,3,4,...
-  const beaconName = `B${beaconOrdinal}`;
+  const idx = runwayState.landings.findIndex(l => l.name === name);
+  const queueIndex = Math.max(0, idx); // 0 = primero, 1 = segundo, etc.
 
   let asg = approachAssign.get(name);
   if (!asg) {
-    asg = {
-      b1: baseB1,           // B1 fijo, cerca de la pista
-      b2: stackedBn,        // B2/B3/B4... según stackIndex
-      beaconName,
-      beaconIndex: beaconOrdinal
-    };
+    asg = {};
     approachAssign.set(name, asg);
+  }
+
+  // B1 siempre es el fix interno, común a todos
+  asg.b1 = baseB1;
+
+  if (queueIndex === 0) {
+    // 👉 PRIMERO EN LA COLA: su beacon principal es B1
+    asg.b2 = baseB1;          // usamos la posición de B1 también como "beacon" de espera
+    asg.beaconName = 'B1';
+    asg.beaconIndex = 1;
   } else {
-    asg.b1 = baseB1;
+    // 👉 SEGUNDO → B2, TERCERO → B3, etc. más lejos
+    const distB2FromThr = getDistance(g.thr.lat, g.thr.lon, baseB2.lat, baseB2.lon);
+
+    const offsetIndex = queueIndex - 1; // 0 => B2, 1 => B3, 2 => B4...
+    const distOffsetM = offsetIndex * STACK_SPACING_NM * NM_TO_M;
+    const stackedDistM = distB2FromThr + distOffsetM;
+
+    const stackedBn = destinationPoint(
+      g.thr.lat,
+      g.thr.lon,
+      g.app_brg,
+      stackedDistM
+    );
+
     asg.b2 = stackedBn;
-    asg.beaconName = beaconName;
+
+    const beaconOrdinal = 2 + offsetIndex; // 2,3,4,...
+    asg.beaconName = `B${beaconOrdinal}`;
     asg.beaconIndex = beaconOrdinal;
   }
 
