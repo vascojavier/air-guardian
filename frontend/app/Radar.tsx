@@ -33,7 +33,10 @@ import { useFocusEffect } from "@react-navigation/native";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Airfield } from '../types/airfield';
 import * as Speech from 'expo-speech';
+import { useLocalSearchParams } from 'expo-router';
+
 import { iconMap } from '../utils/iconMap';
+
 
 function iconKeyFor(aircraftIcon?: string, alert?: 'none'|'TA'|'RA_LOW'|'RA_HIGH') {
   // normaliza: saca .png si viene como '2.png'
@@ -399,6 +402,11 @@ const maybeEmitWarning = (w: Warning) => {
 };
 
 
+    const { isMotorized: isMotorizedParam } = useLocalSearchParams<{
+    isMotorized?: string;
+    }>();
+
+
 
   const clearWarningFor = (planeId: string) => {
   // 1) sacá el warning del diccionario
@@ -423,6 +431,9 @@ const maybeEmitWarning = (w: Warning) => {
           : t
       )
     );
+
+
+
 
     // 3) si justo ese avión estaba seleccionado/priorizado, limpiá tarjetas
     setSelected(s => (s && s.id === planeId ? null : s));
@@ -1990,6 +2001,7 @@ s.on('conflicto', (data: any) => {
           glideMaxM: glide.dMaxM,
           glideMargin: glide.margin,
           glideClass: glide.klass,
+          isMotorized: isMotorizedParam === '1',
         };
 
 
@@ -2019,6 +2031,7 @@ s.on('conflicto', (data: any) => {
             glideMaxM: glide.dMaxM,
             glideMargin: glide.margin,
             glideClass: glide.klass,
+            isMotorized: isMotorizedParam === '1',
           };
 
 

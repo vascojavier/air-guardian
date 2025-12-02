@@ -1174,21 +1174,25 @@ io.on('connection', (socket) => {
   socket.on('update', (data) => {
     console.log('✈️ UPDATE recibido:', data);
 
-    const {
-      name,
-      latitude,
-      longitude,
-      alt = 0,
-      heading = 0,
-      type = 'unknown',
-      speed = 0,
-      callsign = '',
-      aircraftIcon = '2.png',
-      aglM = null,
-      glideMaxM = null,
-      glideMargin = null,
-      glideClass = null,
-    } = data;
+  const {
+    name,
+    latitude,
+    longitude,
+    alt = 0,
+    heading = 0,
+    type = 'unknown',
+    speed = 0,
+    callsign = '',
+    aircraftIcon = '2.png',
+
+    // 👇 NUEVO: datos que ya manda Radar.tsx
+    aglM = null,
+    glideMaxM = null,
+    glideMargin = null,
+    glideClass = null,
+    isMotorized = undefined,
+  } = data;
+
 
 
     if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
@@ -1217,11 +1221,17 @@ io.on('connection', (socket) => {
       icon: aircraftIcon,
       timestamp: Date.now(),
       socketId: socket.id,
-      // ➕ info de glide que viene del frontend (si la manda)
+
+      // 👇 guardamos la info de planeo
       aglM,
       glideMaxM,
       glideMargin,
       glideClass,
+
+      // 👇 esto es lo que nos dice si es planeador o no
+      isMotorized: typeof isMotorized === 'boolean'
+        ? isMotorized
+        : true, // por defecto lo tratamos como a motor si no viene nada
     };
 
     // ► FSM: actualizar fase con distancias reales
