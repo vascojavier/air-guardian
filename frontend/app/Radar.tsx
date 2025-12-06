@@ -324,6 +324,24 @@ const Radar = () => {
     
   }>(null);
   
+    function randomOffsetAround(
+      lat: number,
+      lon: number,
+      radiusM = 10000
+    ): { latitude: number; longitude: number } {
+      const r = Math.random() * radiusM;          // radio [0, radiusM]
+      const theta = Math.random() * 2 * Math.PI;  // ángulo [0, 2π)
+
+      const dLat = (r * Math.cos(theta)) / 111320; // m → grados aprox
+      const denom = 111320 * Math.cos((lat * Math.PI) / 180) || 1;
+      const dLon = (r * Math.sin(theta)) / denom;
+
+      return {
+        latitude: lat + dLat,
+        longitude: lon + dLon,
+      };
+    }
+
 
   // === Helper: forzar emisión inmediata de OPS ===
 function emitOpsNow(next: OpsState) {
@@ -359,6 +377,21 @@ function emitOpsNow(next: OpsState) {
     heading: 90,
     speed: 40,
   });
+
+  const initialRandomizedRef = useRef(false);
+
+  useEffect(() => {
+    if (initialRandomizedRef.current) return;
+    initialRandomizedRef.current = true;
+
+    setMyPlane(prev => {
+      const baseLat = prev.lat ?? 51.95;
+      const baseLon = prev.lon ?? 4.45;
+      const p = randomOffsetAround(baseLat, baseLon, 10000); // 10 km
+      return { ...prev, lat: p.latitude, lon: p.longitude };
+    });
+  }, []);
+
 
   const lastSentWarningRef = useRef<{ sig: string; t: number } | null>(null);
   const lastRAIdRef = useRef<string | null>(null);
@@ -615,6 +648,11 @@ const gliderGatePoint = useMemo<LatLon | null>(() => {
   return p2;
 }, [rw, activeThreshold]);
 
+// === Info de planeo de *mi* avión para la UI ===
+const myGlideInfo = computeMyGlideInfo();
+const myIsGlider  = isGliderType(myPlane.type);
+const myCantReach =
+  myIsGlider && myGlideInfo.klass === 'NO_REACH';
 
 // Mostrar APRON sólo en cabecera o al liberar pista, y mantenerlo (latch) hasta despegar
 const shouldShowApronMarker = useMemo(() => {
@@ -3027,16 +3065,17 @@ if (idx > 0) {
 
 
         {/* Mi pierna hacia el target (B2/B1/Umbral) */}
-        {navTarget && (
+        {navTarget && !myCantReach && (
           <Polyline
             coordinates={[
               { latitude: myPlane.lat, longitude: myPlane.lon },
-              navTarget
+              navTarget,
             ]}
+            strokeWidth={3}
             strokeColor="blue"
-            strokeWidth={2}
           />
         )}
+
 
 
 
