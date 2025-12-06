@@ -1051,11 +1051,6 @@ function maybeSendInstruction(opId, opsById) {
 
 
 
-
-
-
-
-
 // ========= Publicación de estado =========
 function publishRunwayState() {
   const now = Date.now();
@@ -1279,78 +1274,95 @@ setInterval(() => {
 io.on('connection', (socket) => {
   console.log('🟢 Cliente conectado vía WebSocket:', socket.id);
 
-  socket.on('update', (data) => {
-    console.log('✈️ UPDATE recibido:', data);
+ socket.on('update', (data) => {
+  console.log('✈️ UPDATE recibido:', data);
 
-    const {
-      name,
-      latitude,
-      longitude,
-      alt = 0,
-      heading = 0,
-      type = 'unknown',
-      speed = 0,
-      callsign = '',
-      aircraftIcon = '2.png',
+  const {
+    name,
+    latitude,
+    longitude,
+    alt = 0,
+    heading = 0,
+    type = 'unknown',
+    speed = 0,
+    callsign = '',
+    aircraftIcon = '2.png',
 
-      // 👇 NUEVO: datos que ya manda Radar.tsx
-      aglM = null,
-      glideMaxM = null,
-      glideMargin = null,
-      glideClass = null,
-      isMotorized = undefined,
-      } = data;
+    // 👇 Datos extra que manda Radar.tsx
+    aglM = null,
+    glideMaxM = null,
+    glideMargin = null,
+    glideClass = null,
+    isMotorized: isMotorizedRaw = undefined,   // 👈 renombrado para normalizar
+  } = data;
 
+  if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
 
-
-    if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
-
-    // (4) Defenderse de cambio de nombre en vivo:
-    const existing = userLocations[name];
-    if (existing && existing.socketId && existing.socketId !== socket.id) {
-      // Limpiar la tabla inversa del socket anterior que estaba usando este "name"
-      for (const [sid, uname] of Object.entries(socketIdToName)) {
-        if (uname === name) {
-          delete socketIdToName[sid];
-          break;
-        }
+  // (4) Defenderse de cambio de nombre en vivo:
+  const existing = userLocations[name] || {};
+  if (existing && existing.socketId && existing.socketId !== socket.id) {
+    // Limpiar la tabla inversa del socket anterior que estaba usando este "name"
+    for (const [sid, uname] of Object.entries(socketIdToName)) {
+      if (uname === name) {
+        delete socketIdToName[sid];
+        break;
       }
     }
+  }
 
-    userLocations[name] = {
-      name,
-      latitude,
-      longitude,
-      alt,
-      heading,
-      type,
-      speed,
-      callsign,
-      icon: aircraftIcon,
-      timestamp: Date.now(),
-      socketId: socket.id,
+  // 🧠 Normalizar isMotorized (boolean o string)
+  let normIsMotorized;
+  if (typeof isMotorizedRaw === 'boolean') {
+    normIsMotorized = isMotorizedRaw;
+  } else if (typeof isMotorizedRaw === 'string') {
+    const s = isMotorizedRaw.toLowerCase();
+    normIsMotorized = (s === '1' || s === 'true');
+  } else {
+    normIsMotorized = undefined;
+  }
 
-      // 👇 guardamos la info de planeo
-      aglM,
-      glideMaxM,
-      glideMargin,
-      glideClass,
+  userLocations[name] = {
+    // 🔁 conservamos lo que ya sabíamos de este usuario
+    ...existing,
 
-      // 👇 esto es lo que nos dice si es planeador o no
-      isMotorized: typeof isMotorized === 'boolean'
-        ? isMotorized
-        : true, // por defecto lo tratamos como a motor si no viene nada
-    };
+    // 🔄 campos que siempre actualizamos con el último update
+    name,
+    latitude,
+    longitude,
+    alt,
+    heading,
+    type,
+    speed,
+    callsign,
+    icon: aircraftIcon,
+    timestamp: Date.now(),
+    socketId: socket.id,
 
-    // ► FSM: actualizar fase con distancias reales
-    updateApproachPhase(name);
+    // 👇 info de planeo
+    aglM,
+    glideMaxM,
+    glideMargin,
+    glideClass,
 
-    console.log("🪂 BACKEND GLIDE INFO", userLocations[name]);
+    // 👇 flag de motor / planeador
+    isMotorized:
+      typeof normIsMotorized === 'boolean'
+        ? normIsMotorized
+        : (typeof existing.isMotorized === 'boolean'
+            ? existing.isMotorized
+            : true), // solo si nunca supimos nada -> asumimos a motor
+  };
 
-    socketIdToName[socket.id] = name;
+  // ► FSM: actualizar fase con distancias reales
+  updateApproachPhase(name);
 
-    console.log('🗺️ Estado actual de userLocations:', userLocations);
+  console.log("🪂 BACKEND GLIDE INFO", userLocations[name]);
 
+  socketIdToName[socket.id] = name;
+
+  console.log('🗺️ Estado actual de userLocations:', userLocations);
+
+  // reenviar tráfico a cada usuario (todos menos él mismo)
   for (const [recvName, info] of Object.entries(userLocations)) {
     if (!info?.socketId) continue;
 
@@ -1365,21 +1377,20 @@ io.on('connection', (socket) => {
         type: u.type,
         speed: u.speed,
         callsign: u.callsign,
-        aircraftIcon: u.icon
+        aircraftIcon: u.icon,
       }));
-    
-      io.to(info.socketId).emit('traffic-update', list);
-    }
 
-    
+    io.to(info.socketId).emit('traffic-update', list);
+  }
 
-    // ►► (AGREGADO) replanificar si hay solicitudes pendientes y cambió la kinemática
-    if (runwayState.landings.length || runwayState.takeoffs.length) {
-      enforceCompliance();
-      planRunwaySequence();
-      publishRunwayState();
-    }
- });
+  // ►► replanificar si hay solicitudes pendientes y cambió la kinemática
+  if (runwayState.landings.length || runwayState.takeoffs.length) {
+    enforceCompliance();
+    planRunwaySequence();
+    publishRunwayState();
+  }
+});
+
 
    // === Estado operativo reportado por el frontend ===
   socket.on('ops/state', (msg) => {

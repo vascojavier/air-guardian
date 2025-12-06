@@ -440,14 +440,21 @@ const { isMotorized: isMotorizedParam } = useLocalSearchParams<{
   isMotorized?: string;   // 👈 solo string acá
 }>();
 
-// Y derivás el boolean así:
-const isMotorizedBool =
-  typeof isMotorizedParam === 'string'
-    ? (isMotorizedParam === '1' || isMotorizedParam === 'true')
-    : false; // fallback
 
 
-
+const isMotorizedBool = (() => {
+  if (Array.isArray(isMotorizedParam)) {
+    const v = isMotorizedParam[0];
+    return v === '1' || v === 'true';
+  }
+  if (typeof isMotorizedParam === 'string') {
+    return isMotorizedParam === '1' || isMotorizedParam === 'true';
+  }
+  if (typeof isMotorizedParam === 'boolean') {
+    return isMotorizedParam;
+  }
+  return true; // 🔥 fallback seguro = asumimos A MOTOR si no sabemos
+})();
 
   const clearWarningFor = (planeId: string) => {
   // 1) sacá el warning del diccionario
@@ -2093,6 +2100,7 @@ s.on('conflicto', (data: any) => {
             alt: coords.altitude || 0,
             heading: coords.heading || 0,
             speed: speedKmh, // km/h en estado
+            isMotorized: isMotorizedBool,   // 👈 también acá
           }));
         } catch (err) {
           console.warn('📍 Error obteniendo ubicación:', err);
