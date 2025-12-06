@@ -2100,7 +2100,7 @@ s.on('conflicto', (data: any) => {
             alt: coords.altitude || 0,
             heading: coords.heading || 0,
             speed: speedKmh, // km/h en estado
-            isMotorized: isMotorizedBool,   // 👈 también acá
+            
           }));
         } catch (err) {
           console.warn('📍 Error obteniendo ubicación:', err);

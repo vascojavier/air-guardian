@@ -306,11 +306,12 @@ function classifyGlideForLanding(l) {
       dMaxM: 0,
       margin: null,
       klass: 'NO_REACH',
+      glideMaxM: 0,
+      glideMargin: null,
     };
   }
 
   const fieldElev = lastAirfield?.elevation || 0;
-  // Si el front nos manda aglM, lo respetamos; si no, lo calculamos alt - elev
   const agl = (typeof loc.aglM === 'number')
     ? loc.aglM
     : Math.max(0, (loc.alt ?? 0) - fieldElev);
@@ -331,6 +332,8 @@ function classifyGlideForLanding(l) {
       dMaxM: dMax,
       margin: null,
       klass: 'NO_REACH',
+      glideMaxM: dMax,
+      glideMargin: null,
     };
   }
 
@@ -338,11 +341,19 @@ function classifyGlideForLanding(l) {
 
   let klass;
   if (dThr > dMax)        klass = 'NO_REACH';
-  else if (margin > 0.7)  klass = 'CRITICAL';  // llega muy justo
-  else if (margin > 0.5)  klass = 'TIGHT';     // llega, pero sin tanto margen
-  else                    klass = 'COMFY';     // llega cómodo
+  else if (margin > 0.7)  klass = 'CRITICAL';
+  else if (margin > 0.5)  klass = 'TIGHT';
+  else                    klass = 'COMFY';
 
-  return { aglM: agl, dThrM: dThr, dMaxM: dMax, margin, klass };
+  return {
+    aglM: agl,
+    dThrM: dThr,
+    dMaxM: dMax,
+    margin,
+    klass,
+    glideMaxM: dMax,
+    glideMargin: margin,
+  };
 }
 
 
@@ -838,28 +849,39 @@ function maybeSendInstruction(opId, opsById) {
   const u = userLocations[op.name];
   if (!u) return;
 
-  // Info de emergencia / emergencia principal
   const landingObj = runwayState.landings.find(l => l.name === op.name);
   const isEmergency = !!landingObj?.emergency;
-  const isPrimaryEmergency = !!landingObj?.isPrimaryEmergency; // se setea en planRunwaySequence()
+  const isPrimaryEmergency = !!landingObj?.isPrimaryEmergency;
 
-  // 🪂 Info de planeo desde userLocations (frontend)
-  const glideInfo   = landingObj?.glide || null;
-  const glideClass  = glideInfo?.glideClass || null;
-  const maxBeaconDist =
-    glideInfo && typeof glideInfo.glideMaxM === 'number'
-      ? 0.7 * glideInfo.glideMaxM // usamos sólo ~70% del alcance
-      : null;
+  // 🪂 Info de planeo: mezclar FRONT (userLocations) + BACKEND (classifyGlideForLanding)
+  const glideBackend = landingObj?.glide || null;
+  const glideFront   = getGlideInfoFor(op.name);   // 👈 ya la tienes definida arriba
 
-  // Categoría "clásica" (por si type trae GLIDER, HEAVY, etc.)
+  const glideClass =
+    (glideFront && glideFront.glideClass) ||
+    (glideBackend && glideBackend.klass) ||
+    null;
+
+  let maxBeaconDist = null;
+  if (glideFront && typeof glideFront.glideMaxM === 'number') {
+    maxBeaconDist = 0.7 * glideFront.glideMaxM;
+  } else if (glideBackend && typeof glideBackend.dMaxM === 'number') {
+    maxBeaconDist = 0.7 * glideBackend.dMaxM;
+  }
+
+  // Categoría "clásica"
   const cat = parseCategory(landingObj?.type || op.category || '');
 
-  // ÚNICO flag de “planeador”
+  // 👉 Flag real de motor/planeador usando lo que mandó el front
+  const isMotorized =
+    typeof glideFront?.isMotorized === 'boolean'
+      ? glideFront.isMotorized
+      : (cat !== 'GLIDER');  // si no sabemos, solo texto GLIDER lo trata como tal
+
   const isGlider =
-    (glideInfo && glideInfo.isMotorized === false) ||
+    (isMotorized === false) ||
     cat === 'GLIDER';
 
-  // “grupo especial”: planeador o emergencia
   const isGliderOrEmergency = isGlider || !!landingObj?.emergency;
 
   // 🧱 Saber si este ARR es el primero en la cola (según slots)
@@ -1687,22 +1709,29 @@ socket.on('runway-request', (msg) => {
         // 🧭 Fase inicial:
         //  - si es EMERGENCIA → lo consideramos ya en FINAL (no queremos mandarlo a B1/B2)
         //  - si no es emergencia → arranca en TO_B2 como antes
-        try {
-          const cat = parseCategory(type || aircraft || '');
+try {
+  const cat = parseCategory(type || aircraft || '');
+  const glideFront = getGlideInfoFor(name);
+  const isMotorized =
+    typeof glideFront?.isMotorized === 'boolean'
+      ? glideFront.isMotorized
+      : (cat !== 'GLIDER');
 
-          if (emergency) {
-            // Emergencia → dueña de la FINAL
-            setApproachPhase(name, 'FINAL');
-            setLandingStateForward(name, 'FINAL');
-          } else if (cat === 'GLIDER') {
-            // 🪂 Planeador normal: conceptualment YA está en FINAL
-            // (no queremos mandarlo a B1/B2, solo secuencia + gate)
-            setApproachPhase(name, 'FINAL');
-          } else {
-            // Avión a motor normal → circuito con B2/B1
-            setApproachPhase(name, 'TO_B2');
-          }
-        } catch {}
+  const isGlider = (isMotorized === false) || cat === 'GLIDER';
+
+  if (emergency) {
+    // Emergencia → dueña de la FINAL
+    setApproachPhase(name, 'FINAL');
+    setLandingStateForward(name, 'FINAL');
+  } else if (isGlider) {
+    // 🪂 Planeador normal: conceptualmente YA está en FINAL
+    setApproachPhase(name, 'FINAL');
+  } else {
+    // Avión a motor normal → circuito con B2/B1
+    setApproachPhase(name, 'TO_B2');
+  }
+} catch {}
+
 
 
     }
