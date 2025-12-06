@@ -402,9 +402,17 @@ const maybeEmitWarning = (w: Warning) => {
 };
 
 
-    const { isMotorized: isMotorizedParam } = useLocalSearchParams<{
-    isMotorized?: string;
-    }>();
+// Debajo de los imports, donde ya lo tenés:
+const { isMotorized: isMotorizedParam } = useLocalSearchParams<{
+  isMotorized?: string;   // 👈 solo string acá
+}>();
+
+// Y derivás el boolean así:
+const isMotorizedBool =
+  typeof isMotorizedParam === 'string'
+    ? (isMotorizedParam === '1' || isMotorizedParam === 'true')
+    : false; // fallback
+
 
 
 
@@ -1058,6 +1066,7 @@ useFocusEffect(
           speed: myPlane.speed,
           callsign: callsign || '',
           aircraftIcon: aircraftIcon || '2.png',
+          isMotorized: isMotorizedBool,   // 👈 aquí
         });
       }
     }
@@ -2001,7 +2010,8 @@ s.on('conflicto', (data: any) => {
           glideMaxM: glide.dMaxM,
           glideMargin: glide.margin,
           glideClass: glide.klass,
-          isMotorized: isMotorizedParam === '1',
+          isMotorized: isMotorizedBool,
+
         };
 
 
@@ -2031,7 +2041,8 @@ s.on('conflicto', (data: any) => {
             glideMaxM: glide.dMaxM,
             glideMargin: glide.margin,
             glideClass: glide.klass,
-            isMotorized: isMotorizedParam === '1',
+            isMotorized: isMotorizedBool,
+
           };
 
 
