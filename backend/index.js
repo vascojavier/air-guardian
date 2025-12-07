@@ -884,11 +884,14 @@ function maybeSendInstruction(opId, opsById) {
           ? 0.7 * glideBackend.dMaxM
           : null);
 
-  // Motorizado o no (unificado)
-  const isMotorized =
-    typeof glideFront?.isMotorized === 'boolean'
-      ? glideFront.isMotorized
-      : (cat !== 'GLIDER');
+  // Motorizado o no (unificado, más robusto)
+  let isMotorized;
+  if (typeof glideFront?.isMotorized === 'boolean') {
+    isMotorized = glideFront.isMotorized;
+  } else {
+    // fallback: si la categoría es GLIDER lo tratamos como NO motorizado
+    isMotorized = (cat !== 'GLIDER');
+  }
 
   const isGlider = (isMotorized === false) || cat === 'GLIDER';
 
@@ -952,12 +955,12 @@ function maybeSendInstruction(opId, opsById) {
   // 0) Si ya está CLRD, nunca emitir algo que retroceda
   if (phaseNow === 'CLRD') return;
 
-  // 🔴 PLANEADOR que NO LLEGA (NO_REACH):
-  // Sólo avisar si FRONT **y** BACKEND coinciden en NO_REACH.
+  // 🔴 PLANEADOR que NO LLEGA:
+  // Si cualquiera de las dos fuentes lo marca como NO_REACH, preferimos ser conservadores.
   const isNoReachFront = glideClassFront === 'NO_REACH';
   const isNoReachBack  = glideClassBack  === 'NO_REACH';
 
-  if (isGlider && isNoReachFront && isNoReachBack) {
+  if (isGlider && (isNoReachFront || isNoReachBack)) {
     const lastTs = noGlideWarnByName.get(op.name) || 0;
     if (now - lastTs > 20000) { // máx 1 vez cada 20 s
       emitToUser(op.name, 'runway-msg', {
@@ -966,11 +969,11 @@ function maybeSendInstruction(opId, opsById) {
       });
       noGlideWarnByName.set(op.name, now);
     }
-    return;  // 👈 NO instrucciones, NO B1/B2
+    return;  // 👈 NO instrucciones, NO B1/B2 para este glider
   }
 
-  // 🪂 PLANEADORES que SÍ LLEGAN: FINAL o GLIDER_WAIT, nunca B1/B2
-  if (isGlider && glideClass && glideClass !== 'NO_REACH') {
+  // 🪂 PLANEADORES que SÍ LLEGAN (o sin info clara): FINAL o GLIDER_WAIT, nunca B1/B2
+  if (isGlider) {
     const gate = gliderGatePoint();   // punto 200 m a la derecha de cabecera
     const g    = activeRunwayGeom();
     const thr  = g?.thr || null;
@@ -995,10 +998,11 @@ function maybeSendInstruction(opId, opsById) {
 
     // Si NO es el primero → mandarlo al gate lateral de planeadores
     if (!isFirstInQueue && gate) {
+      // opcional: si querés respetar alcance máximo también para el gate
       if (maxBeaconDist != null) {
         const dGate = getDistance(u.latitude, u.longitude, gate.lat, gate.lon);
-        // si el gate quedara fuera del planeo seguro, no lo mandamos
         if (dGate > maxBeaconDist) {
+          // Gate fuera del planeo seguro → silencio, que lo resuelva el front
           return;
         }
       }
@@ -1018,7 +1022,7 @@ function maybeSendInstruction(opId, opsById) {
     }
 
     // Si no hay thr ni gate válidos, no damos instrucción especial.
-    // Y, ojo, igual salimos para que NUNCA reciba B1/B2.
+    // Igual salimos para que NUNCA reciba B1/B2.
     return;
   }
 
@@ -1027,7 +1031,7 @@ function maybeSendInstruction(opId, opsById) {
   // 1) Ir a B2/B3/B4... 
   if (
     !isPrimaryEmergency &&
-    !isGlider &&                      // 👈 planeadores NO entran en el circuito B2/B3/B4
+    !isGlider &&                      // 👈 redundante, pero deja claro que aquí no entran planeadores
     phaseNow === 'TO_B2' &&
     dB2 > BEACON_REACHED_M &&
     !stickyReachedB1 &&
@@ -1105,6 +1109,7 @@ function maybeSendInstruction(opId, opsById) {
 
   // 4) En FINAL pero aún lejos de su slot → silencio.
 }
+
 
 
 

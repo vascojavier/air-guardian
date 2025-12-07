@@ -2906,29 +2906,56 @@ useEffect(() => {
     return;
   }
 
-  // === Soy #1 — histéresis + dwell (aviones a motor) ===
-  const dToB1 = getDistance(myPlane.lat, myPlane.lon, beaconB1.latitude, beaconB1.longitude);
+      // === Soy #1 — histéresis + dwell ===
+      const runwayBusy = !!runwayState?.state?.inUse;
+      const runwayInUseByMe =
+        runwayState?.state?.inUse &&
+        runwayState.state.inUse.name === (myPlane?.id || username);
 
-  // Fase inicial por proximidad si aún no hay fase
-  if (!navPhaseRef.current) {
-    navPhaseRef.current = dToB1 > B1_ENTER_M ? 'B1' : 'FINAL';
-    lastPhaseSwitchRef.current = Date.now();
-  }
+      // Si la pista está en uso por otro avión, NO entro en FINAL todavía
+      if (runwayBusy && !runwayInUseByMe) {
+        // Me quedo en B1 (o B2) pero sin pasar a FINAL
+        if (beaconB1) {
+          if (
+            !navTarget ||
+            navTarget.latitude !== beaconB1.latitude ||
+            navTarget.longitude !== beaconB1.longitude
+          ) {
+            setNavTarget(beaconB1);
+          }
+        }
+        // No sigo hacia la lógica de FINAL
+        return;
+      }
 
-  if (dToB1 <= FINAL_ENTER_M && maybeSwitchPhase('FINAL')) {
-    // ⬇️ NUEVO: candado local + freeze al server
-    finalLockedRef.current = true;
-    socketRef.current?.emit('sequence-freeze', { name: me, reason: 'locked-at-B1' });
+      // A partir de aquí: pista libre (o en uso por mí mismo) → puedo pasar a FINAL
+      const dToB1 = getDistance(
+        myPlane.lat,
+        myPlane.lon,
+        beaconB1.latitude,
+        beaconB1.longitude
+      );
 
-    if (activeThreshold) {
-      setNavTarget(activeThreshold);
-      flashBanner('Continúe a final', 'continue-final');
-      try { 
-        Speech.stop(); 
-        Speech.speak('Continúe a final', { language: 'es-ES' }); 
-      } catch {}
-    }
-  }
+      // Fase inicial por proximidad si aún no hay fase
+      if (!navPhaseRef.current) {
+        navPhaseRef.current = dToB1 > B1_ENTER_M ? 'B1' : 'FINAL';
+        lastPhaseSwitchRef.current = Date.now();
+      }
+
+      if (dToB1 <= FINAL_ENTER_M && maybeSwitchPhase('FINAL')) {
+        finalLockedRef.current = true;
+        socketRef.current?.emit('sequence-freeze', { name: me, reason: 'locked-at-B1' });
+
+        if (activeThreshold) {
+          setNavTarget(activeThreshold);
+          flashBanner('Continúe a final', 'continue-final');
+          try {
+            Speech.stop();
+            Speech.speak('Continúe a final', { language: 'es-ES' });
+          } catch {}
+        }
+      }
+
 
   // B1 → FINAL si entro por debajo de FINAL_ENTER_M (banner/voz SOLO al cambiar)
   if (navPhaseRef.current === 'B1') {
