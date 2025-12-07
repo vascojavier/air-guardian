@@ -1744,31 +1744,69 @@ useEffect(() => {
       });
 
       // === NUEVO: instrucciones dirigidas (ATC) ===
-      s.on('atc-instruction', (instr: any) => {
-        // ⬇️ agregar arriba del switch:
-        (serverATCRef.current ||= true);
+s.on('atc-instruction', (instr: any) => {
+  serverATCRef.current ||= true;
+  if (!instr?.type) return;
 
-        if (!instr?.type) return;
+  // ¿Soy planeador?
+  const modelStr = aircraftModel || (myPlane as any)?.type || '';
+  const iAmGlider = !isMotorizedBool || isGliderType(modelStr);
 
-        if (instr.type === 'goto-beacon' && typeof instr.lat === 'number' && typeof instr.lon === 'number') {
-          setNavTarget({ latitude: instr.lat, longitude: instr.lon });
-          flashBanner(instr.text || 'Proceda al beacon', 'atc-goto');
-          try { Speech.stop(); Speech.speak('Proceda al beacon', { language: 'es-ES' }); } catch {}
-        }
+  // Para planeadores: ignorar instrucciones de beacons de avión
+  if (iAmGlider) {
+    if (instr.type === 'goto-beacon' || instr.type === 'turn-to-B1') {
+      // no cambiamos navTarget, sólo podemos dejar texto/voz si quisieras
+      return;
+    }
 
-        if (instr.type === 'turn-to-B1') {
-          // Si ya tenés beacon B1 local derivado del airfield, podés usarlo
-          // setNavTarget(beaconB1); // si tenés beaconB1 calculado
-          flashBanner(instr.text || 'Vire hacia B1', 'atc-b1');
-          try { Speech.stop(); Speech.speak('Vire hacia be uno', { language: 'es-ES' }); } catch {}
-        }
+    if (instr.type === 'cleared-to-land') {
+      // Autorización a aterrizar sí la anunciamos, pero sin tocar navTarget
+      const msg =
+        (instr.text || 'Autorizado a aterrizar') +
+        (instr.rwy ? ` pista ${instr.rwy}` : '');
+      flashBanner(msg, 'atc-clr');
+      try {
+        Speech.stop();
+        Speech.speak(msg, { language: 'es-ES' });
+      } catch {}
+      return;
+    }
+  }
 
-        if (instr.type === 'cleared-to-land') {
-          // Mantener navTarget al umbral si querés (si ya lo seteás en otro lado, podés no tocarlo)
-          flashBanner((instr.text || 'Autorizado a aterrizar') + (instr.rwy ? ` pista ${instr.rwy}` : ''), 'atc-clr');
-          try { Speech.stop(); Speech.speak((instr.text || 'Autorizado a aterrizar') + (instr.rwy ? ` pista ${instr.rwy}` : ''), { language: 'es-ES' }); } catch {}
-        }
-      });
+  // ✈️ Aviones a motor: comportamiento actual
+  if (
+    instr.type === 'goto-beacon' &&
+    typeof instr.lat === 'number' &&
+    typeof instr.lon === 'number'
+  ) {
+    setNavTarget({ latitude: instr.lat, longitude: instr.lon });
+    flashBanner(instr.text || 'Proceda al beacon', 'atc-goto');
+    try {
+      Speech.stop();
+      Speech.speak('Proceda al beacon', { language: 'es-ES' });
+    } catch {}
+  }
+
+  if (instr.type === 'turn-to-B1') {
+    flashBanner(instr.text || 'Vire hacia B1', 'atc-b1');
+    try {
+      Speech.stop();
+      Speech.speak('Vire hacia be uno', { language: 'es-ES' });
+    } catch {}
+  }
+
+  if (instr.type === 'cleared-to-land') {
+    const msg =
+      (instr.text || 'Autorizado a aterrizar') +
+      (instr.rwy ? ` pista ${instr.rwy}` : '');
+    flashBanner(msg, 'atc-clr');
+    try {
+      Speech.stop();
+      Speech.speak(msg, { language: 'es-ES' });
+    } catch {}
+  }
+});
+
 
 
       // 👇 si el server no tiene pista cargada, reinyectala desde AsyncStorage
@@ -2715,41 +2753,60 @@ if (isPrimaryEmergency) {
 
 // === Modo #>0 → B2/B3/B4... según posición en la cola (sin spam) ===
 // === Modo #>0 → esperas según tipo y glide ===
+// === Modo #>0 → esperas según tipo y glide ===
 if (idx > 0) {
-  // 🪂 REGLA 0: si soy planeador y NO LLEGO → avisar y no dar más beacons
-  if (isGlider && myGlide.klass === 'NO_REACH') {
-    setNavTarget(null);
-    flashBanner('⚠️ Con este planeo no llegás a la pista. Buscá campo alternativo.', 'glide-no-reach');
-    try {
-      Speech.stop();
-      Speech.speak('Con este planeo no llegás a la pista. Buscá campo alternativo.', { language: 'es-ES' });
-    } catch {}
-    return;
-  }
-
-  // 🪂 Planeador con margen crítico / justo → Gate lateral GLID cerca de cabecera
-  if (
-    isGlider &&
-    (myGlide.klass === 'CRITICAL' || myGlide.klass === 'TIGHT') &&
-    gliderGatePoint
-  ) {
-    if (
-      !navTarget ||
-      navTarget.latitude !== gliderGatePoint.latitude ||
-      navTarget.longitude !== gliderGatePoint.longitude
-    ) {
-      setNavTarget(gliderGatePoint);
-      flashBanner('Planeador: espere a la derecha de cabecera', 'glid-gate');
+  // 🪂 CASO PLANEADOR: nunca usar B2/B3/B4
+  if (isGlider) {
+    // 0) Si NO LLEGA, avisar y no dar ningún beacon
+    if (myGlide.klass === 'NO_REACH') {
+      setNavTarget(null);
+      flashBanner(
+        '⚠️ Con este planeo no llegás a la pista. Buscá campo alternativo.',
+        'glide-no-reach'
+      );
       try {
         Speech.stop();
-        Speech.speak('Planeador, espere a la derecha de cabecera', { language: 'es-ES' });
+        Speech.speak(
+          'Con este planeo no llegás a la pista. Buscá campo alternativo.',
+          { language: 'es-ES' }
+        );
+      } catch {}
+      return;
+    }
+
+    // 1) Gate lateral para planeadores (#>0)
+    const gate = gliderGatePoint || activeThreshold || null;
+    if (!gate) {
+      setNavTarget(null);
+      return;
+    }
+
+    if (
+      !navTarget ||
+      navTarget.latitude !== gate.latitude ||
+      navTarget.longitude !== gate.longitude
+    ) {
+      setNavTarget(gate);
+
+      // Sólo anunciar una vez cuando cambiamos a ese gate
+      const label = gliderGatePoint ? 'Gate planeador' : 'cabecera';
+      flashBanner(
+        'Planeador: espere a la derecha de cabecera',
+        'glid-gate'
+      );
+      try {
+        Speech.stop();
+        Speech.speak('Planeador, espere a la derecha de cabecera', {
+          language: 'es-ES',
+        });
       } catch {}
     }
-    // no pasamos por B2/B3/B4, se queda en gate lateral hasta ser #1
+
+    // ⛔️ IMPORTANTE: nunca pasar a B2/B3/B4 si soy planeador
     return;
   }
 
-  // 🪂 Planeador con buen margen (COMFY) o tráfico a motor → B2/B3/B4 como siempre
+  // ✈️ CASO AVIÓN A MOTOR → B2/B3/B4 como siempre
   const beaconsChain: LatLon[] = [
     beaconB2!,
     ...extraBeacons, // [B3, B4...]
@@ -2790,12 +2847,57 @@ if (idx > 0) {
     flashBanner(`Proceda a ${label}`, `goto-${label.toLowerCase()}`);
     try {
       Speech.stop();
-      Speech.speak(`Proceda a ${label.replace('B', 'be ')}`, { language: 'es-ES' });
+      Speech.speak(
+        `Proceda a ${label.replace('B', 'be ')}`,
+        { language: 'es-ES' }
+      );
     } catch {}
   }
   return;
 }
 
+
+// 🎯 Soy #1 en la cola (idx === 0)
+// Para planeadores: SIEMPRE ir directo a FINAL, sin B1
+if (isGlider) {
+  // Si no hay umbral activo no podemos guiar
+  if (!activeThreshold) {
+    setNavTarget(null);
+    // reinicio la fase para que cuando haya pista se reevalúe
+    navPhaseRef.current = null;
+    return;
+  }
+
+  // Fijamos la fase en FINAL y la "congelamos"
+  navPhaseRef.current = 'FINAL';
+  finalLockedRef.current = true;
+  lastPhaseSwitchRef.current = Date.now();
+
+  // Opcional: avisar al servidor que congele la secuencia (igual que B1 lock)
+  socketRef.current?.emit('sequence-freeze', {
+    name: me,
+    reason: 'glider-direct-final',
+  });
+
+  // Solo actualizamos navTarget si cambió
+  if (
+    !navTarget ||
+    navTarget.latitude !== activeThreshold.latitude ||
+    navTarget.longitude !== activeThreshold.longitude
+  ) {
+    setNavTarget(activeThreshold);
+    flashBanner('Planeador: continúe directo a final', 'glid-final');
+    try {
+      Speech.stop();
+      Speech.speak('Planeador, continúe directo a final', {
+        language: 'es-ES',
+      });
+    } catch {}
+  }
+
+  // Muy importante: no seguir con la lógica de B1/B2/FINAL
+  return;
+}
 
 
     // === Soy #1 — histéresis + dwell
