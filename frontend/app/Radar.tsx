@@ -803,20 +803,36 @@ function isNearThreshold(end:'A'|'B', radiusM=60): boolean {
   return getDistance(myPlane.lat, myPlane.lon, thr.latitude, thr.longitude) <= radiusM;
 }
 
-  function getAGLmeters(): number {
-    // preferí elevación del aeródromo; si no existe, usá la ref de suelo
-    const elevFromField = (airfield as any)?.elevation ?? (runwayState?.airfield?.elevation ?? null);
-    const altMSL = myPlane?.alt ?? 0;
+function getAGLmeters(): number {
+  const elevFromField =
+    (airfield as any)?.elevation ??
+    (runwayState?.airfield?.elevation ?? null);
 
-    // si estoy sobre la pista y a baja velocidad, "calibro" referencia de suelo
-    if (isOnRunwayStrip() && (myPlane?.speed ?? 0) < 80) {
-      groundRefAltMSLRef.current = altMSL;
-    }
+  const altMSL = myPlane?.alt ?? 0;
 
-    const ref = elevFromField ?? groundRefAltMSLRef.current;
-    const agl = ref != null ? (altMSL - ref) : altMSL; // fallback: MSL si no hay ref
-    return Math.max(0, agl);
+  // Estimación actual de referencia de suelo
+  const refExisting = elevFromField ?? groundRefAltMSLRef.current;
+  const approxAGL =
+    refExisting != null ? (altMSL - refExisting) : Number.POSITIVE_INFINITY;
+
+  // Sólo recalibrar suelo si:
+  //  - estamos sobre la pista en planta
+  //  - velocidad baja
+  //  - y YA estamos relativamente bajos (ej. < 60 m AGL)
+  if (
+    isOnRunwayStrip() &&
+    (myPlane?.speed ?? 0) < 80 &&
+    Math.abs(approxAGL) < 60
+  ) {
+    groundRefAltMSLRef.current = altMSL;
   }
+
+  const ref = elevFromField ?? groundRefAltMSLRef.current;
+  const agl = ref != null ? (altMSL - ref) : altMSL; // fallback: MSL si no hay ref
+
+  return Math.max(0, agl);
+}
+
 
 
 function isStopped(): boolean {
