@@ -1709,28 +1709,29 @@ socket.on('runway-request', (msg) => {
         // 🧭 Fase inicial:
         //  - si es EMERGENCIA → lo consideramos ya en FINAL (no queremos mandarlo a B1/B2)
         //  - si no es emergencia → arranca en TO_B2 como antes
-try {
-  const cat = parseCategory(type || aircraft || '');
-  const glideFront = getGlideInfoFor(name);
-  const isMotorized =
-    typeof glideFront?.isMotorized === 'boolean'
-      ? glideFront.isMotorized
-      : (cat !== 'GLIDER');
+      try {
+        const cat = parseCategory(type || aircraft || '');
+        const glideFront = getGlideInfoFor(name);
+        const isMotorized =
+          typeof glideFront?.isMotorized === 'boolean'
+            ? glideFront.isMotorized
+            : (cat !== 'GLIDER');
 
-  const isGlider = (isMotorized === false) || cat === 'GLIDER';
+        const isGlider = (isMotorized === false) || cat === 'GLIDER';
 
-  if (emergency) {
-    // Emergencia → dueña de la FINAL
-    setApproachPhase(name, 'FINAL');
-    setLandingStateForward(name, 'FINAL');
-  } else if (isGlider) {
-    // 🪂 Planeador normal: conceptualmente YA está en FINAL
-    setApproachPhase(name, 'FINAL');
-  } else {
-    // Avión a motor normal → circuito con B2/B1
-    setApproachPhase(name, 'TO_B2');
-  }
-} catch {}
+        if (emergency) {
+          // Emergencia → dueña de la FINAL
+          setApproachPhase(name, 'FINAL');
+          setLandingStateForward(name, 'FINAL');
+        } else if (isGlider) {
+          // 🪂 Planeador normal: conceptualmente YA está en FINAL
+          setApproachPhase(name, 'FINAL');
+        } else {
+          // Avión a motor normal → circuito con B2/B1
+          setApproachPhase(name, 'TO_B2');
+        }
+      } catch {}
+
 
 
 
