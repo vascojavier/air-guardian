@@ -854,35 +854,37 @@ function maybeSendInstruction(opId, opsById) {
   const isPrimaryEmergency = !!landingObj?.isPrimaryEmergency;
 
   // 🪂 Info de planeo: mezclar FRONT (userLocations) + BACKEND (classifyGlideForLanding)
-  const glideBackend = landingObj?.glide || null;
-  const glideFront   = getGlideInfoFor(op.name);   // 👈 ya la tienes definida arriba
+  // 🪂 Info de planeo: mezclar FRONT (userLocations) + BACKEND (classifyGlideForLanding)
+  const glideBackend = landingObj?.glide || null;        // viene de classifyGlideForLanding(l)
+  const glideFront   = getGlideInfoFor(op.name);         // viene de userLocations[name]
 
   const glideClass =
     (glideFront && glideFront.glideClass) ||
     (glideBackend && glideBackend.klass) ||
     null;
 
-  let maxBeaconDist = null;
-  if (glideFront && typeof glideFront.glideMaxM === 'number') {
-    maxBeaconDist = 0.7 * glideFront.glideMaxM;
-  } else if (glideBackend && typeof glideBackend.dMaxM === 'number') {
-    maxBeaconDist = 0.7 * glideBackend.dMaxM;
-  }
+  const maxBeaconDist =
+    (glideFront && typeof glideFront.glideMaxM === 'number')
+      ? 0.7 * glideFront.glideMaxM
+      : (glideBackend && typeof glideBackend.dMaxM === 'number'
+          ? 0.7 * glideBackend.dMaxM
+          : null);
 
-  // Categoría "clásica"
+  // Categoría "clásica" (por si type trae GLIDER, HEAVY, etc.)
   const cat = parseCategory(landingObj?.type || op.category || '');
 
-  // 👉 Flag real de motor/planeador usando lo que mandó el front
+  // Flag de motor/planeador usando lo que manda el front como verdad
   const isMotorized =
-    typeof glideFront?.isMotorized === 'boolean'
+    (glideFront && typeof glideFront.isMotorized === 'boolean')
       ? glideFront.isMotorized
-      : (cat !== 'GLIDER');  // si no sabemos, solo texto GLIDER lo trata como tal
+      : (cat !== 'GLIDER');
 
   const isGlider =
     (isMotorized === false) ||
     cat === 'GLIDER';
 
   const isGliderOrEmergency = isGlider || !!landingObj?.emergency;
+
 
   // 🧱 Saber si este ARR es el primero en la cola (según slots)
   const firstArrSlot   = runwayState.timelineSlots.find(s => s.type === 'ARR');
@@ -940,8 +942,12 @@ function maybeSendInstruction(opId, opsById) {
   // 0) Si ya está CLRD, nunca emitir algo que retroceda
   if (phaseNow === 'CLRD') return;
 
-  // 🔴 PLANEADOR que NO LLEGA (NO_REACH): avisar y NO dar más instrucciones
-  if (isGlider && glideClass === 'NO_REACH') {
+  // 🔴 PLANEADOR que NO LLEGA (NO_REACH):
+  // Sólo avisar si FRONT **y** BACKEND coinciden en NO_REACH.
+  const isNoReachFront = glideFront?.glideClass === 'NO_REACH';
+  const isNoReachBack  = glideBackend?.klass === 'NO_REACH';
+
+  if (isGlider && isNoReachFront && isNoReachBack) {
     const lastTs = noGlideWarnByName.get(op.name) || 0;
     if (now - lastTs > 20000) { // máx 1 vez cada 20 s
       emitToUser(op.name, 'runway-msg', {
@@ -953,36 +959,59 @@ function maybeSendInstruction(opId, opsById) {
     return;
   }
 
+
   // 🪂 PLANEADORES que SÍ LLEGAN: FINAL o GLIDER_WAIT, nunca B1/B2
   if (isGlider && glideClass && glideClass !== 'NO_REACH') {
-    const gate = gliderGatePoint();   // punto 200 m a la derecha de cabecera
+    const gate = gliderGatePoint();   // punto 200 m a la derecha de la cabecera
+    const g    = activeRunwayGeom();
+    const thr  = g?.thr || null;
 
-    if (isFirstInQueue) {
-      // Planeador primero → dejalo ir directo a FINAL (la lógica de CLRD se encarga más abajo)
-      // No mandamos B1/B2 ni GLIDER_WAIT.
-    } else {
-      // Planeador NO primero → mandarlo al “GLIDER_WAIT”
-      if (gate) {
-        const dGate = getDistance(u.latitude, u.longitude, gate.lat, gate.lon);
-
-        // si el gate queda fuera del planeo seguro, no lo mandamos
-        if (maxBeaconDist == null || dGate <= maxBeaconDist) {
-          if (mem.phase !== 'GLIDER_WAIT') {
-            emitToUser(op.name, 'atc-instruction', {
-              type: 'goto-beacon',
-              beacon: 'GLIDER_WAIT',
-              lat: gate.lat,
-              lon: gate.lon,
-              text: 'Espere en punto planeador',
-            });
-            lastInstr.set(op.name, { phase: 'GLIDER_WAIT', ts: now });
-          }
-        }
+    // 🧱 si es el PRIMERO en la cola → línea azul directa a cabecera de pista
+    if (isFirstInQueue && thr) {
+      if (mem.phase !== 'GLIDER_FINAL') {
+        emitToUser(op.name, 'atc-instruction', {
+          type: 'goto-beacon',
+          beacon: 'RWY_FINAL',
+          lat: thr.lat,
+          lon: thr.lon,
+          text: g?.rw?.ident
+            ? `Aproximación final pista ${g.rw.ident}`
+            : 'Aproximación final a pista',
+        });
+        lastInstr.set(op.name, { phase: 'GLIDER_FINAL', ts: now });
       }
-      // 🔚 IMPORTANTE: salimos para NO caer en la lógica genérica B1/B2
+      // 🔚 IMPORTANTE: salir para NO entrar en la lógica genérica B1/B2
       return;
     }
+
+    // Si NO es el primero → mandarlo al gate lateral de planeadores
+    if (!isFirstInQueue && gate) {
+      if (maxBeaconDist != null) {
+        const dGate = getDistance(u.latitude, u.longitude, gate.lat, gate.lon);
+        // si el gate quedara fuera del planeo seguro, no lo mandamos
+        if (dGate > maxBeaconDist) {
+          return;
+        }
+      }
+
+      if (mem.phase !== 'GLIDER_WAIT') {
+        emitToUser(op.name, 'atc-instruction', {
+          type: 'goto-beacon',
+          beacon: 'GLIDER_WAIT',
+          lat: gate.lat,
+          lon: gate.lon,
+          text: 'Espere en punto planeador',
+        });
+        lastInstr.set(op.name, { phase: 'GLIDER_WAIT', ts: now });
+      }
+      // 🔚 tampoco dejamos que caiga en B1/B2
+      return;
+    }
+
+    // Si no tenemos ni thr ni gate válidos, seguimos sin dar instrucción especial
+    // y dejamos que la lógica general haga lo que pueda, pero SIN B1/B2 para glider.
   }
+
 
   // 1) Ir a B2/B3/B4... SOLO si aún estamos en TO_B2, no pedimos antes B1 y sticky < B1
   //    ❗Para la EMERGENCIA PRINCIPAL NO mandamos a B2/B3/B4.

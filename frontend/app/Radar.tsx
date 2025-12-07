@@ -388,7 +388,14 @@ function emitOpsNow(next: OpsState) {
       const baseLat = prev.lat ?? 51.95;
       const baseLon = prev.lon ?? 4.45;
       const p = randomOffsetAround(baseLat, baseLon, 10000); // 10 km
-      return { ...prev, lat: p.latitude, lon: p.longitude };
+          const randomHeading = Math.floor(Math.random() * 360); // 0–359°
+
+          return {
+            ...prev,
+            lat: p.latitude,
+            lon: p.longitude,
+            heading: randomHeading,
+          };
     });
   }, []);
 
