@@ -389,11 +389,18 @@ function emitOpsNow(next: OpsState) {
       const baseLon = prev.lon ?? 4.45;
       const p = randomOffsetAround(baseLat, baseLon, 10000); // 10 km
           const randomHeading = Math.floor(Math.random() * 360); // 0–359°
+          const randomAltitudeMeters = () => {
+          const min = 300;
+          const max = 3000;
+          return Math.floor(min + Math.random() * (max - min));
+           };
+
 
           return {
             ...prev,
             lat: p.latitude,
             lon: p.longitude,
+            alt: randomAltitudeMeters(),   // 👈 ahora es random entre 300 y 3000
             heading: randomHeading,
           };
     });
