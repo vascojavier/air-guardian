@@ -1158,12 +1158,26 @@ function publishRunwayState() {
 
         // 🔎 Tipo de aeronave
         const landingObj = runwayState.landings.find(l => l.name === name);
-        const cat = parseCategory(landingObj?.type || '');
+
+        // Info de planeo desde FRONT (incluye isMotorized)
+        const glideFront = getGlideInfoFor(name);  // {isMotorized, glideMaxM, glideMargin, glideClass}
+
+        // Categoría por texto, por si no tenemos flag
+        const catRaw = parseCategory(landingObj?.type || '');
+
+        // Unificación: motor vs planeador
+        const isMotorized =
+          typeof glideFront?.isMotorized === 'boolean'
+            ? glideFront.isMotorized
+            : (catRaw !== 'GLIDER');
+
+        const isGlider = (isMotorized === false) || catRaw === 'GLIDER';
 
         // 🪂 Planeadores: NO generar beacon B2/B3/B4 aquí
-        if (cat === 'GLIDER') {
+        if (isGlider) {
           return null;
         }
+
 
         const asg = assignBeaconsFor(name);
         const beaconName = asg?.beaconName || `B${idx + 2}`;
