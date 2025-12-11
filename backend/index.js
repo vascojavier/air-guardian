@@ -594,6 +594,12 @@ function buildOperations(nowMs) {
 
   // Llegadas
   for (const l of runwayState.landings) {
+
+    // ⛔️ Si marcamos que no llega por planeo, no entra más en la secuencia
+    if (l.noGlideAbort) {
+      continue;
+    }
+
     computeETAsAndFreeze(l);
 
     // ▲ calcular "committed" (dentro de 2 km de B1, o tocó B1/FINAL, o frozen)
@@ -870,30 +876,17 @@ function maybeSendInstruction(opId, opsById) {
   // 🪂 Info de planeo desde FRONT
   const glideFront   = getGlideInfoFor(op.name);     // {isMotorized, glideMaxM, glideMargin, glideClass}
   // 🪂 Info de planeo desde BACKEND
-  const glideBackend = landingObj.glide || null;     // {klass, dMaxM, ...} creado en computeETAsAndFreeze
+  const glideBackend = landingObj.glide || null;     // {klass, dThrM, dMaxM, margin, ...}
 
-  const glideClassFront = glideFront?.glideClass || null;
-  const glideClassBack  = glideBackend?.klass || null;
-  const glideClass      = glideClassFront || glideClassBack || null;
+  // Motorizado o no (unificado)
+  const frontIsMotorized =
+    typeof glideFront?.isMotorized === 'boolean'
+      ? glideFront.isMotorized
+      : undefined;
 
-  // Alcance máximo en metros que vamos a considerar “seguro”
-  const maxBeaconDist =
-    (typeof glideFront?.glideMaxM === 'number' && glideFront.glideMaxM > 0)
-      ? 0.7 * glideFront.glideMaxM
-      : (typeof glideBackend?.dMaxM === 'number' && glideBackend.dMaxM > 0
-          ? 0.7 * glideBackend.dMaxM
-          : null);
-
-  // Motorizado o no (unificado, más robusto)
-  let isMotorized;
-  if (typeof glideFront?.isMotorized === 'boolean') {
-    isMotorized = glideFront.isMotorized;
-  } else {
-    // fallback: si la categoría es GLIDER lo tratamos como NO motorizado
-    isMotorized = (cat !== 'GLIDER');
-  }
-
-  const isGlider = (isMotorized === false) || cat === 'GLIDER';
+  const isGlider =
+    (frontIsMotorized === false) ||
+    cat === 'GLIDER';     // si el tipo tiene GLIDER adentro
 
   const isEmergency         = !!landingObj.emergency;
   const isPrimaryEmergency  = !!landingObj.isPrimaryEmergency;
@@ -940,13 +933,20 @@ function maybeSendInstruction(opId, opsById) {
       setApproachPhase(op.name, 'TO_B1');
       setLandingStateForward(op.name, 'B2');
     }
+
     if (isFinite(dB1) && dB1 <= BEACON_REACHED_M && getApproachPhase(op.name) !== 'CLRD') {
-      setApproachPhase(op.name, 'FINAL');
-      setLandingStateForward(op.name, 'B1'); // ya “pasó” por B1
+      // ⛔️ Nuevo: solo el #1 en cola o emergencia primaria pasan a FINAL automáticamente
+      if (isFirstInQueue || isPrimaryEmergency) {
+        setApproachPhase(op.name, 'FINAL');
+      }
+      setLandingStateForward(op.name, 'B1'); // igual marcamos que pasó por B1
     }
+
     if (isFinite(dB1) && dB1 <= B1_FREEZE_RADIUS_M && getApproachPhase(op.name) !== 'CLRD') {
-      setApproachPhase(op.name, 'FINAL');
-      setLandingStateForward(op.name, 'FINAL'); // congelado en final
+      if (isFirstInQueue || isPrimaryEmergency) {
+        setApproachPhase(op.name, 'FINAL');
+        setLandingStateForward(op.name, 'FINAL'); // congelado en final
+      }
     }
   } catch {}
 
@@ -955,28 +955,53 @@ function maybeSendInstruction(opId, opsById) {
   // 0) Si ya está CLRD, nunca emitir algo que retroceda
   if (phaseNow === 'CLRD') return;
 
-  // 🔴 PLANEADOR que NO LLEGA:
-  // Si cualquiera de las dos fuentes lo marca como NO_REACH, preferimos ser conservadores.
-  const isNoReachFront = glideClassFront === 'NO_REACH';
-  const isNoReachBack  = glideClassBack  === 'NO_REACH';
+  /* =========================================================================
+     🪂 LÓGICA PLANEADORES: NO_REACH + FINAL / GATE
+     ========================================================================= */
 
-  if (isGlider && (isNoReachFront || isNoReachBack)) {
-    const lastTs = noGlideWarnByName.get(op.name) || 0;
-    if (now - lastTs > 20000) { // máx 1 vez cada 20 s
+  // 🧮 Evaluar si REALMENTE llega planeando (backend)
+  let canReachGlide = true;
+
+  if (isGlider && glideBackend && typeof glideBackend.dThrM === 'number' && typeof glideBackend.dMaxM === 'number' && glideBackend.dMaxM > 0) {
+    // Permitimos un pequeño margen: si está apenas por arriba, lo seguimos considerando "llega"
+    const marginFactor = glideBackend.dThrM / glideBackend.dMaxM;
+    canReachGlide = marginFactor <= 1.05; // 5% de margen
+  }
+
+  // Si no hay datos backend, preferimos NO declarar NO_REACH (somos conservadores)
+  // En caso de duda, lo tratamos como que "llega".
+
+  // ⚠️ PLANEADOR que NO LLEGA: avisar UNA sola vez y sacarlo de la cola
+  if (isGlider && !canReachGlide) {
+    const alreadyWarned = noGlideWarnByName.has(op.name);
+
+    if (!alreadyWarned) {
       emitToUser(op.name, 'runway-msg', {
         text: '⚠️ Con este planeo no llegás a la pista. Elegí un campo alternativo.',
         key: 'no-glide-reach',
       });
       noGlideWarnByName.set(op.name, now);
     }
-    return;  // 👈 NO instrucciones, NO B1/B2 para este glider
+
+    // 🔴 Muy importante: sacar al planeador de la cola para que NO conserve turno
+    runwayState.landings = runwayState.landings.filter(l => l.name !== op.name);
+    landingStateByName.delete(op.name);
+    approachPhaseByName.delete(op.name);
+
+    // Replanificar secuencia sin este avión
+    try {
+      planRunwaySequence();
+      publishRunwayState();
+    } catch {}
+
+    return;  // 👈 NO instrucciones, NO B1/B2, no nada
   }
 
-  // 🪂 PLANEADORES que SÍ LLEGAN (o sin info clara): FINAL o GLIDER_WAIT, nunca B1/B2
+  // 🪂 PLANEADORES que SÍ LLEGAN: FINAL o GLIDER_WAIT, nunca B1/B2
   if (isGlider) {
+    const g   = activeRunwayGeom();
+    const thr = g?.thr || null;
     const gate = gliderGatePoint();   // punto 200 m a la derecha de cabecera
-    const g    = activeRunwayGeom();
-    const thr  = g?.thr || null;
 
     // 🧱 si es el PRIMERO en la cola → línea azul directa a cabecera de pista
     if (isFirstInQueue && thr) {
@@ -998,15 +1023,6 @@ function maybeSendInstruction(opId, opsById) {
 
     // Si NO es el primero → mandarlo al gate lateral de planeadores
     if (!isFirstInQueue && gate) {
-      // opcional: si querés respetar alcance máximo también para el gate
-      if (maxBeaconDist != null) {
-        const dGate = getDistance(u.latitude, u.longitude, gate.lat, gate.lon);
-        if (dGate > maxBeaconDist) {
-          // Gate fuera del planeo seguro → silencio, que lo resuelva el front
-          return;
-        }
-      }
-
       if (mem.phase !== 'GLIDER_WAIT') {
         emitToUser(op.name, 'atc-instruction', {
           type: 'goto-beacon',
@@ -1022,16 +1038,17 @@ function maybeSendInstruction(opId, opsById) {
     }
 
     // Si no hay thr ni gate válidos, no damos instrucción especial.
-    // Igual salimos para que NUNCA reciba B1/B2.
+    // Y, ojo, igual salimos para que NUNCA reciba B1/B2.
     return;
   }
 
-  // === A partir de aquí: SÓLO AVIONES A MOTOR ===
+  /* =========================================================================
+     ✈️ A PARTIR DE ACÁ: SOLO AVIONES A MOTOR
+     ========================================================================= */
 
   // 1) Ir a B2/B3/B4... 
   if (
     !isPrimaryEmergency &&
-    !isGlider &&                      // 👈 redundante, pero deja claro que aquí no entran planeadores
     phaseNow === 'TO_B2' &&
     dB2 > BEACON_REACHED_M &&
     !stickyReachedB1 &&
@@ -1039,8 +1056,12 @@ function maybeSendInstruction(opId, opsById) {
   ) {
 
     // 🔒 Emergencias (motor) con glide limitado: no mandar a B2 si queda fuera del glide seguro
-    if (isGliderOrEmergency && maxBeaconDist != null && dB2 > maxBeaconDist) {
-      return;
+    if (isGliderOrEmergency && glideBackend && typeof glideBackend.dThrM === 'number' && typeof glideBackend.dMaxM === 'number' && glideBackend.dMaxM > 0) {
+      const marginFactor = glideBackend.dThrM / glideBackend.dMaxM;
+      if (marginFactor > 1.05) {
+        // no lo mandamos a un beacon que no puede sostener
+        return;
+      }
     }
 
     const beaconName = asg.beaconName || 'B2';
@@ -1061,7 +1082,6 @@ function maybeSendInstruction(opId, opsById) {
   // 2) Ventana para B1
   if (
     !isPrimaryEmergency &&
-    !isGlider &&         // 👈 también excluir planeadores aquí
     (phaseNow === 'TO_B2' || phaseNow === 'TO_B1') &&
     !stickyReachedFinal &&
     dt != null &&
@@ -1069,8 +1089,11 @@ function maybeSendInstruction(opId, opsById) {
     dB1 > BEACON_REACHED_M
   ) {
 
-    if (isGliderOrEmergency && maxBeaconDist != null && dB1 > maxBeaconDist) {
-      return;
+    if (isGliderOrEmergency && glideBackend && typeof glideBackend.dThrM === 'number' && typeof glideBackend.dMaxM === 'number' && glideBackend.dMaxM > 0) {
+      const marginFactor = glideBackend.dThrM / glideBackend.dMaxM;
+      if (marginFactor > 1.05) {
+        return;
+      }
     }
 
     if (phaseNow === 'TO_B2') setApproachPhase(op.name, 'TO_B1');
@@ -1109,6 +1132,8 @@ function maybeSendInstruction(opId, opsById) {
 
   // 4) En FINAL pero aún lejos de su slot → silencio.
 }
+
+
 
 
 
