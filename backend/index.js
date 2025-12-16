@@ -1768,6 +1768,7 @@ socket.on('warning-clear', (msg) => {
   /* =====================  LISTENERS NUEVOS: RUNWAY  ===================== */
 
   // Solicitar aterrizaje o despegue / actualizar readiness
+  ..
 // Solicitar aterrizaje o despegue / actualizar readiness
 socket.on('runway-request', (msg) => {
   try {
