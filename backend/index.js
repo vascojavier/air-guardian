@@ -291,72 +291,6 @@ function activeRunwayGeom() {
   return { rw, active, A, B, thr, opp, app_brg, B1, B2 };
 }
 
-// ========= Glide / planeadores (backend) =========
-const GLIDE_RATIO = 30;      // 30:1
-const GLIDE_SAFETY = 0.8;    // solo usamos el 80% del alcance teórico
-
-// Devuelve info de planeo para un avión en landings
-function classifyGlideForLanding(l) {
-  const loc = userLocations[l.name];
-  const g = activeRunwayGeom();
-  if (!loc || !g) {
-    return {
-      aglM: null,
-      dThrM: null,
-      dMaxM: 0,
-      margin: null,
-      klass: 'NO_REACH',
-      glideMaxM: 0,
-      glideMargin: null,
-    };
-  }
-
-  const fieldElev = lastAirfield?.elevation || 0;
-  const agl = (typeof loc.aglM === 'number')
-    ? loc.aglM
-    : Math.max(0, (loc.alt ?? 0) - fieldElev);
-
-  const dThr = getDistance(
-    loc.latitude,
-    loc.longitude,
-    g.thr.lat,
-    g.thr.lon
-  );
-
-  const dMax = Math.max(0, agl * GLIDE_RATIO * GLIDE_SAFETY);
-
-  if (!Number.isFinite(dThr) || dMax <= 0) {
-    return {
-      aglM: agl,
-      dThrM: dThr,
-      dMaxM: dMax,
-      margin: null,
-      klass: 'NO_REACH',
-      glideMaxM: dMax,
-      glideMargin: null,
-    };
-  }
-
-  const margin = dThr / dMax;
-
-  let klass;
-  if (dThr > dMax)        klass = 'NO_REACH';
-  else if (margin > 0.7)  klass = 'CRITICAL';
-  else if (margin > 0.5)  klass = 'TIGHT';
-  else                    klass = 'COMFY';
-
-  return {
-    aglM: agl,
-    dThrM: dThr,
-    dMaxM: dMax,
-    margin,
-    klass,
-    glideMaxM: dMax,
-    glideMargin: margin,
-  };
-}
-
-
 function assignBeaconsFor(name) {
   const g = activeRunwayGeom();
   if (!g) return null;
@@ -560,23 +494,10 @@ function estimateGSms(name) {
 function computeETAsAndFreeze(l) {
   const asg = assignBeaconsFor(l.name);
   if (!asg) return;
-
   const etaB2 = computeETAtoPointSeconds(l.name, asg.b2);
   const etaB1 = computeETAtoPointSeconds(l.name, asg.b1);
   l.etaB2 = etaB2 ?? null;
   l.etaB1 = etaB1 ?? (etaB2 ? etaB2 + 60 : null); // estimar si falta dato
-
-  // ➕ Glide backend: clasificar capacidad de reach a la pista
-  try {
-    const glide = classifyGlideForLanding(l);
-    l.glide = glide;                 // objeto completo {aglM, dThrM, dMaxM, margin, klass}
-    l.glideClass = glide.klass;      // atajo
-  } catch (e) {
-    // en caso de error, no rompemos el scheduler
-    l.glide = l.glide || null;
-    l.glideClass = l.glideClass || null;
-  }
-
   // freeze al cruzar cercanía B1
   const u = userLocations[l.name];
   if (u) {
@@ -587,42 +508,16 @@ function computeETAsAndFreeze(l) {
   }
 }
 
-
 // ========= Construcción de operaciones y planificador =========
-function buildOperations(nowMs) { 
+function buildOperations(nowMs) {
   const ops = [];
 
-  // Llegadas
   // Llegadas
   for (const l of runwayState.landings) {
     computeETAsAndFreeze(l);
 
     // ▲ calcular "committed" (dentro de 2 km de B1, o tocó B1/FINAL, o frozen)
     l.committed = isCommitted(l.name);
-
-    // 🔎 info de usuario en vivo
-    const uL = userLocations[l.name];
-
-    // 🪂 detección de planeador MUCHO más robusta
-    const typeStr = String(
-      l.type ||
-      uL?.type ||
-      ''
-    ).toLowerCase();
-
-    const isGliderLanding =
-      uL?.isMotorized === false ||
-      typeStr.includes('glider') ||
-      typeStr.includes('planeador');
-
-    // glideClass consolidado (viene de computeETAsAndFreeze)
-    const glideClass = l.glideClass || (l.glide && l.glide.klass) || null;
-
-    // ⛔️ Planeador que NO LLEGA: ni slot, ni beacons, ni turno
-    if (isGliderLanding && glideClass === 'NO_REACH') {
-      continue;
-    }
-
 
     const priorityBase =
       (l.emergency ? 0 : 1000) +
@@ -635,10 +530,9 @@ function buildOperations(nowMs) {
       type: 'ARR',
       name: l.name,
       callsign: l.callsign || '',
-      category: cat,
+      category: parseCategory(l.type),
       priority: priorityBase,
-      etaB1: l.etaB1, 
-      etaB2: l.etaB2,
+      etaB1: l.etaB1, etaB2: l.etaB2,
       frozen: l.frozenLevel === 1,
       committed: !!l.committed,
       emergency: !!l.emergency,
@@ -663,43 +557,44 @@ function buildOperations(nowMs) {
     });
   }
 
-  // Orden preliminar por prioridad/ETA, ajustado por committed y orden previo
-  const prevOrder = runwayState.lastOrder.landings || [];
-  const idxInPrev = (name) => {
-    const i = prevOrder.indexOf(name);
-    return i === -1 ? 1e9 : i;
-  };
+  // Orden con emergency/committed primero y, si ambos committed, respetar orden previo
+// Orden preliminar por prioridad/ETA, ajustado por committed y orden previo
+const prevOrder = runwayState.lastOrder.landings || [];
+const idxInPrev = (name) => {
+  const i = prevOrder.indexOf(name);
+  return i === -1 ? 1e9 : i;
+};
 
-  ops.sort((a, b) => {
-    // 1) Emergencia primero
-    const aEmer = (a.type === 'ARR') && runwayState.landings.find(x=>x.name===a.name)?.emergency;
-    const bEmer = (b.type === 'ARR') && runwayState.landings.find(x=>x.name===b.name)?.emergency;
-    if (aEmer && !bEmer) return -1;
-    if (!aEmer && bEmer) return 1;
+ops.sort((a, b) => {
+  // 1) Emergencia primero
+  const aEmer = (a.type === 'ARR') && runwayState.landings.find(x=>x.name===a.name)?.emergency;
+  const bEmer = (b.type === 'ARR') && runwayState.landings.find(x=>x.name===b.name)?.emergency;
+  if (aEmer && !bEmer) return -1;
+  if (!aEmer && bEmer) return 1;
 
-    // 2) Llegadas comprometidas antes que no comprometidas
-    if (a.type === 'ARR' && b.type === 'ARR') {
-      if (a.committed && !b.committed) return -1;
-      if (!a.committed && b.committed) return 1;
+  // 2) Llegadas comprometidas antes que no comprometidas
+  if (a.type === 'ARR' && b.type === 'ARR') {
+    if (a.committed && !b.committed) return -1;
+    if (!a.committed && b.committed) return 1;
 
-      // 3) Si ambos committed, mantener orden previo (evita shuffle por ETA)
-      if (a.committed && b.committed) {
-        return idxInPrev(a.name) - idxInPrev(b.name);
-      }
+    // 3) Si ambos committed, mantener orden previo (evita shuffle por ETA)
+    if (a.committed && b.committed) {
+      return idxInPrev(a.name) - idxInPrev(b.name);
     }
+  }
 
-    // 4) Resto por priority/ETA (como ya hacías)
-    const pa = a.priority - b.priority;
-    if (pa !== 0) return pa;
+  // 4) Resto por priority/ETA (como ya hacías)
+  const pa = a.priority - b.priority;
+  if (pa !== 0) return pa;
 
-    const ta = a.type === 'ARR' ? (a.etaB1 ?? a.etaB2 ?? 9e12) : (a.etReady ?? 9e12);
-    const tb = b.type === 'ARR' ? (b.etaB1 ?? b.etaB2 ?? 9e12) : (b.etReady ?? 9e12);
-    return ta - tb;
-  });
+  const ta = a.type === 'ARR' ? (a.etaB1 ?? a.etaB2 ?? 9e12) : (a.etReady ?? 9e12);
+  const tb = b.type === 'ARR' ? (b.etaB1 ?? b.etaB2 ?? 9e12) : (b.etReady ?? 9e12);
+  return ta - tb;
+});
+
 
   return ops;
 }
-
 
 
 function tryShiftChain(slots, startIdx, shiftMs, opsById) {
@@ -823,48 +718,7 @@ function planificar(nowMs) {
     if (sid) io.to(sid).emit(event, payload);
   }
 
-  // === Glide helpers (planeadores / alcance real) ===
-const noGlideWarnByName = new Map(); // name -> ts último aviso "no llegás"
-
-/**
- * Usa lo que llega del frontend en userLocations[name]:
- *  - isMotorized (boolean)
- *  - aglM, glideMaxM, glideMargin, glideClass
- */
-function getGlideInfoFor(name) {
-  const u = userLocations[name];
-  if (!u) return null;
-
-  const isMotorized =
-    typeof u.isMotorized === 'boolean'
-      ? u.isMotorized
-      : true; // si no sabemos, lo tratamos como a motor
-
-  const aglM        = typeof u.aglM === 'number' ? u.aglM : null;
-  const glideMaxM   = typeof u.glideMaxM === 'number' ? u.glideMaxM : null;
-  const glideMargin = typeof u.glideMargin === 'number' ? u.glideMargin : null;
-  const glideClass  = typeof u.glideClass === 'string' ? u.glideClass : null;
-
-  return { isMotorized, aglM, glideMaxM, glideMargin, glideClass };
-}
-
-// === Punto de espera para planeadores (200 m a la derecha de la cabecera activa) ===
-function gliderGatePoint() {
-  const g = activeRunwayGeom();
-  if (!g) return null;
-
-  // app_brg = rumbo de aproximación (viniendo desde afuera hacia la cabecera)
-  const landingHeading = g.app_brg;
-  const rightBearing = (landingHeading + 90) % 360;
-
-  // 200 m a la derecha de la cabecera activa
-  const gate = destinationPoint(g.thr.lat, g.thr.lon, rightBearing, 200);
-  return { lat: gate.lat, lon: gate.lon };
-}
-
-
-
-function maybeSendInstruction(opId, opsById) { 
+function maybeSendInstruction(opId, opsById) {
   const op = opsById.get(opId);
   if (!op || op.type !== 'ARR') return;
 
@@ -874,89 +728,33 @@ function maybeSendInstruction(opId, opsById) {
   const u = userLocations[op.name];
   if (!u) return;
 
-  // 🔎 Datos completos de la llegada en runwayState
-  const landingObj = runwayState.landings.find(l => l.name === op.name) || {};
-
-  // 🪂 Info de planeo desde FRONT
-  const glideFront   = getGlideInfoFor(op.name);     // {isMotorized, glideMaxM, glideMargin, glideClass}
-  // 🪂 Info de planeo desde BACKEND
-  const glideBackend = landingObj.glide || null;     // {klass, dMaxM, ...} creado en computeETAsAndFreeze
-
-  const glideClassFront = glideFront?.glideClass || null;
-  const glideClassBack  = glideBackend?.klass || null;
-
-  // ✅ glideClass consolidado (si cualquiera dice NO_REACH, lo tomamos)
-  const glideClass =
-    glideClassFront ||
-    glideClassBack ||
-    null;
-
-  // Alcance máximo en metros que vamos a considerar “seguro”
-  const maxBeaconDist =
-    (typeof glideFront?.glideMaxM === 'number' && glideFront.glideMaxM > 0)
-      ? 0.7 * glideFront.glideMaxM
-      : (typeof glideBackend?.dMaxM === 'number' && glideBackend.dMaxM > 0
-          ? 0.7 * glideBackend.dMaxM
-          : null);
-
-  // 🔧 detección robusta de planeador
-  const typeStr = String(
-    landingObj.type ||
-    op.category ||
-    u.type ||
-    ''
-  ).toLowerCase();
-
-  const isMotorizedFlag =
-    typeof glideFront?.isMotorized === 'boolean'
-      ? glideFront.isMotorized
-      : (typeof u.isMotorized === 'boolean'
-          ? u.isMotorized
-          : undefined);
-
-  const isGlider =
-    isMotorizedFlag === false ||
-    typeStr.includes('glider') ||
-    typeStr.includes('planeador');
-
-  const isEmergency         = !!landingObj.emergency;
-  const isPrimaryEmergency  = !!landingObj.isPrimaryEmergency;
-  const isGliderOrEmergency = isGlider || isEmergency;
-
-  // 🧱 Saber si este ARR es el primero en la cola (según slots)
-  const firstArrSlot   = runwayState.timelineSlots.find(s => s.type === 'ARR');
-  const isFirstInQueue = !!(firstArrSlot && firstArrSlot.opId === opId);
-
+  // FSM actual y sticky
   const curPhase = getApproachPhase(op.name); // 'TO_B2'|'TO_B1'|'FINAL'|'CLRD'
-  const sticky   = getLandingState(op.name);  // 'ORD','B2','B1','FINAL','RUNWAY_CLEAR','IN_STANDS'
-  const stickyReachedB1    =
-    sticky === 'B1' || sticky === 'FINAL' || sticky === 'RUNWAY_CLEAR' || sticky === 'IN_STANDS';
-  const stickyReachedFinal =
-    sticky === 'FINAL' || sticky === 'RUNWAY_CLEAR' || sticky === 'IN_STANDS';
+  const sticky = getLandingState(op.name);    // 'ORD','B2','B1','FINAL','RUNWAY_CLEAR','IN_STANDS'
+  const stickyReachedB1    = (sticky === 'B1' || sticky === 'FINAL' || sticky === 'RUNWAY_CLEAR' || sticky === 'IN_STANDS');
+  const stickyReachedFinal = (sticky === 'FINAL' || sticky === 'RUNWAY_CLEAR' || sticky === 'IN_STANDS');
 
   const mySlot = runwayState.timelineSlots.find(s => s.opId === opId);
   const now = Date.now();
-  const dt  = mySlot ? (mySlot.startMs - now) : null;
+  const dt = mySlot ? (mySlot.startMs - now) : null;
 
   const dB2 = getDistance(u.latitude, u.longitude, asg.b2.lat, asg.b2.lon);
   const dB1 = getDistance(u.latitude, u.longitude, asg.b1.lat, asg.b1.lon);
   const mem = lastInstr.get(op.name) || { phase: null, ts: 0 };
 
-  // 🚦 Guardas por estado operativo reportado (front es la fuente de verdad)
-  const curOps = getOpsState(op.name);
-  if (
-    curOps === 'FINAL' ||
-    curOps === 'RUNWAY_OCCUPIED' ||
-    curOps === 'RUNWAY_CLEAR' ||
-    curOps === 'APRON_STOP'
-  ) {
-    return;
-  }
-  if (curOps === 'B1') {
-    return;
-  }
+      // 🚦 Guardas por estado operativo reportado (front es la fuente de verdad)
+    const curOps = getOpsState(op.name);
+    // Nunca pedir B1/B2 si ya está en FINAL, en pista, liberando pista o en stands
+    if (curOps === 'FINAL' || curOps === 'RUNWAY_OCCUPIED' || curOps === 'RUNWAY_CLEAR' || curOps === 'APRON_STOP') {
+      return;
+    }
+    // Nunca pedir B2 si ya pasó por B1
+    if (curOps === 'B1') {
+      return;
+    }
 
-  // --- Auto-advance de fase por proximidad (FSM interna) ---
+
+  // --- Auto-advance de fase por proximidad ---
   try {
     if (isFinite(dB2) && dB2 <= BEACON_REACHED_M && curPhase === 'TO_B2') {
       setApproachPhase(op.name, 'TO_B1');
@@ -964,11 +762,11 @@ function maybeSendInstruction(opId, opsById) {
     }
     if (isFinite(dB1) && dB1 <= BEACON_REACHED_M && getApproachPhase(op.name) !== 'CLRD') {
       setApproachPhase(op.name, 'FINAL');
-      setLandingStateForward(op.name, 'B1');
+      setLandingStateForward(op.name, 'B1'); // ya “pasó” por B1
     }
     if (isFinite(dB1) && dB1 <= B1_FREEZE_RADIUS_M && getApproachPhase(op.name) !== 'CLRD') {
       setApproachPhase(op.name, 'FINAL');
-      setLandingStateForward(op.name, 'FINAL');
+      setLandingStateForward(op.name, 'FINAL'); // congelado en final
     }
   } catch {}
 
@@ -977,87 +775,11 @@ function maybeSendInstruction(opId, opsById) {
   // 0) Si ya está CLRD, nunca emitir algo que retroceda
   if (phaseNow === 'CLRD') return;
 
-  // 🔴 PLANEADOR que NO LLEGA (NO_REACH): si cualquiera (front o back) dice NO_REACH
-  const isNoReach =
-    glideClass === 'NO_REACH' ||
-    glideClassFront === 'NO_REACH' ||
-    glideClassBack === 'NO_REACH';
-
-  if (isGlider && isNoReach) {
-    const lastTs = noGlideWarnByName.get(op.name) || 0;
-    if (now - lastTs > 20000) {
-      emitToUser(op.name, 'runway-msg', {
-        text: '⚠️ Con este planeo no llegás a la pista. Elegí un campo alternativo.',
-        key: 'no-glide-reach',
-      });
-      noGlideWarnByName.set(op.name, now);
-    }
-    // 👇 NO instrucciones, NO B1/B2. Además, en buildOperations el glider NO_REACH ya no entra en la cola.
-    return;
-  }
-
-  // 🪂 PLANEADORES que SÍ LLEGAN: FINAL o GLIDER_WAIT, nunca B1/B2
-  if (isGlider && glideClass && glideClass !== 'NO_REACH') {
-    const gate = gliderGatePoint();   // punto 200 m a la derecha de cabecera
-    const g    = activeRunwayGeom();
-    const thr  = g?.thr || null;
-
-    // 🥇 Planeador #1 → FINAL directo (RWY_FINAL)
-    if (isFirstInQueue && thr) {
-      if (mem.phase !== 'GLIDER_FINAL') {
-        emitToUser(op.name, 'atc-instruction', {
-          type: 'goto-beacon',
-          beacon: 'RWY_FINAL',
-          lat: thr.lat,
-          lon: thr.lon,
-          text: g?.rw?.ident
-            ? `Aproximación final pista ${g.rw.ident}`
-            : 'Aproximación final a pista',
-        });
-        lastInstr.set(op.name, { phase: 'GLIDER_FINAL', ts: now });
-      }
-      return; // 🚫 no seguimos a lógica de B1/B2
-    }
-
-    // Planeador #>1 → GLIDER_WAIT (gate lateral)
-    if (!isFirstInQueue && gate) {
-      if (maxBeaconDist != null) {
-        const dGate = getDistance(u.latitude, u.longitude, gate.lat, gate.lon);
-        if (dGate > maxBeaconDist) {
-          return;
-        }
-      }
-
-      if (mem.phase !== 'GLIDER_WAIT') {
-        emitToUser(op.name, 'atc-instruction', {
-          type: 'goto-beacon',
-          beacon: 'GLIDER_WAIT',
-          lat: gate.lat,
-          lon: gate.lon,
-          text: 'Espere en punto planeador',
-        });
-        lastInstr.set(op.name, { phase: 'GLIDER_WAIT', ts: now });
-      }
-      return; // 🚫 nunca caemos a B1/B2
-    }
-
-    // Si no hay thr ni gate válidos, nos quedamos callados.
-    return;
-  }
-
-  // === De aquí en adelante: SOLO AVIONES A MOTOR ===
-
-  // 1) Ir a B2/B3/B4... 
-  if (
-    !isPrimaryEmergency &&
-    phaseNow === 'TO_B2' &&
-    dB2 > BEACON_REACHED_M &&
-    !stickyReachedB1 &&
-    mem.phase !== 'B1'
-  ) {
-    if (isGliderOrEmergency && maxBeaconDist != null && dB2 > maxBeaconDist) {
-      return;
-    }
+  // 1) Ir a B2/B3/B4... SOLO si aún estamos en TO_B2, no pedimos antes B1 y sticky < B1
+  if (phaseNow === 'TO_B2' &&
+      dB2 > BEACON_REACHED_M &&
+      !stickyReachedB1 &&
+      mem.phase !== 'B1') {
 
     const beaconName = asg.beaconName || 'B2';
 
@@ -1067,25 +789,19 @@ function maybeSendInstruction(opId, opsById) {
         beacon: beaconName,
         lat: asg.b2.lat,
         lon: asg.b2.lon,
-        text: `Proceda a ${beaconName}`,
+        text: `Proceda a ${beaconName}`
       });
       lastInstr.set(op.name, { phase: beaconName, ts: now });
     }
     return;
   }
 
-  // 2) Ventana para B1
-  if (
-    !isPrimaryEmergency &&
-    (phaseNow === 'TO_B2' || phaseNow === 'TO_B1') &&
-    !stickyReachedFinal &&
-    dt != null &&
-    dt <= 90000 &&
-    dB1 > BEACON_REACHED_M
-  ) {
-    if (isGliderOrEmergency && maxBeaconDist != null && dB1 > maxBeaconDist) {
-      return;
-    }
+
+  // 2) Ventana para B1, pero NUNCA si ya estás en FINAL/CLRD o sticky >= FINAL
+  if ((phaseNow === 'TO_B2' || phaseNow === 'TO_B1') &&
+      !stickyReachedFinal &&
+      dt != null && dt <= 90000 &&
+      dB1 > BEACON_REACHED_M) {
 
     if (phaseNow === 'TO_B2') setApproachPhase(op.name, 'TO_B1');
 
@@ -1095,7 +811,7 @@ function maybeSendInstruction(opId, opsById) {
         beacon: 'B1',
         lat: asg.b1.lat,
         lon: asg.b1.lon,
-        text: 'Proceda a B1',
+        text: 'Proceda a B1'
       });
       lastInstr.set(op.name, { phase: 'B1', ts: now });
     }
@@ -1103,17 +819,10 @@ function maybeSendInstruction(opId, opsById) {
   }
 
   // 3) En FINAL, cerca del slot y pista libre → CLRD
-  const isFinalPhase = getApproachPhase(op.name) === 'FINAL';
-  const finalWindowMs = isPrimaryEmergency ? 120000 : 45000;
-
-  if (isFinalPhase && dt != null && dt <= finalWindowMs && !runwayState.inUse) {
+  if (getApproachPhase(op.name) === 'FINAL' && dt != null && dt <= 45000 && !runwayState.inUse) {
     if (mem.phase !== 'CLRD') {
       const rwIdent = activeRunwayGeom()?.rw?.ident || '';
-      emitToUser(op.name, 'atc-instruction', {
-        type: 'cleared-to-land',
-        rwy: rwIdent,
-        text: 'Autorizado a aterrizar',
-      });
+      emitToUser(op.name, 'atc-instruction', { type: 'cleared-to-land', rwy: rwIdent, text: 'Autorizado a aterrizar' });
       lastInstr.set(op.name, { phase: 'CLRD', ts: now });
       setApproachPhase(op.name, 'CLRD');
       setLandingStateForward(op.name, 'FINAL');
@@ -1121,8 +830,12 @@ function maybeSendInstruction(opId, opsById) {
     return;
   }
 
-  // 4) En FINAL pero aún lejos de su slot → silencio.
+  // 4) En FINAL pero faltando tiempo → silencio. Nunca retroceder a B1.
 }
+
+
+
+
 
 
 
@@ -1168,48 +881,20 @@ function publishRunwayState() {
 
   // Construir beacons “apilados” para cada llegada en orden
   let stackedBeacons = [];
-   if (g) {
+  if (g) {
     const arrSlots = slots.filter(s => s.type === 'ARR');
-    stackedBeacons = arrSlots
-      .map((s, idx) => {
-        const name = (s.opId || '').split('#')[1];
-
-        // 🔎 Tipo de aeronave
-        const landingObj = runwayState.landings.find(l => l.name === name);
-
-        // Info de planeo desde FRONT (incluye isMotorized)
-        const glideFront = getGlideInfoFor(name);  // {isMotorized, glideMaxM, glideMargin, glideClass}
-
-        // Categoría por texto, por si no tenemos flag
-        const catRaw = parseCategory(landingObj?.type || '');
-
-        // Unificación: motor vs planeador
-        const isMotorized =
-          typeof glideFront?.isMotorized === 'boolean'
-            ? glideFront.isMotorized
-            : (catRaw !== 'GLIDER');
-
-        const isGlider = (isMotorized === false) || catRaw === 'GLIDER';
-
-        // 🪂 Planeadores: NO generar beacon B2/B3/B4 aquí
-        if (isGlider) {
-          return null;
-        }
-
-
-        const asg = assignBeaconsFor(name);
-        const beaconName = asg?.beaconName || `B${idx + 2}`;
-
-        return {
-          name,
-          beacon: beaconName,
-          lat: asg?.b2.lat ?? g.B2.lat,
-          lon: asg?.b2.lon ?? g.B2.lon,
-        };
-      })
-      .filter(Boolean); // eliminar los null (planeadores)
+    stackedBeacons = arrSlots.map((s, idx) => {
+      const name = (s.opId || '').split('#')[1];
+      const asg = assignBeaconsFor(name);
+      const beaconName = asg?.beaconName || `B${idx + 2}`;
+      return {
+        name,               // nombre del avión
+        beacon: beaconName, // 'B2','B3','B4',...
+        lat: asg?.b2.lat ?? g.B2.lat,
+        lon: asg?.b2.lon ?? g.B2.lon,
+      };
+    });
   }
-
 
   io.emit('sequence-update', {
     serverTime: now,
@@ -1274,42 +959,6 @@ function cleanupInUseIfDone() {
       return (ia === -1 ? 1e9 : ia) - (ib === -1 ? 1e9 : ib);
     });
   }
-    // --- ranking de emergencias: quién es la "principal" (ETA + glide) ---
-    runwayState.landings.forEach(l => {
-      l.emergencyRank = null;
-      l.isPrimaryEmergency = false;
-    });
-
-    function emergencyPriorityWithGlide(l) {
-      const klass = l.glideClass || (l.glide && l.glide.klass) || 'COMFY';
-
-      // peor glide = score más alto
-      const classScore =
-        klass === 'NO_REACH' ? 3 :
-        klass === 'CRITICAL' ? 2 :
-        klass === 'TIGHT'    ? 1 :
-        0; // COMFY
-
-      const eta = (typeof l.etaB1 === 'number')
-        ? l.etaB1
-        : (typeof l.etaB2 === 'number' ? l.etaB2 : 9999);
-
-      // score alto si está jodido + ETA chico
-      return classScore * 10000 - eta;
-    }
-
-    const emergs = runwayState.landings.filter(l => l.emergency);
-    if (emergs.length > 0) {
-      emergs.sort((a, b) => emergencyPriorityWithGlide(b) - emergencyPriorityWithGlide(a));
-
-      emergs.forEach((l, idx) => {
-        l.emergencyRank = idx + 1;
-        if (idx === 0) {
-          l.isPrimaryEmergency = true;   // 👈 sólo la primera es la "dueña" de la final
-        }
-      });
-    }
-
 
 
   // Mensajes de turno (compatibilidad)
@@ -1377,95 +1026,56 @@ setInterval(() => {
 io.on('connection', (socket) => {
   console.log('🟢 Cliente conectado vía WebSocket:', socket.id);
 
- socket.on('update', (data) => {
-  console.log('✈️ UPDATE recibido:', data);
+  socket.on('update', (data) => {
+    console.log('✈️ UPDATE recibido:', data);
 
-  const {
-    name,
-    latitude,
-    longitude,
-    alt = 0,
-    heading = 0,
-    type = 'unknown',
-    speed = 0,
-    callsign = '',
-    aircraftIcon = '2.png',
+    const {
+      name,
+      latitude,
+      longitude,
+      alt = 0,
+      heading = 0,
+      type = 'unknown',
+      speed = 0,
+      callsign = '',
+      aircraftIcon = '2.png'
+    } = data;
 
-    // 👇 Datos extra que manda Radar.tsx
-    aglM = null,
-    glideMaxM = null,
-    glideMargin = null,
-    glideClass = null,
-    isMotorized: isMotorizedRaw = undefined,   // 👈 renombrado para normalizar
-  } = data;
+    if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
 
-  if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
-
-  // (4) Defenderse de cambio de nombre en vivo:
-  const existing = userLocations[name] || {};
-  if (existing && existing.socketId && existing.socketId !== socket.id) {
-    // Limpiar la tabla inversa del socket anterior que estaba usando este "name"
-    for (const [sid, uname] of Object.entries(socketIdToName)) {
-      if (uname === name) {
-        delete socketIdToName[sid];
-        break;
+    // (4) Defenderse de cambio de nombre en vivo:
+    const existing = userLocations[name];
+    if (existing && existing.socketId && existing.socketId !== socket.id) {
+      // Limpiar la tabla inversa del socket anterior que estaba usando este "name"
+      for (const [sid, uname] of Object.entries(socketIdToName)) {
+        if (uname === name) {
+          delete socketIdToName[sid];
+          break;
+        }
       }
     }
-  }
 
-  // 🧠 Normalizar isMotorized (boolean o string)
-  let normIsMotorized;
-  if (typeof isMotorizedRaw === 'boolean') {
-    normIsMotorized = isMotorizedRaw;
-  } else if (typeof isMotorizedRaw === 'string') {
-    const s = isMotorizedRaw.toLowerCase();
-    normIsMotorized = (s === '1' || s === 'true');
-  } else {
-    normIsMotorized = undefined;
-  }
+    userLocations[name] = {
+      name,
+      latitude,
+      longitude,
+      alt,
+      heading,
+      type,
+      speed,
+      callsign,
+      icon: aircraftIcon,
+      timestamp: Date.now(),
+      socketId: socket.id
+    };
+    // ► FSM: actualizar fase con distancias reales
+    updateApproachPhase(name);
 
-  userLocations[name] = {
-    // 🔁 conservamos lo que ya sabíamos de este usuario
-    ...existing,
 
-    // 🔄 campos que siempre actualizamos con el último update
-    name,
-    latitude,
-    longitude,
-    alt,
-    heading,
-    type,
-    speed,
-    callsign,
-    icon: aircraftIcon,
-    timestamp: Date.now(),
-    socketId: socket.id,
+    socketIdToName[socket.id] = name;
 
-    // 👇 info de planeo
-    aglM,
-    glideMaxM,
-    glideMargin,
-    glideClass,
+    console.log('🗺️ Estado actual de userLocations:', userLocations);
 
-    // 👇 flag de motor / planeador
-    isMotorized:
-      typeof normIsMotorized === 'boolean'
-        ? normIsMotorized
-        : (typeof existing.isMotorized === 'boolean'
-            ? existing.isMotorized
-            : true), // solo si nunca supimos nada -> asumimos a motor
-  };
-
-  // ► FSM: actualizar fase con distancias reales
-  updateApproachPhase(name);
-
-  console.log("🪂 BACKEND GLIDE INFO", userLocations[name]);
-
-  socketIdToName[socket.id] = name;
-
-  console.log('🗺️ Estado actual de userLocations:', userLocations);
-
-  // reenviar tráfico a cada usuario (todos menos él mismo)
   for (const [recvName, info] of Object.entries(userLocations)) {
     if (!info?.socketId) continue;
 
@@ -1480,20 +1090,21 @@ io.on('connection', (socket) => {
         type: u.type,
         speed: u.speed,
         callsign: u.callsign,
-        aircraftIcon: u.icon,
+        aircraftIcon: u.icon
       }));
+    
+      io.to(info.socketId).emit('traffic-update', list);
+    }
 
-    io.to(info.socketId).emit('traffic-update', list);
-  }
+    
 
-  // ►► replanificar si hay solicitudes pendientes y cambió la kinemática
-  if (runwayState.landings.length || runwayState.takeoffs.length) {
-    enforceCompliance();
-    planRunwaySequence();
-    publishRunwayState();
-  }
-});
-
+    // ►► (AGREGADO) replanificar si hay solicitudes pendientes y cambió la kinemática
+    if (runwayState.landings.length || runwayState.takeoffs.length) {
+      enforceCompliance();
+      planRunwaySequence();
+      publishRunwayState();
+    }
+ });
 
    // === Estado operativo reportado por el frontend ===
   socket.on('ops/state', (msg) => {
@@ -1787,43 +1398,10 @@ socket.on('runway-request', (msg) => {
       // Estado inicial al entrar en cola (orden de aterrizaje)
       resetLandingState(name, 'ORD');
 
-            // 👇 Marcar en OPS como cola de aterrizaje (evita que se quede en TAXI_APRON)
-      opsStateByName.set(name, {
-        state: 'LAND_QUEUE',
-        ts: Date.now(),
-        aux: { source: 'server-auto' },
-      });
 
-
-        // 🧭 Fase inicial:
-        //  - si es EMERGENCIA → lo consideramos ya en FINAL (no queremos mandarlo a B1/B2)
-        //  - si no es emergencia → arranca en TO_B2 como antes
-      try {
-        const cat = parseCategory(type || aircraft || '');
-        const glideFront = getGlideInfoFor(name);
-        const isMotorized =
-          typeof glideFront?.isMotorized === 'boolean'
-            ? glideFront.isMotorized
-            : (cat !== 'GLIDER');
-
-        const isGlider = (isMotorized === false) || cat === 'GLIDER';
-
-        if (emergency) {
-          // Emergencia → dueña de la FINAL
-          setApproachPhase(name, 'FINAL');
-          setLandingStateForward(name, 'FINAL');
-        } else if (isGlider) {
-          // 🪂 Planeador normal: conceptualmente YA está en FINAL
-          setApproachPhase(name, 'FINAL');
-        } else {
-          // Avión a motor normal → circuito con B2/B1
-          setApproachPhase(name, 'TO_B2');
-        }
-      } catch {}
-
-
-
-
+      // 🧭 Fase inicial explícita: al pedir aterrizaje arrancamos en TO_B2
+      // (no "retrocede" si ya está en una fase más avanzada)
+      try { setApproachPhase(name, 'TO_B2'); } catch {}
     }
     else if (action === 'takeoff') {
       const idx = runwayState.takeoffs.findIndex(x => x.name === name);

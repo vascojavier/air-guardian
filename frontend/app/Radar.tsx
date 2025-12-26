@@ -33,10 +33,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Airfield } from '../types/airfield';
 import * as Speech from 'expo-speech';
-import { useLocalSearchParams } from 'expo-router';
-
 import { iconMap } from '../utils/iconMap';
-
 
 function iconKeyFor(aircraftIcon?: string, alert?: 'none'|'TA'|'RA_LOW'|'RA_HIGH') {
   // normaliza: saca .png si viene como '2.png'
@@ -324,24 +321,6 @@ const Radar = () => {
     
   }>(null);
   
-    function randomOffsetAround(
-      lat: number,
-      lon: number,
-      radiusM = 10000
-    ): { latitude: number; longitude: number } {
-      const r = Math.random() * radiusM;          // radio [0, radiusM]
-      const theta = Math.random() * 2 * Math.PI;  // ángulo [0, 2π)
-
-      const dLat = (r * Math.cos(theta)) / 111320; // m → grados aprox
-      const denom = 111320 * Math.cos((lat * Math.PI) / 180) || 1;
-      const dLon = (r * Math.sin(theta)) / denom;
-
-      return {
-        latitude: lat + dLat,
-        longitude: lon + dLon,
-      };
-    }
-
 
   // === Helper: forzar emisión inmediata de OPS ===
 function emitOpsNow(next: OpsState) {
@@ -377,35 +356,6 @@ function emitOpsNow(next: OpsState) {
     heading: 90,
     speed: 40,
   });
-
-  const initialRandomizedRef = useRef(false);
-
-  useEffect(() => {
-    if (initialRandomizedRef.current) return;
-    initialRandomizedRef.current = true;
-
-    setMyPlane(prev => {
-      const baseLat = prev.lat ?? 51.95;
-      const baseLon = prev.lon ?? 4.45;
-      const p = randomOffsetAround(baseLat, baseLon, 10000); // 10 km
-          const randomHeading = Math.floor(Math.random() * 360); // 0–359°
-          const randomAltitudeMeters = () => {
-          const min = 300;
-          const max = 3000;
-          return Math.floor(min + Math.random() * (max - min));
-           };
-
-
-          return {
-            ...prev,
-            lat: p.latitude,
-            lon: p.longitude,
-            alt: randomAltitudeMeters(),   // 👈 ahora es random entre 300 y 3000
-            heading: randomHeading,
-          };
-    });
-  }, []);
-
 
   const lastSentWarningRef = useRef<{ sig: string; t: number } | null>(null);
   const lastRAIdRef = useRef<string | null>(null);
@@ -449,26 +399,6 @@ const maybeEmitWarning = (w: Warning) => {
 };
 
 
-// Debajo de los imports, donde ya lo tenés:
-const { isMotorized: isMotorizedParam } = useLocalSearchParams<{
-  isMotorized?: string;   // 👈 solo string acá
-}>();
-
-
-
-const isMotorizedBool = (() => {
-  if (Array.isArray(isMotorizedParam)) {
-    const v = isMotorizedParam[0];
-    return v === '1' || v === 'true';
-  }
-  if (typeof isMotorizedParam === 'string') {
-    return isMotorizedParam === '1' || isMotorizedParam === 'true';
-  }
-  if (typeof isMotorizedParam === 'boolean') {
-    return isMotorizedParam;
-  }
-  return true; // 🔥 fallback seguro = asumimos A MOTOR si no sabemos
-})();
 
   const clearWarningFor = (planeId: string) => {
   // 1) sacá el warning del diccionario
@@ -493,9 +423,6 @@ const isMotorizedBool = (() => {
           : t
       )
     );
-
-
-
 
     // 3) si justo ese avión estaba seleccionado/priorizado, limpiá tarjetas
     setSelected(s => (s && s.id === planeId ? null : s));
@@ -601,8 +528,6 @@ const extraBeacons = useMemo<LatLon[]>(() => {
 }, [beaconB1, beaconB2]);
 
 
-
-
   const activeThreshold = useMemo<LatLon | null>(() => {
     if (!rw) return null;
     return rw.active_end === 'B' ? B_runway : A_runway;
@@ -636,44 +561,6 @@ function apronDistanceM(p:{lat:number; lon:number}): number {
   if (!apr) return Infinity;
   return getDistance(p.lat, p.lon, apr.latitude, apr.longitude);
 }
-
-// === Gate lateral para planeadores (derecha de cabecera activa) ===
-const gliderGatePoint = useMemo<LatLon | null>(() => {
-  if (!rw || !activeThreshold) return null;
-
-  // Rumbo de aterrizaje (hacia la cabecera activa)
-  const landingHeading =
-    rw.active_end === 'B'
-      ? rw.heading_true_ab
-      : (rw.heading_true_ab + 180) % 360;
-
-  // Derecha respecto al rumbo de aterrizaje
-  const rightBearing = (landingHeading + 90) % 360;
-
-  // Distancias ajustables
-  const lateralDistM = 200; // a la derecha de la pista
-  const backDistM    = 300; // "antes" del umbral
-
-  // 1) desde cabecera → derecha
-  const p1 = movePoint(
-    activeThreshold.latitude,
-    activeThreshold.longitude,
-    rightBearing,
-    lateralDistM
-  );
-
-  // 2) desde ahí → hacia atrás en el eje de pista
-  const opposite = (landingHeading + 180) % 360;
-  const p2 = movePoint(p1.latitude, p1.longitude, opposite, backDistM);
-
-  return p2;
-}, [rw, activeThreshold]);
-
-// === Info de planeo de *mi* avión para la UI ===
-const myGlideInfo = computeMyGlideInfo();
-const myIsGlider  = isGliderType(myPlane.type);
-const myCantReach =
-  myIsGlider && myGlideInfo.klass === 'NO_REACH';
 
 // Mostrar APRON sólo en cabecera o al liberar pista, y mantenerlo (latch) hasta despegar
 const shouldShowApronMarker = useMemo(() => {
@@ -810,36 +697,20 @@ function isNearThreshold(end:'A'|'B', radiusM=60): boolean {
   return getDistance(myPlane.lat, myPlane.lon, thr.latitude, thr.longitude) <= radiusM;
 }
 
-function getAGLmeters(): number {
-  const elevFromField =
-    (airfield as any)?.elevation ??
-    (runwayState?.airfield?.elevation ?? null);
+  function getAGLmeters(): number {
+    // preferí elevación del aeródromo; si no existe, usá la ref de suelo
+    const elevFromField = (airfield as any)?.elevation ?? (runwayState?.airfield?.elevation ?? null);
+    const altMSL = myPlane?.alt ?? 0;
 
-  const altMSL = myPlane?.alt ?? 0;
+    // si estoy sobre la pista y a baja velocidad, "calibro" referencia de suelo
+    if (isOnRunwayStrip() && (myPlane?.speed ?? 0) < 80) {
+      groundRefAltMSLRef.current = altMSL;
+    }
 
-  // Estimación actual de referencia de suelo
-  const refExisting = elevFromField ?? groundRefAltMSLRef.current;
-  const approxAGL =
-    refExisting != null ? (altMSL - refExisting) : Number.POSITIVE_INFINITY;
-
-  // Sólo recalibrar suelo si:
-  //  - estamos sobre la pista en planta
-  //  - velocidad baja
-  //  - y YA estamos relativamente bajos (ej. < 60 m AGL)
-  if (
-    isOnRunwayStrip() &&
-    (myPlane?.speed ?? 0) < 80 &&
-    Math.abs(approxAGL) < 60
-  ) {
-    groundRefAltMSLRef.current = altMSL;
+    const ref = elevFromField ?? groundRefAltMSLRef.current;
+    const agl = ref != null ? (altMSL - ref) : altMSL; // fallback: MSL si no hay ref
+    return Math.max(0, agl);
   }
-
-  const ref = elevFromField ?? groundRefAltMSLRef.current;
-  const agl = ref != null ? (altMSL - ref) : altMSL; // fallback: MSL si no hay ref
-
-  return Math.max(0, agl);
-}
-
 
 
 function isStopped(): boolean {
@@ -913,50 +784,6 @@ function aircraftCategory(t?: string): Cat {
   if (up.includes('TURBOPROP') || up.includes('HELICES') || up.includes('HÉLICE') || up.includes('HÉLICE') || up.includes('PROP')) return 'PROP';
   return 'PROP';
 }
-
-// === GLIDE / PLANEADORES ===
-const GLIDE_RATIO = 30;          // 30:1 → 30 m horizontales por 1 m de altura
-const GLIDE_SAFETY = 0.8;        // margen de seguridad (solo usamos 80% del glide teórico)
-
-type GlideClass = 'NO_REACH' | 'CRITICAL' | 'TIGHT' | 'COMFY';
-
-function isGliderType(t?: string): boolean {
-  const up = (t || '').toUpperCase();
-  return up.includes('GLIDER') || up.includes('PLANEADOR') || up.includes('VENTUS') || up.includes('DISCUSS') || up.includes('ASW');
-}
-
-// Info de planeo para *mi* avión
-function computeMyGlideInfo(): {
-  aglM: number;
-  dThrM: number | null;
-  dMaxM: number;
-  margin: number | null;
-  klass: GlideClass;
-} {
-  const agl = getAGLmeters();
-  const dThr = distToActiveThresholdM();
-  const dMax = Math.max(0, agl * GLIDE_RATIO * GLIDE_SAFETY);
-
-  if (!dThr || !Number.isFinite(dThr) || dMax <= 0) {
-    return { aglM: agl, dThrM: dThr ?? null, dMaxM: dMax, margin: null, klass: 'NO_REACH' };
-  }
-
-  const margin = dThr / dMax;
-
-  let klass: GlideClass;
-  if (dThr > dMax) {
-    klass = 'NO_REACH';
-  } else if (margin > 0.7) {
-    klass = 'CRITICAL';   // llega muy justo
-  } else if (margin > 0.5) {
-    klass = 'TIGHT';      // llega, pero sin tanto margen
-  } else {
-    klass = 'COMFY';      // llega sobrado
-  }
-
-  return { aglM: agl, dThrM: dThr, dMaxM: dMax, margin, klass };
-}
-
 
 // Distancias de permiso (en metros)
 // (Si querés ajustar airliners, cambiá 8000 por el valor que prefieras)
@@ -1141,7 +968,6 @@ useFocusEffect(
           speed: myPlane.speed,
           callsign: callsign || '',
           aircraftIcon: aircraftIcon || '2.png',
-          isMotorized: isMotorizedBool,   // 👈 aquí
         });
       }
     }
@@ -1744,69 +1570,31 @@ useEffect(() => {
       });
 
       // === NUEVO: instrucciones dirigidas (ATC) ===
-s.on('atc-instruction', (instr: any) => {
-  serverATCRef.current ||= true;
-  if (!instr?.type) return;
+      s.on('atc-instruction', (instr: any) => {
+        // ⬇️ agregar arriba del switch:
+        (serverATCRef.current ||= true);
 
-  // ¿Soy planeador?
-  const modelStr = aircraftModel || (myPlane as any)?.type || '';
-  const iAmGlider = !isMotorizedBool || isGliderType(modelStr);
+        if (!instr?.type) return;
 
-  // Para planeadores: ignorar instrucciones de beacons de avión
-  if (iAmGlider) {
-    if (instr.type === 'goto-beacon' || instr.type === 'turn-to-B1') {
-      // no cambiamos navTarget, sólo podemos dejar texto/voz si quisieras
-      return;
-    }
+        if (instr.type === 'goto-beacon' && typeof instr.lat === 'number' && typeof instr.lon === 'number') {
+          setNavTarget({ latitude: instr.lat, longitude: instr.lon });
+          flashBanner(instr.text || 'Proceda al beacon', 'atc-goto');
+          try { Speech.stop(); Speech.speak('Proceda al beacon', { language: 'es-ES' }); } catch {}
+        }
 
-    if (instr.type === 'cleared-to-land') {
-      // Autorización a aterrizar sí la anunciamos, pero sin tocar navTarget
-      const msg =
-        (instr.text || 'Autorizado a aterrizar') +
-        (instr.rwy ? ` pista ${instr.rwy}` : '');
-      flashBanner(msg, 'atc-clr');
-      try {
-        Speech.stop();
-        Speech.speak(msg, { language: 'es-ES' });
-      } catch {}
-      return;
-    }
-  }
+        if (instr.type === 'turn-to-B1') {
+          // Si ya tenés beacon B1 local derivado del airfield, podés usarlo
+          // setNavTarget(beaconB1); // si tenés beaconB1 calculado
+          flashBanner(instr.text || 'Vire hacia B1', 'atc-b1');
+          try { Speech.stop(); Speech.speak('Vire hacia be uno', { language: 'es-ES' }); } catch {}
+        }
 
-  // ✈️ Aviones a motor: comportamiento actual
-  if (
-    instr.type === 'goto-beacon' &&
-    typeof instr.lat === 'number' &&
-    typeof instr.lon === 'number'
-  ) {
-    setNavTarget({ latitude: instr.lat, longitude: instr.lon });
-    flashBanner(instr.text || 'Proceda al beacon', 'atc-goto');
-    try {
-      Speech.stop();
-      Speech.speak('Proceda al beacon', { language: 'es-ES' });
-    } catch {}
-  }
-
-  if (instr.type === 'turn-to-B1') {
-    flashBanner(instr.text || 'Vire hacia B1', 'atc-b1');
-    try {
-      Speech.stop();
-      Speech.speak('Vire hacia be uno', { language: 'es-ES' });
-    } catch {}
-  }
-
-  if (instr.type === 'cleared-to-land') {
-    const msg =
-      (instr.text || 'Autorizado a aterrizar') +
-      (instr.rwy ? ` pista ${instr.rwy}` : '');
-    flashBanner(msg, 'atc-clr');
-    try {
-      Speech.stop();
-      Speech.speak(msg, { language: 'es-ES' });
-    } catch {}
-  }
-});
-
+        if (instr.type === 'cleared-to-land') {
+          // Mantener navTarget al umbral si querés (si ya lo seteás en otro lado, podés no tocarlo)
+          flashBanner((instr.text || 'Autorizado a aterrizar') + (instr.rwy ? ` pista ${instr.rwy}` : ''), 'atc-clr');
+          try { Speech.stop(); Speech.speak((instr.text || 'Autorizado a aterrizar') + (instr.rwy ? ` pista ${instr.rwy}` : ''), { language: 'es-ES' }); } catch {}
+        }
+      });
 
 
       // 👇 si el server no tiene pista cargada, reinyectala desde AsyncStorage
@@ -2107,8 +1895,6 @@ s.on('conflicto', (data: any) => {
         const newLat = prev.lat + deltaLat;
         const newLon = prev.lon + deltaLon;
 
-        const glide = computeMyGlideInfo();
-
         const data = {
           name: username,
           latitude: newLat,
@@ -2116,17 +1902,11 @@ s.on('conflicto', (data: any) => {
           alt: prev.alt,
           heading: prev.heading,
           type: aircraftModel,
-          speed: prev.speed,              // km/h
+          // 👇 mantenemos km/h al enviar (consistente con el resto del sistema)
+          speed: prev.speed,
           callsign: callsign || '',
           aircraftIcon: aircraftIcon || '2.png',
-          aglM: glide.aglM,
-          glideMaxM: glide.dMaxM,
-          glideMargin: glide.margin,
-          glideClass: glide.klass,
-          isMotorized: isMotorizedBool,
-
         };
-
 
         s.emit('update', data);
 
@@ -2138,8 +1918,6 @@ s.on('conflicto', (data: any) => {
           const { coords } = await Location.getCurrentPositionAsync({});
           const speedKmh = coords.speed ? coords.speed * 3.6 : 0;
 
-          const glide = computeMyGlideInfo();
-
           const data = {
             name: username,
             latitude: coords.latitude,
@@ -2147,17 +1925,11 @@ s.on('conflicto', (data: any) => {
             alt: coords.altitude || 0,
             heading: coords.heading || 0,
             type: aircraftModel,
+            // 👇 enviamos en km/h para ser consistentes
             speed: speedKmh,
             callsign,
             aircraftIcon: aircraftIcon || '2.png',
-            aglM: glide.aglM,
-            glideMaxM: glide.dMaxM,
-            glideMargin: glide.margin,
-            glideClass: glide.klass,
-            isMotorized: isMotorizedBool,
-
           };
-
 
           s.emit('update', data);
 
@@ -2168,7 +1940,6 @@ s.on('conflicto', (data: any) => {
             alt: coords.altitude || 0,
             heading: coords.heading || 0,
             speed: speedKmh, // km/h en estado
-            
           }));
         } catch (err) {
           console.warn('📍 Error obteniendo ubicación:', err);
@@ -2636,374 +2407,229 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
 }, [myPlane.lat, myPlane.lon, myPlane.alt, myPlane.speed, runwayState, rw]);
 
   // === NAV: guía simple con B2 → B1 → Umbral, según turno en cola (con voz) ===
-useEffect(() => {
-  // ⛳️ Si el latch al APRON está activo, fijamos SIEMPRE el navTarget al APRON
-  {
-    const apr = getApronPoint();
-    if (apronLatchRef.current && apr) {
-      setNavTarget(apr);
-      return; // no dejes que el resto del efecto pise el target
-    }
-  }
-
-  // 👉 Si estoy en RUNWAY_CLEAR / TAXI_APRON / APRON_STOP: guiar a APRON (aunque no haya latch)
-  {
-    const myOps = lastOpsStateRef.current as OpsState | null;
-    if (!landingRequestedRef.current && myOps && GROUND_OPS.has(myOps)) {
+  useEffect(() => {
+    // ⛳️ Si el latch al APRON está activo, fijamos SIEMPRE el navTarget al APRON
+    {
       const apr = getApronPoint();
-      setNavTarget(apr ?? null);
-      return;
-    }
-  }
-
-  // Si el servidor está en modo ATC fuerte, no guiamos desde el cliente
-  if (serverATCRef.current) { 
-    setNavTarget(null); 
-    return; 
-  }
-
-  if (!rw || !beaconB1 || !beaconB2) { 
-    setNavTarget(null); 
-    return; 
-  }
-
-  // Sólo guiamos si pediste aterrizaje y estás “volando”
-  if (!landingRequestedRef.current || defaultActionForMe() !== 'land') {
-    setNavTarget(null);
-    // reset de máquina cuando dejo de necesitar guía
-    navPhaseRef.current = null;
-    prevIdxRef.current = null;
-    return;
-  }
-
-  // 🚁 Identificación robusta de planeador
-  const modelStr = (
-    aircraftModel ||
-    (myPlane as any)?.aircraftModel ||
-    (myPlane as any)?.type ||
-    (myPlane as any)?.callsign ||
-    ''
-  ).toString();
-
-  const rawIsMotorized = (myPlane as any)?.isMotorized;
-  const isGlider =
-    rawIsMotorized === false ||
-    isGliderType(modelStr) ||
-    /GLIDER|PLANEADOR/i.test(modelStr);
-
-  const myGlide = computeMyGlideInfo() || { klass: null, dMaxM: null };
-
-  const me = myPlane?.id || username;
-  const landings = runwayState?.state?.landings || [];
-  let idx = landings.findIndex((x:any) => x?.name === me);
-  if (idx === -1) { setNavTarget(null); return; }
-
-  // 🆘 ¿Soy emergencia?
-  const myLanding = landings.find((x:any) => x?.name === me);
-  const isEmergency = !!myLanding?.emergency;
-  const isPrimaryEmergency = !!myLanding?.isPrimaryEmergency;
-
-  // ⬇️ NUEVO: si tengo candado (ya pasé B1 → FINAL), fuerzo mi idx a 0,
-  // salvo que el líder real sea EMERGENCIA (entonces cedo).
-  if (finalLockedRef.current) {
-    const leader = landings[0];
-    const leaderIsEmergency = !!leader?.emergency;
-    if (!leaderIsEmergency || leader?.name === me) {
-      idx = 0; // me mantengo #1 aunque el server reordene por ETA
-    } else {
-      // Cede solo ante emergencia adelantada
-      finalLockedRef.current = false; // suelto candado si me pasaron por emergencia
-    }
-  }
-
-  // 👉 Reinicio suave cuando paso de #>0 a #0 (habilita cambio inmediato de fase)
-  if (prevIdxRef.current != null && prevIdxRef.current > 0 && idx === 0) {
-    lastPhaseSwitchRef.current = 0;     // quita “dwell” mínimo
-    navPhaseRef.current = null;         // re-evaluo fase inicial como #1
-  }
-  prevIdxRef.current = idx;
-
-  // 🆘 EMERGENCIA PRIMARIA: ir directo a FINAL, sin B1/B2/B3/B4
-  if (isPrimaryEmergency) {
-    // Si no tenemos umbral activo, no podemos guiar
-    if (!activeThreshold) {
-      setNavTarget(null);
-      return;
+      if (apronLatchRef.current && apr) {
+        setNavTarget(apr);
+        return; // no dejes que el resto del efecto pise el target
+      }
     }
 
-    // Fijar fase en FINAL y candado para que el server no me mueva de posición
-    navPhaseRef.current = 'FINAL';
-    finalLockedRef.current = true;
-    lastPhaseSwitchRef.current = Date.now();
-
-    // Congelar secuencia en el backend (coherente con planRunwaySequence)
-    socketRef.current?.emit('sequence-freeze', {
-      name: me,
-      reason: 'primary-emergency-final',
-    });
-
-    // Poner navTarget en el umbral activo
-    if (
-      !navTarget ||
-      navTarget.latitude !== activeThreshold.latitude ||
-      navTarget.longitude !== activeThreshold.longitude
-    ) {
-      setNavTarget(activeThreshold);
-      flashBanner('Continúe directo a final (EMERGENCIA)', 'emg-final');
-      try {
-        Speech.stop();
-        Speech.speak('Continúe directo a final, emergencia', {
-          language: 'es-ES',
-        });
-      } catch {}
-    }
-
-    // Nada de B1/B2/B3/B4 para la emergencia primaria
-    return;
-  }
-
-  // === Modo #>0 → esperas según tipo y glide ===
-  if (idx > 0) {
-    // 🪂 CASO PLANEADOR: nunca usar B2/B3/B4
-    if (isGlider) {
-      // 0) Si NO LLEGA, avisar y no dar ningún beacon
-      if (myGlide && myGlide.klass === 'NO_REACH') {
-        setNavTarget(null);
-        flashBanner(
-          '⚠️ Con este planeo no llegás a la pista. Buscá campo alternativo.',
-          'glide-no-reach'
-        );
-        try {
-          Speech.stop();
-          Speech.speak(
-            'Con este planeo no llegás a la pista. Buscá campo alternativo.',
-            { language: 'es-ES' }
-          );
-        } catch {}
+    // 👉 Si estoy en RUNWAY_CLEAR / TAXI_APRON / APRON_STOP: guiar a APRON (aunque no haya latch)
+    {
+      const myOps = lastOpsStateRef.current as OpsState | null;
+      if (!landingRequestedRef.current && myOps && GROUND_OPS.has(myOps)) {
+        const apr = getApronPoint();
+        setNavTarget(apr ?? null);
         return;
       }
-
-      // 1) Gate lateral para planeadores (#>0)
-      const gate = gliderGatePoint || activeThreshold || null; // gate lateral definido en tu contexto
-      if (!gate) {
-        setNavTarget(null);
-        return;
-      }
-
-      if (
-        !navTarget ||
-        navTarget.latitude !== gate.latitude ||
-        navTarget.longitude !== gate.longitude
-      ) {
-        setNavTarget(gate);
-
-        // Sólo anunciar una vez cuando cambiamos a ese gate
-        flashBanner(
-          'Planeador: espere a la derecha de cabecera',
-          'glid-gate'
-        );
-        try {
-          Speech.stop();
-          Speech.speak('Planeador, espere a la derecha de cabecera', {
-            language: 'es-ES',
-          });
-        } catch {}
-      }
-
-      // ⛔️ IMPORTANTE: nunca pasar a B2/B3/B4 si soy planeador
-      return;
     }
 
-    // ✈️ CASO AVIÓN A MOTOR → B2/B3/B4 como siempre
-    const beaconsChain: LatLon[] = [
-      beaconB2!,
-      ...extraBeacons, // [B3, B4...]
-    ].filter(Boolean as any);
 
-    if (!beaconsChain.length) {
-      if (beaconB2) {
-        if (
-          !navTarget ||
-          navTarget.latitude !== beaconB2.latitude ||
-          navTarget.longitude !== beaconB2.longitude
-        ) {
-          setNavTarget(beaconB2);
-        }
-      } else {
-        setNavTarget(null);
-      }
-      return;
-    }
 
-    // idx = 1 → B2; idx = 2 → B3; etc.
-    const slotIndex = Math.min(idx - 1, beaconsChain.length - 1);
-    const targetBeacon = beaconsChain[slotIndex];
+    if (serverATCRef.current) { setNavTarget(null); return; }   // ⬅️ INSERTAR AQUÍ
+    if (!rw || !beaconB1 || !beaconB2) { setNavTarget(null); return; }
+    // Sólo guiamos si pediste aterrizaje y estás “volando”
 
-    if (
-      !navTarget ||
-      navTarget.latitude !== targetBeacon.latitude ||
-      navTarget.longitude !== targetBeacon.longitude
-    ) {
-      setNavTarget(targetBeacon);
-
-      const label =
-        slotIndex === 0 ? 'B2' :
-        slotIndex === 1 ? 'B3' :
-        slotIndex === 2 ? 'B4' :
-        `B${slotIndex + 2}`;
-
-      flashBanner(`Proceda a ${label}`, `goto-${label.toLowerCase()}`);
-      try {
-        Speech.stop();
-        Speech.speak(
-          `Proceda a ${label.replace('B', 'be ')}`,
-          { language: 'es-ES' }
-        );
-      } catch {}
-    }
-    return;
-  }
-
-  // 🎯 Soy #1 en la cola (idx === 0)
-  // Para planeadores: SIEMPRE ir directo a FINAL, sin B1
-  if (isGlider) {
-    // Si no hay umbral activo no podemos guiar
-    if (!activeThreshold) {
+    // Sólo guiamos si pediste aterrizaje y estás “volando”
+    if (!landingRequestedRef.current || defaultActionForMe() !== 'land') {
       setNavTarget(null);
-      // reinicio la fase para que cuando haya pista se reevalúe
+      // reset de máquina cuando dejo de necesitar guía
       navPhaseRef.current = null;
+      prevIdxRef.current = null;
       return;
     }
 
-    // Fijamos la fase en FINAL y la "congelamos"
-    navPhaseRef.current = 'FINAL';
-    finalLockedRef.current = true;
-    lastPhaseSwitchRef.current = Date.now();
+    const me = myPlane?.id || username;
+    const landings = runwayState?.state?.landings || [];
+    let idx = landings.findIndex((x:any) => x?.name === me);
+    if (idx === -1) { setNavTarget(null); return; }
 
-    // Opcional: avisar al servidor que congele la secuencia (igual que B1 lock)
-    socketRef.current?.emit('sequence-freeze', {
-      name: me,
-      reason: 'glider-direct-final',
-    });
+    // 🆘 ¿Soy emergencia?
+    const myLanding = landings.find((x:any) => x?.name === me);
+    const isEmergency = !!myLanding?.emergency;
 
-    // Solo actualizamos navTarget si cambió
-    if (
-      !navTarget ||
-      navTarget.latitude !== activeThreshold.latitude ||
-      navTarget.longitude !== activeThreshold.longitude
-    ) {
-      setNavTarget(activeThreshold);
-      flashBanner('Planeador: continúe directo a final', 'glid-final');
-      try {
-        Speech.stop();
-        Speech.speak('Planeador, continúe directo a final', {
-          language: 'es-ES',
-        });
-      } catch {}
+
+    // ⬇️ NUEVO: si tengo candado (ya pasé B1 → FINAL), fuerzo mi idx a 0,
+    // salvo que el líder real sea EMERGENCIA (entonces cedo).
+    if (finalLockedRef.current) {
+      const leader = landings[0];
+      const leaderIsEmergency = !!leader?.emergency;
+      if (!leaderIsEmergency || leader?.name === me) {
+        idx = 0; // me mantengo #1 aunque el server reordene por ETA
+      } else {
+        // Cede solo ante emergencia adelantada
+        finalLockedRef.current = false; // suelto candado si me pasaron por emergencia
+      }
     }
 
-    // Muy importante: no seguir con la lógica de B1/B2/FINAL
+
+    // 👉 Reinicio suave cuando paso de #>0 a #0 (habilita cambio inmediato de fase)
+    if (prevIdxRef.current != null && prevIdxRef.current > 0 && idx === 0) {
+      lastPhaseSwitchRef.current = 0;     // quita “dwell” mínimo
+      navPhaseRef.current = null;         // re-evaluo fase inicial como #1
+    }
+    prevIdxRef.current = idx;
+
+
+// 🆘 EMERGENCIA: ir directo a FINAL, sin B1/B2/B3/B4
+if (isEmergency) {
+  // Si no tenemos umbral activo, no podemos guiar
+  if (!activeThreshold) {
+    setNavTarget(null);
     return;
   }
 
-      // === Soy #1 — histéresis + dwell ===
-      const runwayBusy = !!runwayState?.state?.inUse;
-      const runwayInUseByMe =
-        runwayState?.state?.inUse &&
-        runwayState.state.inUse.name === (myPlane?.id || username);
+  // Fijar fase en FINAL y candado para que el server no me mueva de posición
+  navPhaseRef.current = 'FINAL';
+  finalLockedRef.current = true;
+  lastPhaseSwitchRef.current = Date.now();
 
-      // Si la pista está en uso por otro avión, NO entro en FINAL todavía
-      if (runwayBusy && !runwayInUseByMe) {
-        // Me quedo en B1 (o B2) pero sin pasar a FINAL
-        if (beaconB1) {
-          if (
-            !navTarget ||
-            navTarget.latitude !== beaconB1.latitude ||
-            navTarget.longitude !== beaconB1.longitude
-          ) {
-            setNavTarget(beaconB1);
-          }
-        }
-        // No sigo hacia la lógica de FINAL
-        return;
+  // Congelar secuencia en el backend (opcional pero muy coherente)
+  socketRef.current?.emit('sequence-freeze', {
+    name: me,
+    reason: 'emergency-final',
+  });
+
+  // Poner navTarget en el umbral activo
+  if (
+    !navTarget ||
+    navTarget.latitude !== activeThreshold.latitude ||
+    navTarget.longitude !== activeThreshold.longitude
+  ) {
+    setNavTarget(activeThreshold);
+    flashBanner('Continúe directo a final (EMERGENCIA)', 'emg-final');
+    try {
+      Speech.stop();
+      Speech.speak('Continúe directo a final, emergencia', { language: 'es-ES' });
+    } catch {}
+  }
+
+  // Nada de B1/B2 para emergencia
+  return;
+}
+
+
+
+// === Modo #>0 → B2/B3/B4... según posición en la cola (sin spam) ===
+if (idx > 0) {
+  // Slot 0 de beacons "de espera" es B2; luego B3, B4...
+  const beaconsChain: LatLon[] = [
+    beaconB2!,
+    ...extraBeacons, // [B3, B4, ...]
+  ].filter(Boolean as any); // por si falta alguno
+
+  if (!beaconsChain.length) {
+    // fallback: si por alguna razón no hay nada, usar B2 como antes
+    if (beaconB2) {
+      if (!navTarget ||
+          navTarget.latitude !== beaconB2.latitude ||
+          navTarget.longitude !== beaconB2.longitude) {
+        setNavTarget(beaconB2);
       }
+    } else {
+      setNavTarget(null);
+    }
+    return;
+  }
 
-      // A partir de aquí: pista libre (o en uso por mí mismo) → puedo pasar a FINAL
-      const dToB1 = getDistance(
-        myPlane.lat,
-        myPlane.lon,
-        beaconB1.latitude,
-        beaconB1.longitude
-      );
+  // idx = 1 → B2 (slot 0)
+  // idx = 2 → B3 (slot 1)
+  // idx = 3 → B4 (slot 2)
+  // idx >= beaconsChain.length+1 → se queda en el último beacon
+  const slotIndex = Math.min(idx - 1, beaconsChain.length - 1);
+  const targetBeacon = beaconsChain[slotIndex];
 
-      // Fase inicial por proximidad si aún no hay fase
-      if (!navPhaseRef.current) {
-        navPhaseRef.current = dToB1 > B1_ENTER_M ? 'B1' : 'FINAL';
-        lastPhaseSwitchRef.current = Date.now();
-      }
+  if (!navTarget ||
+      navTarget.latitude !== targetBeacon.latitude ||
+      navTarget.longitude !== targetBeacon.longitude) {
+    setNavTarget(targetBeacon);
 
-      if (dToB1 <= FINAL_ENTER_M && maybeSwitchPhase('FINAL')) {
-        finalLockedRef.current = true;
-        socketRef.current?.emit('sequence-freeze', { name: me, reason: 'locked-at-B1' });
+    const label =
+      slotIndex === 0 ? 'B2' :
+      slotIndex === 1 ? 'B3' :
+      slotIndex === 2 ? 'B4' :
+      `B${slotIndex + 2}`;
 
-        if (activeThreshold) {
-          setNavTarget(activeThreshold);
-          flashBanner('Continúe a final', 'continue-final');
-          try {
-            Speech.stop();
-            Speech.speak('Continúe a final', { language: 'es-ES' });
-          } catch {}
-        }
-      }
+    flashBanner(`Proceda a ${label}`, `goto-${label.toLowerCase()}`);
+    try {
+      Speech.stop();
+      Speech.speak(`Proceda a ${label.replace('B', 'be ')}`, { language: 'es-ES' });
+    } catch {}
+  }
+
+  // los que no son #1 terminan acá, no pasan a B1/FINAL
+  return;
+}
 
 
-  // B1 → FINAL si entro por debajo de FINAL_ENTER_M (banner/voz SOLO al cambiar)
-  if (navPhaseRef.current === 'B1') {
-    if (dToB1 <= FINAL_ENTER_M) {
-      if (maybeSwitchPhase('FINAL') && activeThreshold) {
+    // === Soy #1 — histéresis + dwell
+    const dToB1 = getDistance(myPlane.lat, myPlane.lon, beaconB1.latitude, beaconB1.longitude);
+
+    // Fase inicial por proximidad si aún no hay fase
+    if (!navPhaseRef.current) {
+      navPhaseRef.current = dToB1 > B1_ENTER_M ? 'B1' : 'FINAL';
+      lastPhaseSwitchRef.current = Date.now();
+    }
+
+    if (dToB1 <= FINAL_ENTER_M && maybeSwitchPhase('FINAL')) {
+      // ⬇️ NUEVO: candado local + freeze al server
+      finalLockedRef.current = true;
+      socketRef.current?.emit('sequence-freeze', { name: me, reason: 'locked-at-B1' });
+
+      if (activeThreshold) {
         setNavTarget(activeThreshold);
         flashBanner('Continúe a final', 'continue-final');
-        try { 
-          Speech.stop(); 
-          Speech.speak('Continúe a final', { language: 'es-ES' }); 
-        } catch {}
-      }
-    } else {
-      // Mantener B1 sin re-banners
-      if (!navTarget || navTarget.latitude !== beaconB1.latitude || navTarget.longitude !== beaconB1.longitude) {
-        setNavTarget(beaconB1);
-        // 👇 IMPORTANTE: no volver a llamar flashBanner/voz aquí
+        try { Speech.stop(); Speech.speak('Continúe a final', { language: 'es-ES' }); } catch {}
       }
     }
-  } else {
-    // FINAL → (posible) B1: solo si NO está candado y realmente te abriste bastante
-    // Evita histéresis tras “Continúe a final”.
-    if (!finalLockedRef.current && dToB1 >= B1_ENTER_M) {
-      if (maybeSwitchPhase('B1')) {
-        setNavTarget(beaconB1);
-        flashBanner('Vire hacia B1', 'turn-b1');
-        try { 
-          Speech.stop(); 
-          Speech.speak('Vire hacia be uno', { language: 'es-ES' }); 
-        } catch {}
+
+
+    // B1 → FINAL si entro por debajo de FINAL_ENTER_M (banner/voz SOLO al cambiar)
+    if (navPhaseRef.current === 'B1') {
+      if (dToB1 <= FINAL_ENTER_M) {
+        if (maybeSwitchPhase('FINAL') && activeThreshold) {
+          setNavTarget(activeThreshold);
+          flashBanner('Continúe a final', 'continue-final');
+          try { Speech.stop(); Speech.speak('Continúe a final', { language: 'es-ES' }); } catch {}
+        }
+      } else {
+        // Mantener B1 sin re-banners
+        if (!navTarget || navTarget.latitude !== beaconB1.latitude || navTarget.longitude !== beaconB1.longitude) {
+          setNavTarget(beaconB1);
+          // 👇 IMPORTANTE: no volver a llamar flashBanner/voz aquí
+        }
       }
-    } else if (activeThreshold) {
-      // Mantener FINAL sin re-banners
-      if (!navTarget || navTarget.latitude !== activeThreshold.latitude || navTarget.longitude !== activeThreshold.longitude) {
-        setNavTarget(activeThreshold);
-      }
+} else {
+  // FINAL → (posible) B1: solo si NO está candado y realmente te abriste bastante
+  // Evita histéresis tras “Continúe a final”.
+  if (!finalLockedRef.current && dToB1 >= B1_ENTER_M) {
+    if (maybeSwitchPhase('B1')) {
+      setNavTarget(beaconB1);
+      flashBanner('Vire hacia B1', 'turn-b1');
+      try { Speech.stop(); Speech.speak('Vire hacia be uno', { language: 'es-ES' }); } catch {}
+    }
+  } else if (activeThreshold) {
+    // Mantener FINAL sin re-banners
+    if (!navTarget || navTarget.latitude !== activeThreshold.latitude || navTarget.longitude !== activeThreshold.longitude) {
+      setNavTarget(activeThreshold);
     }
   }
+}
 
-}, [
-  rw,
-  runwayState,          // cambia cuando se replanifica la cola
-  beaconB1, beaconB2,
-  activeThreshold,
-  myPlane.lat, myPlane.lon,
-  username,
-  navTarget
-]);
+
+
+  }, [
+    rw,
+    runwayState,          // cambia cuando se replanifica la cola
+    beaconB1, beaconB2,
+    activeThreshold,
+    myPlane.lat, myPlane.lon,
+    username,
+    navTarget
+  ]);
 
 
 
@@ -3244,17 +2870,16 @@ useEffect(() => {
 
 
         {/* Mi pierna hacia el target (B2/B1/Umbral) */}
-        {navTarget && !myCantReach && (
+        {navTarget && (
           <Polyline
             coordinates={[
               { latitude: myPlane.lat, longitude: myPlane.lon },
-              navTarget,
+              navTarget
             ]}
-            strokeWidth={3}
             strokeColor="blue"
+            strokeWidth={2}
           />
         )}
-
 
 
 
@@ -3370,51 +2995,26 @@ useEffect(() => {
     Estado OPS: {lastOpsStateRef.current ?? '—'}
   </Text>
 
-  {/* Estado de planeo (si soy planeador) */}
+    {/* 🆘 Aviso explícito si YO estoy marcado como EMERGENCIA en la cola */}
     {(() => {
-      const model = aircraftModel || (myPlane as any)?.type || '';
-      if (!isGliderType(model)) return null;
-      const g = computeMyGlideInfo();
-      const txt =
-        g.klass === 'NO_REACH' ? 'NO LLEGA' :
-        g.klass === 'CRITICAL' ? 'Llega MUY justo' :
-        g.klass === 'TIGHT' ? 'Llega justo' :
-        'Llega cómodo';
+      const me = myPlane?.id || username;
+      const ls = runwayState?.state?.landings || [];
+      const myL = ls.find((x:any)=>x?.name === me);
+      if (!myL?.emergency) return null;
 
       return (
-        <Text style={{fontSize:12, marginTop:2, color:'#00695C'}}>
-          Glide: {txt} (AGL {Math.round(g.aglM)} m, alcance ≈ {Math.round(g.dMaxM/1000)} km)
+        <Text
+          style={{
+            color: '#B71C1C',
+            fontWeight: '700',
+            marginTop: 4,
+            marginBottom: 4,
+          }}
+        >
+          🆘 EMERGENCIA prioritaria en secuencia de aterrizaje
         </Text>
       );
     })()}
-
-
-    {/* 🆘 Aviso explícito si YO estoy marcado como EMERGENCIA en la cola */}
-{(() => {
-  const me = myPlane?.id || username;
-  const ls = runwayState?.state?.landings || [];
-  const myL = ls.find((x:any)=>x?.name === me);
-
-  const isEmergency = !!myL?.emergency;
-  const isPrimary   = !!myL?.isPrimaryEmergency;
-
-  // Sólo mostrar este mensaje si soy la EMERGENCIA PRINCIPAL
-  if (!isPrimary) return null;
-
-  return (
-    <Text
-      style={{
-        color: '#B71C1C',
-        fontWeight: '700',
-        marginTop: 4,
-        marginBottom: 4,
-      }}
-    >
-      🆘 EMERGENCIA prioritaria en secuencia de aterrizaje
-    </Text>
-  );
-})()}
-
 
 
     {/* Quién está en uso */}
