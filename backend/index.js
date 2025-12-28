@@ -1121,6 +1121,7 @@ io.on('connection', (socket) => {
 
   socket.on('update', (data) => {
     console.log('✈️ UPDATE recibido:', data);
+    console.log('DEBUG isMotorized:', name, isMotorized, 'type=', type);
 
     const {
       name,
@@ -1131,8 +1132,10 @@ io.on('connection', (socket) => {
       type = 'unknown',
       speed = 0,
       callsign = '',
-      aircraftIcon = '2.png'
+      aircraftIcon = '2.png',
+      isMotorized = undefined,   // 👈 NUEVO
     } = data;
+
 
     if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
 
@@ -1158,9 +1161,11 @@ io.on('connection', (socket) => {
       speed,
       callsign,
       icon: aircraftIcon,
+      isMotorized: (typeof isMotorized === 'boolean') ? isMotorized : undefined,
       timestamp: Date.now(),
       socketId: socket.id
     };
+
     // ► FSM: actualizar fase con distancias reales
     updateApproachPhase(name);
 
