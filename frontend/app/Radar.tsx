@@ -357,21 +357,6 @@ function emitOpsNow(next: OpsState) {
     speed: 40,
   });
 
-  
-  const isMotorized = React.useMemo(() => {
-  const modelStr = (aircraftModel || '').toString().toUpperCase();
-
-  const isGlider =
-    modelStr.includes('GLIDER') ||
-    modelStr.includes('PLANEADOR') ||
-    modelStr.includes('SIN MOTOR') ||
-    modelStr.includes('PARAPENTE') ||
-    modelStr.includes('ALA DELTA');
-
-  return !isGlider;
-}, [aircraftModel]);
-
-
   const lastSentWarningRef = useRef<{ sig: string; t: number } | null>(null);
   const lastRAIdRef = useRef<string | null>(null);
   // Hold por RA de 6s por avión (evita que TA local “pise” al RA backend)
@@ -983,7 +968,6 @@ useFocusEffect(
           speed: myPlane.speed,
           callsign: callsign || '',
           aircraftIcon: aircraftIcon || '2.png',
-          isMotorized, // 👈 CLAVE
         });
       }
     }
@@ -1922,7 +1906,6 @@ s.on('conflicto', (data: any) => {
           speed: prev.speed,
           callsign: callsign || '',
           aircraftIcon: aircraftIcon || '2.png',
-          isMotorized, // 👈 AGREGAR
         };
 
         s.emit('update', data);
@@ -1946,7 +1929,6 @@ s.on('conflicto', (data: any) => {
             speed: speedKmh,
             callsign,
             aircraftIcon: aircraftIcon || '2.png',
-            isMotorized, // 👈 AGREGAR
           };
 
           s.emit('update', data);

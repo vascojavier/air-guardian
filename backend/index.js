@@ -230,22 +230,6 @@ function parseCategory(type='') {
   if (T.includes('GLIDER') || T.includes('PLANEADOR')) return 'GLIDER';
   return 'LIGHT';
 }
-
-function isMotorlessName(name) {
-  const u = userLocations[name];
-
-  // 1) Si el frontend manda isMotorized (recomendado), manda eso
-  if (u && typeof u.isMotorized === 'boolean') return u.isMotorized === false;
-
-  // 2) Por texto en type/callsign/modelo (backup viejo suele mezclar)
-  const t = String(u?.type || '').toUpperCase();
-  if (t.includes('GLIDER') || t.includes('PLANEADOR') || t.includes('SIN MOTOR')) return true;
-
-  // 3) Por categoría (usa tu parseCategory)
-  return parseCategory(u?.type || '') === 'GLIDER';
-}
-
-
 function rotSecondsFor(type) {
   return ROT_BY_CAT[parseCategory(type)] ?? 100;
 }
@@ -306,20 +290,6 @@ function activeRunwayGeom() {
   }
   return { rw, active, A, B, thr, opp, app_brg, B1, B2 };
 }
-
-// ========= Puntos virtuales para SIN MOTOR =========
-// Gate a 200 m a la derecha del umbral activo (para esperar y entrar por derecha)
-function gliderGatePoint() {
-  const g = activeRunwayGeom();
-  if (!g?.thr) return null;
-
-  // "Derecha" respecto a la aproximación (hacia el umbral)
-  const rightOfApproach = (g.app_brg + 90) % 360;
-
-  // 200 m a la derecha del umbral
-  return destinationPoint(g.thr.lat, g.thr.lon, rightOfApproach, 200);
-}
-
 
 function assignBeaconsFor(name) {
   const g = activeRunwayGeom();
@@ -758,66 +728,6 @@ function maybeSendInstruction(opId, opsById) {
   const u = userLocations[op.name];
   if (!u) return;
 
-    // ==========================
-  // 🪂 SIN MOTOR: Gate + Final (sin B1/B2)
-  // ==========================
-  const motorless = isMotorlessName(op.name);
-  if (motorless) {
-    const g = activeRunwayGeom();
-    const thr = g?.thr || null;
-    if (!thr) return;
-
-    // ¿es el primero en la cola?
-    const firstArrSlot = runwayState.timelineSlots.find(s => s.type === 'ARR');
-    const isFirstInQueue = !!(firstArrSlot && firstArrSlot.opId === opId);
-
-    const gate = gliderGatePoint(); // 200 m derecha cabecera
-
-    // Guardas por estado operativo (si el front dice que ya está en tierra, no mandar nada)
-    const curOps = getOpsState(op.name);
-    if (
-      curOps === 'RUNWAY_OCCUPIED' ||
-      curOps === 'RUNWAY_CLEAR' ||
-      curOps === 'TAXI_APRON' ||
-      curOps === 'APRON_STOP'
-    ) {
-      return;
-    }
-
-    // #1 → directo a FINAL (cabecera activa)
-    if (isFirstInQueue) {
-      if (mem.phase !== 'GLIDER_FINAL') {
-        emitToUser(op.name, 'atc-instruction', {
-          type: 'goto-beacon',
-          beacon: 'RWY_FINAL',
-          lat: thr.lat,
-          lon: thr.lon,
-          text: g?.rw?.ident
-            ? `Sin motor: continúe a final pista ${g.rw.ident}`
-            : 'Sin motor: continúe a final',
-        });
-        lastInstr.set(op.name, { phase: 'GLIDER_FINAL', ts: now });
-      }
-      return;
-    }
-
-    // #>1 → esperar en gate (derecha cabecera)
-    if (gate) {
-      if (mem.phase !== 'GLIDER_GATE') {
-        emitToUser(op.name, 'atc-instruction', {
-          type: 'goto-beacon',
-          beacon: 'GLIDER_GATE',
-          lat: gate.lat,
-          lon: gate.lon,
-          text: 'Sin motor: espere por derecha de cabecera',
-        });
-        lastInstr.set(op.name, { phase: 'GLIDER_GATE', ts: now });
-      }
-    }
-    return; // ✅ CRÍTICO: NO caer en lógica B1/B2
-  }
-
-
   // FSM actual y sticky
   const curPhase = getApproachPhase(op.name); // 'TO_B2'|'TO_B1'|'FINAL'|'CLRD'
   const sticky = getLandingState(op.name);    // 'ORD','B2','B1','FINAL','RUNWAY_CLEAR','IN_STANDS'
@@ -851,11 +761,8 @@ function maybeSendInstruction(opId, opsById) {
       setLandingStateForward(op.name, 'B2');
     }
     if (isFinite(dB1) && dB1 <= BEACON_REACHED_M && getApproachPhase(op.name) !== 'CLRD') {
-      const busyByOther = runwayState.inUse && runwayState.inUse.name !== op.name;
-      if (!busyByOther) {
-        setApproachPhase(op.name, 'FINAL');
-      }
-      setLandingStateForward(op.name, 'B1');
+      setApproachPhase(op.name, 'FINAL');
+      setLandingStateForward(op.name, 'B1'); // ya “pasó” por B1
     }
     if (isFinite(dB1) && dB1 <= B1_FREEZE_RADIUS_M && getApproachPhase(op.name) !== 'CLRD') {
       setApproachPhase(op.name, 'FINAL');
@@ -1121,7 +1028,6 @@ io.on('connection', (socket) => {
 
   socket.on('update', (data) => {
     console.log('✈️ UPDATE recibido:', data);
-    console.log('DEBUG isMotorized:', name, isMotorized, 'type=', type);
 
     const {
       name,
@@ -1132,10 +1038,8 @@ io.on('connection', (socket) => {
       type = 'unknown',
       speed = 0,
       callsign = '',
-      aircraftIcon = '2.png',
-      isMotorized = undefined,   // 👈 NUEVO
+      aircraftIcon = '2.png'
     } = data;
-
 
     if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
 
@@ -1161,11 +1065,9 @@ io.on('connection', (socket) => {
       speed,
       callsign,
       icon: aircraftIcon,
-      isMotorized: (typeof isMotorized === 'boolean') ? isMotorized : undefined,
       timestamp: Date.now(),
       socketId: socket.id
     };
-
     // ► FSM: actualizar fase con distancias reales
     updateApproachPhase(name);
 
