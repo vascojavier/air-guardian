@@ -340,6 +340,30 @@ function assignBeaconsFor(name) {
   return asg;
 }
 
+const GLIDER_OFFSET_M = 200;   // derecha de pista
+const GLIDER_G2_AHEAD_M = 200; // punto de giro: 200 m antes de cabecera
+const GLIDER_G1_AHEAD_M = 1200; // “downwind corto” paralelo (ajustable)
+
+function gliderPoints() {
+  const g = activeRunwayGeom();
+  if (!g?.thr) return null;
+
+  // app_brg = rumbo “desde afuera hacia la cabecera” (inbound)
+  const inbound = g.app_brg;
+
+  // derecha relativa al inbound (mirando hacia la cabecera)
+  const right = (inbound + 90) % 360;
+
+  // Punto base sobre centerline inbound
+  const baseG2 = destinationPoint(g.thr.lat, g.thr.lon, inbound, GLIDER_G2_AHEAD_M);
+  const baseG1 = destinationPoint(g.thr.lat, g.thr.lon, inbound, GLIDER_G1_AHEAD_M);
+
+  // Desplazar a la derecha 200 m
+  const G2 = destinationPoint(baseG2.lat, baseG2.lon, right, GLIDER_OFFSET_M);
+  const G1 = destinationPoint(baseG1.lat, baseG1.lon, right, GLIDER_OFFSET_M);
+
+  return { g, G1, G2 };
+}
 
 
 
@@ -742,19 +766,104 @@ function maybeSendInstruction(opId, opsById) {
   const dB1 = getDistance(u.latitude, u.longitude, asg.b1.lat, asg.b1.lon);
   const mem = lastInstr.get(op.name) || { phase: null, ts: 0 };
 
-      // 🚦 Guardas por estado operativo reportado (front es la fuente de verdad)
-    const curOps = getOpsState(op.name);
-    // Nunca pedir B1/B2 si ya está en FINAL, en pista, liberando pista o en stands
-    if (curOps === 'FINAL' || curOps === 'RUNWAY_OCCUPIED' || curOps === 'RUNWAY_CLEAR' || curOps === 'APRON_STOP') {
-      return;
-    }
-    // Nunca pedir B2 si ya pasó por B1
-    if (curOps === 'B1') {
-      return;
-    }
+  // 🚦 Guardas por estado operativo reportado (front es la fuente de verdad)
+  const curOps = getOpsState(op.name);
+  // Nunca pedir beacons si ya está en FINAL, en pista, liberando pista o en stands
+  if (
+    curOps === 'FINAL' ||
+    curOps === 'RUNWAY_OCCUPIED' ||
+    curOps === 'RUNWAY_CLEAR' ||
+    curOps === 'APRON_STOP'
+  ) {
+    return;
+  }
+  // Nunca pedir B2 si ya pasó por B1
+  if (curOps === 'B1') {
+    return;
+  }
 
+  // =====================================================================
+  // 🪂 SIN MOTOR: circuito por derecha con 2 puntos G1/G2 y luego FINAL
+  //  - G1: downwind corto paralelo (derecha) a 200 m
+  //  - G2: punto de giro (derecha) a 200 m de la cabecera
+  //  - #1 en cola: G2 -> FINAL
+  //  - #>1 en cola: HOLD en G1
+  //  ✅ CRÍTICO: termina con return; para NO caer a B1/B2
+  // =====================================================================
+  try {
+    const motorless = (typeof isMotorlessName === 'function') ? isMotorlessName(op.name) : false;
+    if (motorless) {
+      const pts = (typeof gliderPoints === 'function') ? gliderPoints() : null;
+      const thr = pts?.g?.thr || null;
+      const G1  = pts?.G1 || null;
+      const G2  = pts?.G2 || null;
+      if (!thr || !G1 || !G2) return;
 
-  // --- Auto-advance de fase por proximidad ---
+      // ¿es el primero en la cola?
+      const firstArrSlot = runwayState.timelineSlots.find(s => s.type === 'ARR');
+      const isFirstInQueue = !!(firstArrSlot && firstArrSlot.opId === opId);
+
+      // Guardas extra: si ya taxi/apron/pista, no mandar nada
+      const curOps2 = getOpsState(op.name);
+      if (
+        curOps2 === 'RUNWAY_OCCUPIED' ||
+        curOps2 === 'RUNWAY_CLEAR' ||
+        curOps2 === 'TAXI_APRON' ||
+        curOps2 === 'APRON_STOP'
+      ) {
+        return;
+      }
+
+      const mem2 = lastInstr.get(op.name) || { phase: null, ts: 0 };
+
+      // #1 → G2 (giro) y cuando llega cerca → FINAL (cabecera)
+      if (isFirstInQueue) {
+        if (mem2.phase !== 'GLIDER_G2') {
+          emitToUser(op.name, 'atc-instruction', {
+            type: 'goto-beacon',
+            beacon: 'G2',
+            lat: G2.lat,
+            lon: G2.lon,
+            text: 'Sin motor: vuele paralelo por derecha y continúe a G2 (giro a final)',
+          });
+          lastInstr.set(op.name, { phase: 'GLIDER_G2', ts: now });
+          return;
+        }
+
+        const dG2 = getDistance(u.latitude, u.longitude, G2.lat, G2.lon);
+        if (isFinite(dG2) && dG2 <= BEACON_REACHED_M) {
+          if (mem2.phase !== 'GLIDER_FINAL') {
+            emitToUser(op.name, 'atc-instruction', {
+              type: 'goto-beacon',
+              beacon: 'RWY_FINAL',
+              lat: thr.lat,
+              lon: thr.lon,
+              text: 'Sin motor: gire a final',
+            });
+            lastInstr.set(op.name, { phase: 'GLIDER_FINAL', ts: now });
+          }
+        }
+        return; // ✅ CRÍTICO
+      }
+
+      // #>1 → HOLD en G1 (paralela derecha)
+      if (mem2.phase !== 'GLIDER_G1') {
+        emitToUser(op.name, 'atc-instruction', {
+          type: 'goto-beacon',
+          beacon: 'G1',
+          lat: G1.lat,
+          lon: G1.lon,
+          text: 'Sin motor: espere por derecha (G1) hasta nuevo aviso',
+        });
+        lastInstr.set(op.name, { phase: 'GLIDER_G1', ts: now });
+      }
+      return; // ✅ CRÍTICO: NO caer en B1/B2
+    }
+  } catch (e) {
+    // si algo falla, NO romper motores; seguir flujo normal
+  }
+
+  // --- Auto-advance de fase por proximidad (MOTORES / flujo normal) ---
   try {
     if (isFinite(dB2) && dB2 <= BEACON_REACHED_M && curPhase === 'TO_B2') {
       setApproachPhase(op.name, 'TO_B1');
@@ -776,11 +885,12 @@ function maybeSendInstruction(opId, opsById) {
   if (phaseNow === 'CLRD') return;
 
   // 1) Ir a B2/B3/B4... SOLO si aún estamos en TO_B2, no pedimos antes B1 y sticky < B1
-  if (phaseNow === 'TO_B2' &&
-      dB2 > BEACON_REACHED_M &&
-      !stickyReachedB1 &&
-      mem.phase !== 'B1') {
-
+  if (
+    phaseNow === 'TO_B2' &&
+    dB2 > BEACON_REACHED_M &&
+    !stickyReachedB1 &&
+    mem.phase !== 'B1'
+  ) {
     const beaconName = asg.beaconName || 'B2';
 
     if (mem.phase !== beaconName) {
@@ -796,13 +906,13 @@ function maybeSendInstruction(opId, opsById) {
     return;
   }
 
-
   // 2) Ventana para B1, pero NUNCA si ya estás en FINAL/CLRD o sticky >= FINAL
-  if ((phaseNow === 'TO_B2' || phaseNow === 'TO_B1') &&
-      !stickyReachedFinal &&
-      dt != null && dt <= 90000 &&
-      dB1 > BEACON_REACHED_M) {
-
+  if (
+    (phaseNow === 'TO_B2' || phaseNow === 'TO_B1') &&
+    !stickyReachedFinal &&
+    dt != null && dt <= 90000 &&
+    dB1 > BEACON_REACHED_M
+  ) {
     if (phaseNow === 'TO_B2') setApproachPhase(op.name, 'TO_B1');
 
     if (getApproachPhase(op.name) === 'TO_B1' && mem.phase !== 'B1') {
@@ -822,7 +932,11 @@ function maybeSendInstruction(opId, opsById) {
   if (getApproachPhase(op.name) === 'FINAL' && dt != null && dt <= 45000 && !runwayState.inUse) {
     if (mem.phase !== 'CLRD') {
       const rwIdent = activeRunwayGeom()?.rw?.ident || '';
-      emitToUser(op.name, 'atc-instruction', { type: 'cleared-to-land', rwy: rwIdent, text: 'Autorizado a aterrizar' });
+      emitToUser(op.name, 'atc-instruction', {
+        type: 'cleared-to-land',
+        rwy: rwIdent,
+        text: 'Autorizado a aterrizar'
+      });
       lastInstr.set(op.name, { phase: 'CLRD', ts: now });
       setApproachPhase(op.name, 'CLRD');
       setLandingStateForward(op.name, 'FINAL');
@@ -832,6 +946,7 @@ function maybeSendInstruction(opId, opsById) {
 
   // 4) En FINAL pero faltando tiempo → silencio. Nunca retroceder a B1.
 }
+
 
 
 
@@ -1038,7 +1153,8 @@ io.on('connection', (socket) => {
       type = 'unknown',
       speed = 0,
       callsign = '',
-      aircraftIcon = '2.png'
+      aircraftIcon = '2.png',
+      isMotorized
     } = data;
 
     if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
@@ -1065,6 +1181,7 @@ io.on('connection', (socket) => {
       speed,
       callsign,
       icon: aircraftIcon,
+      isMotorized: (typeof isMotorized === 'boolean') ? isMotorized : undefined,
       timestamp: Date.now(),
       socketId: socket.id
     };
@@ -1170,7 +1287,7 @@ io.on('connection', (socket) => {
       type: info.type,
       speed: info.speed,
       callsign: info.callsign,
-      aircraftIcon: info.icon
+      aircraftIcon: info.icon,
     }));
 
     console.log('📦 Enviando tráfico inicial por get-traffic:', activePlanes);

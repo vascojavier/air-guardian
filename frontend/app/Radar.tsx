@@ -261,7 +261,13 @@ const Radar = () => {
   const lastGroundSeenAtRef = useRef<number>(Date.now());
 
 
-  
+  const isMotorized = useMemo(() => {
+  const t = String(aircraftModel || '').toUpperCase();
+  // Ajustá esta lista a tus modelos reales
+  if (t.includes('GLIDER') || t.includes('PLANEADOR') || t.includes('SIN MOTOR')) return false;
+  return true;
+  }, [aircraftModel]);
+
 
 
 
@@ -863,6 +869,12 @@ function defaultActionForMe(): 'land' | 'takeoff' {
 
 // === RUNWAY: pedidos al backend ===
 const requestLanding = () => {
+  // ✅ IMPORTANTÍSIMO: salir del “apron latch” para que el backend no te bloquee
+  apronLatchRef.current = false;
+
+  // ✅ Forzar estado de aproximación / cola de aterrizaje
+  emitOpsNow('LAND_QUEUE');
+
   const payload = {
     action: 'land',
     name: myPlane?.id || username,
@@ -873,10 +885,12 @@ const requestLanding = () => {
     altitude: myPlane?.alt ?? 0,
   };
   console.log('[RUNWAY] requestLanding →', payload);
+
   socketRef.current?.emit('runway-request', payload);
   socketRef.current?.emit('runway-get');
   setTimeout(() => socketRef.current?.emit('runway-get'), 300);
 };
+
 
 const requestTakeoff = (ready: boolean) => {
   const payload = {
@@ -968,6 +982,7 @@ useFocusEffect(
           speed: myPlane.speed,
           callsign: callsign || '',
           aircraftIcon: aircraftIcon || '2.png',
+          isMotorized, // 👈
         });
       }
     }
@@ -1906,6 +1921,7 @@ s.on('conflicto', (data: any) => {
           speed: prev.speed,
           callsign: callsign || '',
           aircraftIcon: aircraftIcon || '2.png',
+          isMotorized, // 👈
         };
 
         s.emit('update', data);
@@ -1929,6 +1945,7 @@ s.on('conflicto', (data: any) => {
             speed: speedKmh,
             callsign,
             aircraftIcon: aircraftIcon || '2.png',
+            isMotorized, // 👈
           };
 
           s.emit('update', data);
