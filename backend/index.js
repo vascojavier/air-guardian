@@ -1403,18 +1403,55 @@ socket.on('runway-request', (msg) => {
       // (no "retrocede" si ya está en una fase más avanzada)
       try { setApproachPhase(name, 'TO_B2'); } catch {}
     }
-    else if (action === 'takeoff') {
-      const idx = runwayState.takeoffs.findIndex(x => x.name === name);
-      if (idx === -1) {
-        runwayState.takeoffs.push({
-          name, callsign, aircraft, type,
-          ready: !!ready,
-          requestedAt: new Date()
-        });
-      } else {
-        runwayState.takeoffs[idx].ready = !!ready;
-      }
+else if (action === 'takeoff') {
+
+  // ✅ HARD RULE: solo tierra puede pedir despegue
+  const TAKEOFF_ALLOWED = new Set([
+    'RUNWAY_OCCUPIED',
+    'RUNWAY_CLEAR',
+    'TAXI_APRON',
+    'APRON_STOP',
+    'HOLD_SHORT',
+    'TAXI_TO_RWY',
+  ]);
+
+  // 1) Obtener OPS actual del piloto
+  let st = null;
+  try {
+    // Si ya tenés una función:
+    if (typeof getOpsState === 'function') {
+      st = getOpsState(name);
+    } else {
+      // Fallback común: si guardás estados en un Map opsStateByName
+      // ejemplo: opsStateByName.set(name, { state:'TAXI_APRON', ts:Date.now() })
+      st = opsStateByName?.get(name)?.state ?? null;
     }
+  } catch (_) {
+    st = null;
+  }
+
+  // 2) Rechazar si NO está en tierra
+  if (!st || !TAKEOFF_ALLOWED.has(st)) {
+    io.to(socket.id).emit('runway-msg', {
+      text: 'Debe estar en tierra para solicitar despegue',
+      key: 'tko-ground'
+    });
+    return; // ⛔️ NO agregar a la cola de despegue
+  }
+
+  // ✅ si pasó el guard, recién acá se permite
+  const idx = runwayState.takeoffs.findIndex(x => x.name === name);
+  if (idx === -1) {
+    runwayState.takeoffs.push({
+      name, callsign, aircraft, type,
+      ready: !!ready,
+      requestedAt: new Date()
+    });
+  } else {
+    runwayState.takeoffs[idx].ready = !!ready;
+  }
+}
+
 
     planRunwaySequence();
     publishRunwayState();
