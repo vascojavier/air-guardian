@@ -1076,25 +1076,22 @@ io.on('connection', (socket) => {
 
     console.log('🗺️ Estado actual de userLocations:', userLocations);
 
-  for (const [recvName, info] of Object.entries(userLocations)) {
-    if (!info?.socketId) continue;
+ const payload = {
+  name,
+  lat: latitude,
+  lon: longitude,
+  alt,
+  heading,
+  type,
+  speed,
+  callsign,
+  aircraftIcon: aircraftIcon,
+  ts: Date.now(),
+};
 
-    const list = Object.values(userLocations)
-      .filter(u => u.name !== recvName) // cada uno recibe “todos menos yo”
-      .map(u => ({
-        name: u.name,
-        lat: u.latitude,
-        lon: u.longitude,
-        alt: u.alt,
-        heading: u.heading,
-        type: u.type,
-        speed: u.speed,
-        callsign: u.callsign,
-        aircraftIcon: u.icon
-      }));
-    
-      io.to(info.socketId).emit('traffic-update', list);
-    }
+// a todos menos al emisor
+socket.broadcast.emit('traffic-update', [payload]);
+
 
     
 
