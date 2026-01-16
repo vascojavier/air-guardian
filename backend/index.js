@@ -789,8 +789,12 @@ function maybeSendInstruction(opId, opsById) {
         beacon: beaconName,
         lat: asg.b2.lat,
         lon: asg.b2.lon,
-        text: `Proceda a ${beaconName}`
+        key: 'nav.proceedTo',
+        params: { fix: beaconName },
+        spokenKey: 'nav.proceedToBeaconSpoken',
+        spokenParams: { beacon: beaconName }
       });
+
       lastInstr.set(op.name, { phase: beaconName, ts: now });
     }
     return;
@@ -811,7 +815,10 @@ function maybeSendInstruction(opId, opsById) {
         beacon: 'B1',
         lat: asg.b1.lat,
         lon: asg.b1.lon,
-        text: 'Proceda a B1'
+        key: 'nav.turnToB1',               // o 'nav.proceedTo' con fix:'B1'
+        params: {},
+        spokenKey: 'nav.turnToB1Spoken',
+        spokenParams: {}
       });
       lastInstr.set(op.name, { phase: 'B1', ts: now });
     }
@@ -822,7 +829,15 @@ function maybeSendInstruction(opId, opsById) {
   if (getApproachPhase(op.name) === 'FINAL' && dt != null && dt <= 45000 && !runwayState.inUse) {
     if (mem.phase !== 'CLRD') {
       const rwIdent = activeRunwayGeom()?.rw?.ident || '';
-      emitToUser(op.name, 'atc-instruction', { type: 'cleared-to-land', rwy: rwIdent, text: 'Autorizado a aterrizar' });
+      emitToUser(op.name, 'atc-instruction', {
+        type: 'cleared-to-land',
+        rwy: rwIdent,
+        key: 'runway.clearedToLand',
+        params: { rwy: rwIdent },
+        spokenKey: 'runway.clearedToLandSpoken',
+        spokenParams: { rwy: rwIdent }
+      });
+
       lastInstr.set(op.name, { phase: 'CLRD', ts: now });
       setApproachPhase(op.name, 'CLRD');
       setLandingStateForward(op.name, 'FINAL');
@@ -979,7 +994,13 @@ function cleanupInUseIfDone() {
       );
 
         if (allowTurnMsg) {
-          emitToUser(name, 'runway-msg', { text: `Su turno de aterrizaje ahora es #${idx+1}`, key: 'turn-land' });
+          emitToUser(name, 'runway-msg', {
+          key: 'runway.yourLandingTurnIsNumber',
+          params: { n: idx + 1 },
+          spokenKey: 'runway.yourLandingTurnIsNumber',
+          spokenParams: { n: idx + 1 }
+          });
+
         }
       }
     });
@@ -1429,10 +1450,10 @@ else if (action === 'takeoff') {
 
   // 2) Rechazar si NO está en tierra
   if (!st || !TAKEOFF_ALLOWED.has(st)) {
-    io.to(socket.id).emit('runway-msg', {
-      text: 'Debe estar en tierra para solicitar despegue',
-      key: 'tko-ground'
-    });
+  io.to(socket.id).emit('runway-msg', {
+    key: 'runway.mustBeOnApronOrRunwayToRequestTakeoff',
+    params: {}
+  });
     return; // ⛔️ NO agregar a la cola de despegue
   }
 
@@ -1565,7 +1586,7 @@ socket.on('go-around', (msg = {}) => {
     }
 
     // Aviso al piloto (UI/voz)
-    emitToUser(name, 'runway-msg', { text: 'Arremetida registrada. Reingresando en secuencia.', key: 'go-around' });
+    emitToUser(name, 'runway-msg', { key: 'runway.goAroundRegistered', params: {} });
     // Reinicia a estado post-arremetida (vuelve a ordenar y luego a B1 cuando corresponda)
     resetLandingState(name, 'ORD');
     planRunwaySequence();
