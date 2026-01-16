@@ -776,10 +776,10 @@ function maybeSendInstruction(opId, opsById) {
   if (phaseNow === 'CLRD') return;
 
   // 1) Ir a B2/B3/B4... SOLO si aún estamos en TO_B2, no pedimos antes B1 y sticky < B1
-  if (phaseNow === 'TO_B2' &&
-      dB2 > BEACON_REACHED_M &&
-      !stickyReachedB1 &&
-      mem.phase !== 'B1') {
+if (phaseNow === 'TO_B2' &&
+    dB2 > BEACON_REACHED_M &&
+    !stickyReachedB1) {
+
 
     const beaconName = asg.beaconName || 'B2';
 
