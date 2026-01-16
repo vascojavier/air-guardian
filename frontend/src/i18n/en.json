@@ -1,0 +1,188 @@
+{
+  "app": {
+    "name": "AirGuardian"
+  },
+
+  "common": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "close": "Close",
+    "empty": "(empty)",
+    "unknown": "Unknown",
+    "na": "N/A"
+  },
+
+  "auth": {
+    "title": "Welcome",
+    "enterName": "Enter your name",
+    "adminPassword": "Admin password",
+    "passwordPlaceholder": "Enter password",
+    "wrongPasswordTitle": "Wrong password",
+    "wrongPasswordBody": "The admin password is incorrect."
+  },
+
+  "aircraft": {
+    "yourAircraft": "Your aircraft",
+    "model": "Model",
+    "callsign": "Callsign",
+    "type": "Type",
+    "pilot": "Pilot"
+  },
+
+  "warnings": {
+    "trafficAdvisory": "Traffic Advisory",
+    "resolutionAdvisory": "Resolution Advisory",
+    "nearbyTraffic": "Nearby traffic",
+    "distance": "Distance"
+  },
+
+  "landing": {
+    "requestPermission": "Request landing permission",
+    "queue": "Landing queue",
+    "approve": "Approve",
+    "deny": "Deny"
+  },
+
+  "settings": {
+    "title": "Settings",
+    "language": "Language",
+    "system": "System",
+    "english": "English",
+    "spanish": "Spanish"
+  },
+
+  "radar": {
+    "followOff": "✈️ Stop following aircraft",
+    "followOn": "📍 Auto center",
+    "useRealGps": "🛰️ Use real GPS",
+    "useSimMode": "🛠️ Use simulation mode",
+    "heading": "Heading",
+    "altitude": "Altitude",
+    "agl": "Height above ground",
+    "speed": "Speed"
+  },
+
+  "runway": {
+    "threshold": "Threshold",
+    "apron": "APRON",
+    "apronShort": "APRON",
+    "turnNumber": "Turn #{{n}}",
+    "opsState": "OPS State",
+    "ops": "OPS",
+    "clear": "Runway clear",
+    "landing": "Landing",
+    "takeoff": "Taking off",
+    "landingLower": "landing",
+    "takeoffLower": "takeoff",
+    "positionFrozenB1": "🔒 Position frozen (B1)",
+    "etaToSlotSec": "ETA to slot: {{s}} s",
+    "shiftAppliedSec": "Applied offset: +{{s}}s",
+    "cancelAction": "Cancel {{action}}",
+    "requestLanding": "Request landing",
+    "requestTakeoff": "Request takeoff",
+    "emergency": "EMERGENCY",
+    "emergencyDeclared": "EMERGENCY declared",
+    "emergencyPriority": "🆘 EMERGENCY priority in landing sequence",
+    "mustBeOnApronOrRunwayToRequestTakeoff": "You must be on the runway or apron to request takeoff",
+    "landingQueue": "Landing queue",
+    "takeoffQueue": "Takeoff queue",
+    "hold": "HOLD",
+    "ready": "READY",
+    "alignRight": "Please align with the runway on the right",
+    "goToThreshold": "Proceed to runway threshold",
+    "vacateRunway": "Vacate runway!",
+    "clearedToLand": "Cleared to land",
+    "lineUp": "Line up and wait",
+    "clearedToTakeoff": "Cleared for takeoff",
+    "goAroundRegistered": "Go-around registered. Re-entering the sequence.",
+    "trafficOnFinalWait": "Traffic on final: wait",
+    "clearedToLandSpoken": "Cleared to land {{rwy}}",
+    "yourTakeoffTurnIsNumber": "Your takeoff turn is number {{n}}.",
+    "yourLandingTurnIsNumber": "Your landing turn is number {{n}}."
+  },
+
+  "nav": {
+    "proceedTo": "Proceed to {{fix}}",
+    "proceedToBeaconGeneric":"Proceed to the beacon",
+    "proceedToBeaconGenericSpoken":"Proceed to the beacon",
+    "turnToB1": "Turn to B1",
+    "continueFinal": "Continue to final",
+    "emergencyDirectFinal": "Proceed direct to final (EMERGENCY)",
+    "turnToB1Spoken": "Turn to B1",
+    "continueFinalSpoken": "Continue to final",
+    "emergencyDirectFinalSpoken": "Proceed direct to final, emergency",
+    "proceedToBeaconSpoken": "Proceed to {{beacon}}",
+    "pilot": "Pilot",
+    "welcome": "Welcome"
+  },
+
+  "welcome": {
+    "pilot": "Pilot",
+    "runwayAdmin": "Runway Administrator",
+    "continueAsAdmin": "Continue as admin"
+  },
+
+  "index": {
+  "select": "Select...",
+  "enter": "Enter",
+  "goPistaAdmin": "Go to Runway (admin)",
+  "namePlaceholder": "Your name (pilot)",
+  "callsignLabel": "Aircraft callsign:",
+  "callsignPlaceholder": "e.g. LV-ABC123",
+  "countryDetected": "Detected country",
+  "aircraftTypeLabel": "Aircraft type:",
+  "aircraftModelLabel": "Aircraft model:",
+  "motor": "Motor",
+  "glider": "Glider",
+  "other": "Other...",
+  "manualModelPlaceholder": "Enter model manually",
+  "chooseCategory": "Choose an aircraft category:",
+  "adminPasswordLabel": "Password (admin):",
+  "optional": "optional",
+  "restrictedTitle": "Restricted access",
+  "restrictedBody": "Enter the admin password to access Runway.",
+  "missingFieldsTitle": "Missing fields",
+  "missingFieldsBody": "Please complete all fields.",
+  "modelDeletedTitle": "Model deleted",
+  "modelDeletedBody": "Model \"{{model}}\" was deleted.",
+  "deleteModelBtn": "Delete model \"{{model}}\"",
+  "genericAircraft": "Generic",
+  "paraglider": "Paraglider",
+  "paramotor": "Paramotor",
+  "hangGlider": "Hang glider",
+  "hangGliderMotor": "Powered hang glider"
+},
+
+
+  "pista": {
+    "thresholdA": "Threshold A {{num}}",
+    "thresholdB": "Threshold B {{num}}",
+    "activeThreshold": "Active threshold: {{end}}",
+    "setThresholdA": "Threshold A set",
+    "missingDataTitle": "Missing data",
+    "missingDataBody": "Define A, B and the runway number.",
+    "loadError": "Error loading active runway",
+    "modalTitle": "Enter runway number:",
+    "modalPlaceholder": "e.g. 18L",
+    "cancel": "Cancel",
+    "save": "Save",
+    "changeActiveThreshold": "Change active threshold",
+    "autoGenerateB1B2": "Auto-generate B1/B2",
+    "markApron": "📍 Mark APRON",
+    "cancelMarkApron": "Cancel APRON marking",
+    "setNewRunway": "Set new runway",
+    "cancelRunwaySetup": "Cancel runway setup",
+    "newApronSelected": "New APRON position selected",
+    "apron": "APRON",
+    "apronNew": "APRON (new)",
+    "apronTemp": "APRON*",
+    "b2Title": "B2",
+    "b2Desc": "Pre-sequence point",
+    "b1Title": "B1",
+    "b1Desc": "Freeze point (final)"
+  
+}
+
+
+
+}

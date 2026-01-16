@@ -1,0 +1,175 @@
+{
+  "app": {
+    "name": "AirGuardian"
+  },
+  "common": {
+    "save": "Guardar",
+    "cancel": "Cancelar",
+    "close": "Cerrar",
+    "empty": "(vacío)",
+    "unknown": "Desconocido",
+    "na": "N/A"
+  },
+  "auth": {
+    "title": "Bienvenido",
+    "enterName": "Ingresá tu nombre",
+    "adminPassword": "Clave de admin",
+    "passwordPlaceholder": "Ingresar clave",
+    "wrongPasswordTitle": "Clave incorrecta",
+    "wrongPasswordBody": "La clave de administrador no es correcta."
+  },
+  "aircraft": {
+    "yourAircraft": "Tu avión",
+    "model": "Modelo",
+    "callsign": "Indicativo",
+    "type": "Tipo",
+    "pilot": "Piloto"
+  },
+  "warnings": {
+    "trafficAdvisory": "Aviso de tráfico",
+    "resolutionAdvisory": "Alerta de resolución",
+    "nearbyTraffic": "Tráfico cercano",
+    "distance": "Distancia"
+  },
+  "landing": {
+    "requestPermission": "Solicitar permiso de aterrizaje",
+    "queue": "Cola de aterrizaje",
+    "approve": "Aprobar",
+    "deny": "Rechazar"
+  },
+  "settings": {
+    "title": "Configuración",
+    "language": "Idioma",
+    "system": "Sistema",
+    "english": "Inglés",
+    "spanish": "Español"
+  },
+  "radar": {
+    "followOff": "✈️ No seguir avión",
+    "followOn": "📍 Centrado automático",
+    "useRealGps": "🛰️ Usar GPS real",
+    "useSimMode": "🛠️ Usar modo simulación",
+    "heading": "Rumbo",
+    "altitude": "Altitud",
+    "agl": "Altura sobre suelo",
+    "speed": "Velocidad"
+  },
+  "runway": {
+    "threshold": "Cabecera",
+    "apron": "APRON",
+    "apronShort": "APRON",
+    "turnNumber": "Turno #{{n}}",
+    "opsState": "Estado OPS",
+    "ops": "OPS",
+    "clear": "Pista libre",
+    "landing": "Aterrizando",
+    "takeoff": "Despegando",
+    "landingLower": "aterrizaje",
+    "takeoffLower": "despegue",
+    "positionFrozenB1": "🔒 Posición congelada (B1)",
+    "etaToSlotSec": "ETA a slot: {{s}} s",
+    "shiftAppliedSec": "Desvío aplicado: +{{s}}s",
+    "cancelAction": "Cancelar {{action}}",
+    "requestLanding": "Solicitar aterrizaje",
+    "requestTakeoff": "Solicitar despegue",
+    "emergency": "EMERGENCIA",
+    "emergencyDeclared": "EMERGENCIA declarada",
+    "emergencyPriority": "🆘 EMERGENCIA prioritaria en secuencia de aterrizaje",
+    "mustBeOnApronOrRunwayToRequestTakeoff": "Debe estar en pista o apron para solicitar despegue",
+    "landingQueue": "Cola de aterrizajes",
+    "takeoffQueue": "Cola de despegues",
+    "hold": "HOLD",
+    "ready": "LISTO",
+    "alignRight": "Por favor alinéese con la pista por la derecha",
+    "goToThreshold": "Ir a cabecera de pista",
+    "vacateRunway": "¡Liberar pista!",
+    "clearedToLand": "Tiene permiso para aterrizar",
+    "lineUp": "Ocupe cabecera de pista",
+    "clearedToTakeoff": "Puede despegar",
+    "trafficOnFinalWait": "Tráfico en final: espere",
+    "goAroundRegistered": "Arremetida registrada. Reingresando en secuencia.",
+    "clearedToLandSpoken": "Autorizado a aterrizar {{rwy}}",
+    "yourTakeoffTurnIsNumber": "Su turno de despegue es número {{n}}.",
+    "yourLandingTurnIsNumber": "Su turno de aterrizaje es número {{n}}."
+  },
+  "nav": {
+    "proceedTo": "Proceda a {{fix}}",
+    "proceedToBeaconGeneric":"Proceda al beacon",
+    "proceedToBeaconGenericSpoken":"Proceda al beacon",
+    "turnToB1": "Vire hacia B1",
+    "continueFinal": "Continúe a final",
+    "emergencyDirectFinal": "Continúe directo a final (EMERGENCIA)",
+    "turnToB1Spoken": "Vire hacia B1",
+    "continueFinalSpoken": "Continúe a final",
+    "emergencyDirectFinalSpoken": "Continúe directo a final, emergencia",
+    "proceedToBeaconSpoken": "Proceda a {{beacon}}"
+  },
+
+    "welcome": {
+    "pilot": "Piloto",
+    "runwayAdmin": "Administrador de pista",
+    "continueAsAdmin": "Continuar como admin"
+  },
+
+  "index": {
+  "select": "Seleccionar...",
+  "enter": "Ingresar",
+  "goPistaAdmin": "Ir a Pista (admin)",
+  "namePlaceholder": "Tu nombre (piloto)",
+  "callsignLabel": "Matrícula del avión:",
+  "callsignPlaceholder": "Ej: LV-ABC123",
+  "countryDetected": "País detectado",
+  "aircraftTypeLabel": "Tipo de avión:",
+  "aircraftModelLabel": "Modelo de avión:",
+  "motor": "A motor",
+  "glider": "Planeador",
+  "other": "Otro...",
+  "manualModelPlaceholder": "Ingresá el modelo manualmente",
+  "chooseCategory": "Elegí una categoría de avión:",
+  "adminPasswordLabel": "Contraseña (si sos administrador):",
+  "optional": "opcional",
+  "restrictedTitle": "Acceso restringido",
+  "restrictedBody": "Ingresá la contraseña de administrador para entrar a Pista.",
+  "missingFieldsTitle": "Faltan datos",
+  "missingFieldsBody": "Por favor completá todos los campos.",
+  "modelDeletedTitle": "Modelo eliminado",
+  "modelDeletedBody": "El modelo \"{{model}}\" fue eliminado.",
+  "deleteModelBtn": "Eliminar modelo \"{{model }}\"",
+  "genericAircraft": "Genérico",
+  "paraglider": "Parapente",
+  "paramotor": "Paramotor",
+  "hangGlider": "Ala delta",
+  "hangGliderMotor": "Ala delta motor"
+},
+
+  "pista": {
+    "thresholdA": "Cabecera A {{num}}",
+    "thresholdB": "Cabecera B {{num}}",
+    "activeThreshold": "Cabecera activa: {{end}}",
+    "setThresholdA": "Cabecera A definida",
+    "missingDataTitle": "Faltan datos",
+    "missingDataBody": "Definí A, B y el número de pista.",
+    "loadError": "Error al cargar la pista activa",
+    "modalTitle": "Ingresá el número de pista:",
+    "modalPlaceholder": "Ej: 18L",
+    "cancel": "Cancelar",
+    "save": "Guardar",
+    "changeActiveThreshold": "Cambiar cabecera activa",
+    "autoGenerateB1B2": "Autogenerar B1/B2",
+    "markApron": "📍 Marcar APRON",
+    "cancelMarkApron": "Cancelar marcado de APRON",
+    "setNewRunway": "Setear nueva pista",
+    "cancelRunwaySetup": "Cancelar Seteo de Pista",
+    "newApronSelected": "Nueva posición de APRON seleccionada",
+    "apron": "APRON",
+    "apronNew": "APRON (nuevo)",
+    "apronTemp": "APRON*",
+    "b2Title": "B2",
+    "b2Desc": "Punto de pre-secuencia",
+    "b1Title": "B1",
+    "b1Desc": "Freeze point (final)"
+  }
+
+
+
+}

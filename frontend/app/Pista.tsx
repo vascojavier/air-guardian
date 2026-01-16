@@ -9,9 +9,7 @@ import ioDefault from 'socket.io-client';
 import { Platform } from 'react-native';
 import type { Airfield, Runway } from '../types/airfield';
 import { socket } from '../utils/socket';
-
-
-
+import { useTranslation } from 'react-i18next';
 
 // ---------------------- Tipos locales ----------------------
 type LatLng = { latitude: number; longitude: number };
@@ -51,11 +49,10 @@ const midpointToLoc = (A: LatLng, B: LatLng) => ({
   lng: (A.longitude + B.longitude) / 2,
 });
 
-
 // --- Beacons / Geodesia ---
 const NM_TO_M = 1852;
-const B1_DIST_NM = 3.5;    // ~3–4 NM
-const B2_DIST_NM = 7.0;    // ~6–8 NM
+const B1_DIST_NM = 3.5; // ~3–4 NM
+const B2_DIST_NM = 7.0; // ~6–8 NM
 
 const toRad = (deg: number) => (deg * Math.PI) / 180;
 const toDeg = (rad: number) => (rad * 180) / Math.PI;
@@ -78,11 +75,11 @@ function destinationPoint(start: LatLng, bearingDeg: number, distM: number): Lat
 function computeApproachBearing(A: LatLng, B: LatLng, active: 'A' | 'B'): number {
   const thr = active === 'A' ? A : B;
   const opp = active === 'A' ? B : A;
-  const hdg_thr_to_opp = calcularRumbo(thr, opp);   // rumbo umbral -> opuesta
-  return (hdg_thr_to_opp + 180) % 360;              // aproximación viene desde afuera
+  const hdg_thr_to_opp = calcularRumbo(thr, opp); // rumbo umbral -> opuesta
+  return (hdg_thr_to_opp + 180) % 360; // aproximación viene desde afuera
 }
 
-function makeDefaultBeacons(A: LatLng, B: LatLng, active: 'A'|'B') {
+function makeDefaultBeacons(A: LatLng, B: LatLng, active: 'A' | 'B') {
   const thr = active === 'A' ? A : B;
   const app = computeApproachBearing(A, B, active);
   const B1 = destinationPoint(thr, app, B1_DIST_NM * NM_TO_M);
@@ -90,19 +87,8 @@ function makeDefaultBeacons(A: LatLng, B: LatLng, active: 'A'|'B') {
   return { B1, B2 };
 }
 
-
-
-// ---------------------- Socket ----------------------
-// ⛔️ ELIMINÁ estas líneas (y su import):
-// import ioDefault from 'socket.io-client';
-// import { Platform } from 'react-native';
-// type IOSocket = ReturnType<typeof ioDefault>;
-// const BACKEND_URL = (process.env.EXPO_PUBLIC_BACKEND_URL as string) || (Platform.OS === 'web' ? 'http://localhost:3000' : 'http://192.168.0.10:3000');
-
-// ✅ USÁ el socket global
-
-
 export default function PistaScreen() {
+  const { t } = useTranslation();
   const router = useRouter();
   const { role } = useUser(); // 'pilot' o 'aeroclub'
 
@@ -116,18 +102,16 @@ export default function PistaScreen() {
   const [showDetails, setShowDetails] = useState(true);
   const [beaconB1, setBeaconB1] = useState<LatLng | null>(null);
   const [beaconB2, setBeaconB2] = useState<LatLng | null>(null);
+
   // APRON (guardado y edición)
-  const [apron, setApron] = useState<LatLng | null>(null);          // pin guardado
-  const [apronEdit, setApronEdit] = useState(false);                // modo edición
-  const [tempApron, setTempApron] = useState<LatLng | null>(null);  // pin temporal
-
-
+  const [apron, setApron] = useState<LatLng | null>(null); // pin guardado
+  const [apronEdit, setApronEdit] = useState(false); // modo edición
+  const [tempApron, setTempApron] = useState<LatLng | null>(null); // pin temporal
 
   // Asegurar conexión cuando entra a Pista
   useEffect(() => {
     if (!socket.connected) socket.connect();
   }, []);
-
 
   // Carga inicial: primero intentamos airfieldActive; si no hay, caemos a pistaActiva (legacy)
   useEffect(() => {
@@ -143,6 +127,7 @@ export default function PistaScreen() {
           if (afApron && typeof afApron.lat === 'number' && typeof afApron.lng === 'number') {
             setApron({ latitude: afApron.lat, longitude: afApron.lng });
           }
+
           if (rw) {
             const A: LatLng = { latitude: rw.thresholdA.lat, longitude: rw.thresholdA.lng };
             const B: LatLng = { latitude: rw.thresholdB.lat, longitude: rw.thresholdB.lng };
@@ -164,29 +149,32 @@ export default function PistaScreen() {
                 setBeaconB2({ latitude: b2.lat, longitude: b2.lon });
               } else {
                 const { B1, B2 } = makeDefaultBeacons(A, B, active);
-                setBeaconB1(B1); setBeaconB2(B2);
+                setBeaconB1(B1);
+                setBeaconB2(B2);
               }
             } else {
               const { B1, B2 } = makeDefaultBeacons(A, B, active);
-              setBeaconB1(B1); setBeaconB2(B2);
+              setBeaconB1(B1);
+              setBeaconB2(B2);
             }
-            // ← APRON desde airfield o desde runway, si existe
-              try {
-                const apr: any = (af as any)?.apron || (rw as any)?.apron;
-                if (apr && typeof apr.lat === 'number' && typeof apr.lng === 'number') {
-                  setApron({ latitude: apr.lat, longitude: apr.lng });
-                }
-              } catch {}
 
-            // dentro de cargar(), justo después de calcular y setear A/B/activa/rumbo/beacons:
+            // ← APRON desde airfield o desde runway, si existe
             try {
-              socket.emit('airfield-upsert', { airfield: af });   // 👈 re-publicar
+              const apr: any = (af as any)?.apron || (rw as any)?.apron;
+              if (apr && typeof apr.lat === 'number' && typeof apr.lng === 'number') {
+                setApron({ latitude: apr.lat, longitude: apr.lng });
+              }
+            } catch {}
+
+            // re-publicar
+            try {
+              socket.emit('airfield-upsert', { airfield: af });
             } catch {}
 
             return;
           }
-
         }
+
         // Fallback legacy
         const datos = await AsyncStorage.getItem('pistaActiva');
         if (datos) {
@@ -199,159 +187,149 @@ export default function PistaScreen() {
           setRumbo(defaultActiveHeading === 'A' ? calcHeading : (calcHeading + 180) % 360);
         }
       } catch (error) {
-        console.error('Error al cargar la pista activa:', error);
+        console.error(t('pista.loadError'), error);
       }
     };
+
     cargar();
     return () => {
       // ❌ no desconectes el socket global acá
-      // try { socket?.disconnect(); } catch {}
     };
-  }, [socket]);
+  }, [socket, t]);
 
   // ---------------------- Handlers ----------------------
-const handleMapPress = async (event: MapPressEvent) => {
-  const coords = event.nativeEvent.coordinate;
+  const handleMapPress = async (event: MapPressEvent) => {
+    const coords = event.nativeEvent.coordinate;
 
-  // 1) Modo APRON tiene prioridad
-  if (apronEdit) {
-    setTempApron(coords);
-    return;
-  }
-
-  // 2) Modo seteo de pista (A/B)
-  if (role !== 'aeroclub' || !modoSeteo) return;
-  if (!cabeceraA) {
-    setCabeceraA(coords);
-    Alert.alert('Cabecera A definida');
-  } else if (!cabeceraB) {
-    setCabeceraB(coords);
-    setShowModal(true);
-  }
-};
-
-
-
-// Poné esto ARRIBA del componente (o justo antes de cambiarCabecera):
-const BACKEND_URL =
-  (process.env.EXPO_PUBLIC_BACKEND_URL as string) ||
-  'https://air-guardian-backend.onrender.com'; // o tu URL local durante dev
-
-// Helper: asegura conexión y emite de forma confiable
-async function emitAirfieldUpsertReliable(af: Airfield, reuse?: ReturnType<typeof ioDefault> | null) {
-  return new Promise<void>((resolve) => {
-    // 1) Si nos pasaron un socket ya creado, usalo
-    if (reuse) {
-      const s = reuse;
-      const doEmit = () => {
-        try {
-          s.emit('airfield-upsert', { airfield: af });
-          // peguemos un pequeño delay para no cerrar antes de que viaje
-          setTimeout(resolve, 200);
-        } catch (_) {
-          resolve();
-        }
-      };
-      if (s.connected) return doEmit();
-      s.once('connect', doEmit);
-      s.connect();
+    // 1) Modo APRON tiene prioridad
+    if (apronEdit) {
+      setTempApron(coords);
       return;
     }
 
-    // 2) One-shot: creamos un socket, esperamos "connect", emitimos y cerramos
-    const s = ioDefault(BACKEND_URL, { transports: ['websocket'], autoConnect: false });
-    const cleanup = () => {
-      // darle tiempo a que salga por la red
-      setTimeout(() => {
-        try { s.disconnect(); } catch {}
-        resolve();
-      }, 300);
-    };
-    s.on('connect', () => {
-      try { s.emit('airfield-upsert', { airfield: af }); }
-      catch (_) {}
-      cleanup();
-    });
-    s.on('connect_error', cleanup);
-    s.connect();
-  });
-}
-
-async function persistBeaconsAndEmit(b1: LatLng, b2: LatLng) {
-  
-  const raw = await AsyncStorage.getItem('airfieldActive');
-  if (!raw) return;
-  const af: Airfield = JSON.parse(raw);
-  if (!af?.runways?.[0]) return;
-
-  (af.runways[0] as any).beacons = [
-    { name: 'B1', lat: b1.latitude, lon: b1.longitude },
-    { name: 'B2', lat: b2.latitude, lon: b2.longitude },
-  ];
-  af.lastUpdated = Date.now();
-  await AsyncStorage.setItem('airfieldActive', JSON.stringify(af));
-
-  try { socket?.emit?.('airfield-upsert', { airfield: af }); } catch {}
-}
-
-async function persistApronAndEmit(p: LatLng) {
-  const raw = await AsyncStorage.getItem('airfieldActive');
-  if (!raw) return;
-  const af: Airfield = JSON.parse(raw);
-  if (!af?.runways?.[0]) return;
-
-  // Guardar APRON a nivel airfield (recomendado)
-  (af as any).apron = { lat: p.latitude, lng: p.longitude };
-
-  af.lastUpdated = Date.now();
-  await AsyncStorage.setItem('airfieldActive', JSON.stringify(af));
-  try { socket?.emit?.('airfield-upsert', { airfield: af }); } catch {}
-}
-
-async function saveApronPoint() {
-  if (!tempApron) return;
-  setApron(tempApron);
-  await persistApronAndEmit(tempApron);
-  setApronEdit(false);
-  setTempApron(null);
-}
-
-function cancelApronEdit() {
-  setApronEdit(false);
-  setTempApron(null);
-}
-
-
-
-const cambiarCabecera = async () => {
-  if (!cabeceraActiva || !cabeceraA || !cabeceraB) return;
-
-  const nueva: 'A' | 'B' = cabeceraActiva === 'A' ? 'B' : 'A';
-  setCabeceraActiva(nueva);
-  setRumbo((prev) => (prev + 180) % 360);
-
-  try {
-    // (1) espejo legacy
-    const datosLegacy = await AsyncStorage.getItem('pistaActiva');
-    if (datosLegacy) {
-      const json = JSON.parse(datosLegacy);
-      json.defaultActiveHeading = nueva;
-      await AsyncStorage.setItem('pistaActiva', JSON.stringify(json));
+    // 2) Modo seteo de pista (A/B)
+    if (role !== 'aeroclub' || !modoSeteo) return;
+    if (!cabeceraA) {
+      setCabeceraA(coords);
+      Alert.alert(t('pista.setThresholdA'));
+    } else if (!cabeceraB) {
+      setCabeceraB(coords);
+      setShowModal(true);
     }
+  };
 
-    // (2) actualizar airfieldActive
+  // Poné esto ARRIBA del componente (o justo antes de cambiarCabecera):
+  const BACKEND_URL =
+    (process.env.EXPO_PUBLIC_BACKEND_URL as string) ||
+    'https://air-guardian-backend.onrender.com';
+
+  async function emitAirfieldUpsertReliable(af: Airfield, reuse?: ReturnType<typeof ioDefault> | null) {
+    return new Promise<void>((resolve) => {
+      if (reuse) {
+        const s = reuse;
+        const doEmit = () => {
+          try {
+            s.emit('airfield-upsert', { airfield: af });
+            setTimeout(resolve, 200);
+          } catch (_) {
+            resolve();
+          }
+        };
+        if (s.connected) return doEmit();
+        s.once('connect', doEmit);
+        s.connect();
+        return;
+      }
+
+      const s = ioDefault(BACKEND_URL, { transports: ['websocket'], autoConnect: false });
+      const cleanup = () => {
+        setTimeout(() => {
+          try { s.disconnect(); } catch {}
+          resolve();
+        }, 300);
+      };
+      s.on('connect', () => {
+        try { s.emit('airfield-upsert', { airfield: af }); } catch (_) {}
+        cleanup();
+      });
+      s.on('connect_error', cleanup);
+      s.connect();
+    });
+  }
+
+  async function persistBeaconsAndEmit(b1: LatLng, b2: LatLng) {
     const raw = await AsyncStorage.getItem('airfieldActive');
     if (!raw) return;
-
     const af: Airfield = JSON.parse(raw);
     if (!af?.runways?.[0]) return;
 
-    af.runways[0].active_end = nueva;
-          // Regenerar beacons según cabecera nueva (si no fueron custom movidos)
+    (af.runways[0] as any).beacons = [
+      { name: 'B1', lat: b1.latitude, lon: b1.longitude },
+      { name: 'B2', lat: b2.latitude, lon: b2.longitude },
+    ];
+    af.lastUpdated = Date.now();
+    await AsyncStorage.setItem('airfieldActive', JSON.stringify(af));
+
+    try { socket?.emit?.('airfield-upsert', { airfield: af }); } catch {}
+  }
+
+  async function persistApronAndEmit(p: LatLng) {
+    const raw = await AsyncStorage.getItem('airfieldActive');
+    if (!raw) return;
+    const af: Airfield = JSON.parse(raw);
+    if (!af?.runways?.[0]) return;
+
+    (af as any).apron = { lat: p.latitude, lng: p.longitude };
+
+    af.lastUpdated = Date.now();
+    await AsyncStorage.setItem('airfieldActive', JSON.stringify(af));
+    try { socket?.emit?.('airfield-upsert', { airfield: af }); } catch {}
+  }
+
+  async function saveApronPoint() {
+    if (!tempApron) return;
+    setApron(tempApron);
+    await persistApronAndEmit(tempApron);
+    setApronEdit(false);
+    setTempApron(null);
+  }
+
+  function cancelApronEdit() {
+    setApronEdit(false);
+    setTempApron(null);
+  }
+
+  const cambiarCabecera = async () => {
+    if (!cabeceraActiva || !cabeceraA || !cabeceraB) return;
+
+    const nueva: 'A' | 'B' = cabeceraActiva === 'A' ? 'B' : 'A';
+    setCabeceraActiva(nueva);
+    setRumbo((prev) => (prev + 180) % 360);
+
+    try {
+      // (1) espejo legacy
+      const datosLegacy = await AsyncStorage.getItem('pistaActiva');
+      if (datosLegacy) {
+        const json = JSON.parse(datosLegacy);
+        json.defaultActiveHeading = nueva;
+        await AsyncStorage.setItem('pistaActiva', JSON.stringify(json));
+      }
+
+      // (2) actualizar airfieldActive
+      const raw = await AsyncStorage.getItem('airfieldActive');
+      if (!raw) return;
+
+      const af: Airfield = JSON.parse(raw);
+      if (!af?.runways?.[0]) return;
+
+      af.runways[0].active_end = nueva;
+
+      // Regenerar beacons según cabecera nueva
       try {
         if (cabeceraA && cabeceraB) {
           const { B1, B2 } = makeDefaultBeacons(cabeceraA, cabeceraB, nueva);
-          setBeaconB1(B1); setBeaconB2(B2);
+          setBeaconB1(B1);
+          setBeaconB2(B2);
           (af.runways[0] as any).beacons = [
             { name: 'B1', lat: B1.latitude, lon: B1.longitude },
             { name: 'B2', lat: B2.latitude, lon: B2.longitude },
@@ -359,25 +337,18 @@ const cambiarCabecera = async () => {
         }
       } catch {}
 
-    af.lastUpdated = Date.now();
-    await AsyncStorage.setItem('airfieldActive', JSON.stringify(af));
+      af.lastUpdated = Date.now();
+      await AsyncStorage.setItem('airfieldActive', JSON.stringify(af));
 
-    // (3) EMITIR al backend — usa tu socket memoizado si existe; si no, one-shot robusto
-    //     OJO: 'socket' es el que creaste con useMemo arriba en Pista.tsx
-    await emitAirfieldUpsertReliable(af, socket);
-
-  } catch (error) {
-    console.error('Error al cambiar cabecera activa:', error);
-  }
-};
-
-
-
-
+      await emitAirfieldUpsertReliable(af, socket);
+    } catch (error) {
+      console.error('Error al cambiar cabecera activa:', error);
+    }
+  };
 
   const guardarPista = async () => {
     if (!cabeceraA || !cabeceraB || !numeroPista) {
-      Alert.alert('Faltan datos', 'Definí A, B y el número de pista.');
+      Alert.alert(t('pista.missingDataTitle'), t('pista.missingDataBody'));
       return;
     }
 
@@ -386,7 +357,6 @@ const cambiarCabecera = async () => {
     const activa: 'A' | 'B' = 'A';
     setCabeceraActiva(activa);
 
-    // Construir Runway/Airfield unificado
     const identA = numeroPista.trim();
     const identB = headingToRunwayIdent((rumboAB + 180) % 360);
 
@@ -400,14 +370,13 @@ const cambiarCabecera = async () => {
       active_end: activa,
     };
 
-        // Agregar beacons al runway
     const { B1, B2 } = makeDefaultBeacons(cabeceraA, cabeceraB, activa);
     (runway as any).beacons = [
       { name: 'B1', lat: B1.latitude, lon: B1.longitude },
       { name: 'B2', lat: B2.latitude, lon: B2.longitude },
     ];
-    setBeaconB1(B1); setBeaconB2(B2);
-
+    setBeaconB1(B1);
+    setBeaconB2(B2);
 
     const airfield: Airfield = {
       id: uuid(),
@@ -415,18 +384,14 @@ const cambiarCabecera = async () => {
       runways: [runway],
       lastUpdated: Date.now(),
       source: 'manual',
-      ...(apron
-        ? { apron: { lat: apron.latitude, lng: apron.longitude } }
-        : {}),
+      ...(apron ? { apron: { lat: apron.latitude, lng: apron.longitude } } : {}),
     };
 
     if (apron) (airfield as any).apron = { lat: apron.latitude, lng: apron.longitude };
 
     try {
-      // Guardar NUEVO modelo
       await AsyncStorage.setItem('airfieldActive', JSON.stringify(airfield));
 
-      // (Temporal) Espejo legacy
       const pistaLegacy = {
         runway: { A: cabeceraA, B: cabeceraB },
         defaultActiveHeading: activa,
@@ -434,14 +399,11 @@ const cambiarCabecera = async () => {
       };
       await AsyncStorage.setItem('pistaActiva', JSON.stringify(pistaLegacy));
 
-      // Emitir WS
       try { socket?.emit?.('airfield-upsert', { airfield }); } catch {}
 
-      // Cerrar modal / salir de modo seteo
       setModoSeteo(false);
       setShowModal(false);
 
-      // Ir a completar opcionales
       router.push('/AirfieldDetails');
     } catch (e) {
       console.error('Error guardando pista/airfield:', e);
@@ -469,34 +431,32 @@ const cambiarCabecera = async () => {
         onRegionChangeComplete={onRegionChangeComplete}
       >
         {cabeceraA && showDetails && (
-          <Marker coordinate={cabeceraA} title={`Cabecera A ${numeroPista}`}>
+          <Marker coordinate={cabeceraA} title={t('pista.thresholdA', { num: numeroPista })}>
             <View style={styles.marker}><Text style={styles.markerText}>A</Text></View>
           </Marker>
         )}
+
         {cabeceraB && showDetails && (
-          <Marker coordinate={cabeceraB} title={`Cabecera B ${numeroPista}`}>
+          <Marker coordinate={cabeceraB} title={t('pista.thresholdB', { num: numeroPista })}>
             <View style={styles.marker}><Text style={styles.markerText}>B</Text></View>
           </Marker>
         )}
+
         {cabeceraA && cabeceraB && (
           <Polyline coordinates={[cabeceraA, cabeceraB]} strokeColor="black" strokeWidth={2} />
         )}
-        {/* Línea guía B2 -> B1 -> Umbral activo */}
-
 
         {beaconB1 && beaconB2 && cabeceraA && cabeceraB && cabeceraActiva && (
           <Polyline
             coordinates={[
               beaconB2,
               beaconB1,
-              cabeceraActiva === 'A' ? cabeceraA : cabeceraB
+              cabeceraActiva === 'A' ? cabeceraA : cabeceraB,
             ]}
             strokeColor="green"
             strokeWidth={2}
           />
         )}
-        {/* B2 (draggable) */}
-
 
         {beaconB2 && (
           <Marker
@@ -507,16 +467,14 @@ const cambiarCabecera = async () => {
               setBeaconB2(c);
               if (beaconB1) await persistBeaconsAndEmit(beaconB1, c);
             }}
-            title="B2"
-            description="Punto de pre-secuencia"
+            title={t('pista.b2Title')}
+            description={t('pista.b2Desc')}
           >
             <View style={[styles.marker, { backgroundColor: '#673AB7' }]}>
               <Text style={styles.markerText}>B2</Text>
             </View>
           </Marker>
         )}
-        {/* B1 (draggable) */}
-
 
         {beaconB1 && (
           <Marker
@@ -527,8 +485,8 @@ const cambiarCabecera = async () => {
               setBeaconB1(c);
               if (beaconB2) await persistBeaconsAndEmit(c, beaconB2);
             }}
-            title="B1"
-            description="Freeze point (final)"
+            title={t('pista.b1Title')}
+            description={t('pista.b1Desc')}
           >
             <View style={[styles.marker, { backgroundColor: '#4CAF50' }]}>
               <Text style={styles.markerText}>B1</Text>
@@ -536,25 +494,25 @@ const cambiarCabecera = async () => {
           </Marker>
         )}
 
-        {/* APRON definitivo */}
         {apron && (
-          <Marker coordinate={apron} title="APRON">
+          <Marker coordinate={apron} title={t('pista.apron')}>
             <View style={{ backgroundColor: '#FF9800', padding: 4, borderRadius: 10 }}>
-              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 10 }}>APRON</Text>
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 10 }}>
+                {t('pista.apron')}
+              </Text>
             </View>
           </Marker>
         )}
 
-        {/* APRON temporal (cuando estás marcando) */}
         {apronEdit && tempApron && (
-          <Marker coordinate={tempApron} title="APRON (nuevo)">
+          <Marker coordinate={tempApron} title={t('pista.apronNew')}>
             <View style={{ backgroundColor: '#FFC107', padding: 4, borderRadius: 10 }}>
-              <Text style={{ color: '#333', fontWeight: '700', fontSize: 10 }}>APRON*</Text>
+              <Text style={{ color: '#333', fontWeight: '700', fontSize: 10 }}>
+                {t('pista.apronTemp')}
+              </Text>
             </View>
           </Marker>
         )}
-
-
 
         {cabeceraA && cabeceraB && cabeceraActiva && (
           <Marker
@@ -574,16 +532,16 @@ const cambiarCabecera = async () => {
       <Modal visible={showModal} transparent animationType="slide">
         <View style={styles.modalContainer}>
           <View style={styles.modalBox}>
-            <Text style={styles.text}>Ingresá el número de pista:</Text>
+            <Text style={styles.text}>{t('pista.modalTitle')}</Text>
             <TextInput
               style={styles.input}
-              placeholder="Ej: 18L"
+              placeholder={t('pista.modalPlaceholder')}
               value={numeroPista}
               onChangeText={setNumeroPista}
             />
             <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-              <Button title="Cancelar" onPress={() => setShowModal(false)} />
-              <Button title="Guardar" onPress={guardarPista} />
+              <Button title={t('pista.cancel')} onPress={() => setShowModal(false)} />
+              <Button title={t('pista.save')} onPress={guardarPista} />
             </View>
           </View>
         </View>
@@ -591,15 +549,17 @@ const cambiarCabecera = async () => {
 
       <View style={styles.panel}>
         {cabeceraActiva && (
-          <Text style={styles.text}>Cabecera activa: {cabeceraActiva}</Text>
+          <Text style={styles.text}>
+            {t('pista.activeThreshold', { end: cabeceraActiva })}
+          </Text>
         )}
 
         {role === 'aeroclub' && (
           <>
-            <Button title="Cambiar cabecera activa" onPress={cambiarCabecera} />
+            <Button title={t('pista.changeActiveThreshold')} onPress={cambiarCabecera} />
 
             <Button
-              title="Autogenerar B1/B2"
+              title={t('pista.autoGenerateB1B2')}
               disabled={!cabeceraA || !cabeceraB || !cabeceraActiva}
               onPress={async () => {
                 if (!cabeceraA || !cabeceraB || !cabeceraActiva) return;
@@ -611,47 +571,40 @@ const cambiarCabecera = async () => {
             />
 
             <Button
-              title={apronEdit ? 'Cancelar marcado de APRON' : '📍 Marcar APRON'}
+              title={apronEdit ? t('pista.cancelMarkApron') : t('pista.markApron')}
               onPress={() => {
                 setApronEdit(!apronEdit);
                 setTempApron(null);
               }}
             />
 
-
             <Button
-              title={modoSeteo ? 'Cancelar Seteo de Pista' : 'Setear nueva pista'}
+              title={modoSeteo ? t('pista.cancelRunwaySetup') : t('pista.setNewRunway')}
               onPress={() => {
                 setCabeceraA(null);
                 setCabeceraB(null);
                 setCabeceraActiva(null);
-                setBeaconB1(null);            // ← limpiar beacons también
-                setBeaconB2(null);            // ← limpiar beacons también
+                setBeaconB1(null);
+                setBeaconB2(null);
                 setModoSeteo(!modoSeteo);
                 setNumeroPista('');
               }}
             />
           </>
         )}
-
-
-
-
       </View>
 
       {apronEdit && tempApron && (
-  <View style={styles.toolbar}>
-    <Text style={{ fontWeight: '700', marginBottom: 8 }}>
-      Nueva posición de APRON seleccionada
-    </Text>
-    <View style={{ flexDirection: 'row', gap: 8 }}>
-      <Button title="Guardar" onPress={saveApronPoint} />
-      <Button title="Cancelar" onPress={cancelApronEdit} />
-    </View>
-  </View>
-)}
-
-
+        <View style={styles.toolbar}>
+          <Text style={{ fontWeight: '700', marginBottom: 8 }}>
+            {t('pista.newApronSelected')}
+          </Text>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <Button title={t('pista.save')} onPress={saveApronPoint} />
+            <Button title={t('pista.cancel')} onPress={cancelApronEdit} />
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -718,17 +671,16 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   toolbar: {
-  position: 'absolute',
-  left: 10,
-  right: 10,
-  bottom: 120,
-  backgroundColor: 'white',
-  borderRadius: 12,
-  padding: 10,
-  elevation: 4,
-  shadowColor: '#000',
-  shadowOpacity: 0.1,
-  shadowRadius: 4,
-},
-
+    position: 'absolute',
+    left: 10,
+    right: 10,
+    bottom: 120,
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 10,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
 });
