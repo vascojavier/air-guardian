@@ -499,13 +499,13 @@ function computeETAsAndFreeze(l) {
   l.etaB2 = etaB2 ?? null;
   l.etaB1 = etaB1 ?? (etaB2 ? etaB2 + 60 : null); // estimar si falta dato
   // freeze al cruzar cercanía B1
-  const u = userLocations[l.name];
-  if (u) {
-    const dB1 = getDistance(u.latitude, u.longitude, asg.b1.lat, asg.b1.lon);
-    if (isFinite(dB1) && dB1 <= B1_FREEZE_RADIUS_M) {
-      l.frozenLevel = 1;
-    }
-  }
+  //const u = userLocations[l.name];
+  //if (u) {
+   // const dB1 = getDistance(u.latitude, u.longitude, asg.b1.lat, asg.b1.lon);
+   // if (isFinite(dB1) && dB1 <= B1_FREEZE_RADIUS_M) {
+   //   l.frozenLevel = 1;
+   // }
+ // }
 }
 
 // ========= Construcción de operaciones y planificador =========
