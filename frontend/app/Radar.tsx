@@ -1902,6 +1902,7 @@ s.on('atc-instruction', (instr: any) => {
   };
 
   if (instr.type === 'goto-beacon' && typeof instr.lat === 'number' && typeof instr.lon === 'number') {
+    if (finalLockedRef.current) return;  // ✅ no pisar FINAL
     setNavTarget({ latitude: instr.lat, longitude: instr.lon });
 
     const bannerText = resolveText('nav.proceedToBeaconGeneric');
@@ -1927,6 +1928,19 @@ s.on('atc-instruction', (instr: any) => {
       instr?.spokenKey
         ? asString(t(String(instr.spokenKey), instr.spokenParams || instr.params || {}))
         : asString(t('runway.clearedToLandSpoken', { rwy: instr.rwy || '' }));
+
+          // ✅ ACA MISMO:
+          finalLockedRef.current = true;
+          try { emitOpsNow('FINAL'); } catch {}
+          if (rw) {
+            const activeEnd: 'A' | 'B' = (rw as any).active_end === 'B' ? 'B' : 'A';
+            const thr = activeEnd === 'A' ? (rw as any).thresholdA : (rw as any).thresholdB;
+            const lat = thr?.lat;
+            const lon = thr?.lng ?? thr?.lon;
+            if (typeof lat === 'number' && typeof lon === 'number') {
+              setNavTarget({ latitude: lat, longitude: lon });
+            }
+          }
 
     flashBanner(bannerText, 'atc-clr');
     try { Speech.stop(); Speech.speak(String(spokenText), { language: String(ttsLang) }); } catch {}
