@@ -18,10 +18,27 @@ import { Airfield, Runway } from '../types/airfield';
 import { useRouter } from 'expo-router';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { socket } from '../utils/socket';
+import { useLocalSearchParams } from 'expo-router';
+
+const DEFAULT_ATC_SETTINGS = {
+  B1_LATCH_ON_M: 3500,
+  B1_LATCH_OFF_M: 6000,
+  B1_LATCH_OFF_SUSTAIN_MS: 20000,
+
+  FINAL_TIMEOUT_MS: 6 * 60 * 1000,
+  GOAROUND_DRIFT_M: 9000,
+  GOAROUND_DRIFT_SUSTAIN_MS: 20000,
+
+  FINAL_LOCK_RADIUS_M: 2000,
+  MAX_B2_TO_B1_S: 180,
+  FINAL_DRIFT_MAX_M: 2500,
+};
 
 export default function AirfieldDetails() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { tab } = useLocalSearchParams<{ tab?: string }>();
+  const startOnATC = tab === 'atc'; // (por ahora no se usa en UI, pero queda listo)
 
   const [airfield, setAirfield] = useState<Airfield | null>(null);
 
@@ -29,7 +46,14 @@ export default function AirfieldDetails() {
     (async () => {
       try {
         const raw = await AsyncStorage.getItem('airfieldActive');
-        if (raw) setAirfield(JSON.parse(raw));
+        if (raw) {
+          const af: Airfield = JSON.parse(raw);
+
+          // 🔒 nunca perder settings
+          (af as any).atcSettings ||= DEFAULT_ATC_SETTINGS;
+
+          setAirfield(af);
+        }
       } catch (e) {
         console.warn('No pude leer airfieldActive:', e);
       }
@@ -66,13 +90,20 @@ export default function AirfieldDetails() {
   const save = async () => {
     if (!airfield) return;
 
+    // 🔒 asegurar settings antes de persistir/publicar
+    const afToSave: Airfield = {
+      ...airfield,
+      lastUpdated: Date.now(),
+      ...( { atcSettings: { ...DEFAULT_ATC_SETTINGS, ...((airfield as any).atcSettings || {}) } } as any ),
+    };
+
     // 1) Guardar local
-    await AsyncStorage.setItem('airfieldActive', JSON.stringify(airfield));
+    await AsyncStorage.setItem('airfieldActive', JSON.stringify(afToSave));
 
     // 2) Publicar por WS (asegurando conexión)
     try {
       await ensureSocketConnected();
-      socket.emit('airfield-upsert', { airfield });
+      socket.emit('airfield-upsert', { airfield: afToSave });
       Alert.alert('Publicado', 'La pista fue publicada y se enviará a todos.');
     } catch (e) {
       console.warn('airfield-upsert falló:', e);

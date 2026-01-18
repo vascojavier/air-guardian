@@ -9,6 +9,8 @@ export type Meteo = {
   pressure?: number | null;
 };
 
+
+
 // Identificador de cabecera
 export type RunwayEndId = 'A' | 'B';
 
@@ -18,6 +20,22 @@ export type RunwayBeacon = {
   lat: number;
   lon: number;
 };
+
+// ✅ NUEVO: settings ATC (persistidos en el airfield)
+export type AtcSettings = {
+  FINAL_LOCK_RADIUS_M: number;
+  MAX_B2_TO_B1_S: number;
+  FINAL_DRIFT_MAX_M: number;
+
+  B1_LATCH_ON_M: number;
+  B1_LATCH_OFF_M: number;
+  B1_LATCH_OFF_SUSTAIN_MS: number;
+
+  FINAL_TIMEOUT_MS: number;
+  GOAROUND_DRIFT_M: number;
+  GOAROUND_DRIFT_SUSTAIN_MS: number;
+};
+
 
 export type Runway = {
   id: string;
@@ -44,6 +62,11 @@ export type Airfield = {
   location?: { lat: number; lng: number }; // centro aprox.
   runways: Runway[];
   meteo?: Meteo;
+  apron?: { lat: number; lng: number };
   lastUpdated: number;              // epoch ms
   source: 'manual' | 'ourairports' | 'mixed' | 'openaip';
+
+    // ✅ NUEVO: settings del scheduler/ATC
+  atcSettings?: Partial<AtcSettings>;
+
 };

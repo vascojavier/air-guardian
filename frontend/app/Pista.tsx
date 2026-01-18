@@ -54,6 +54,19 @@ const NM_TO_M = 1852;
 const B1_DIST_NM = 3.5; // ~3–4 NM
 const B2_DIST_NM = 7.0; // ~6–8 NM
 
+const DEFAULT_ATC_SETTINGS = {
+  B1_LATCH_ON_M: 3500,
+  B1_LATCH_OFF_M: 6000,
+  B1_LATCH_OFF_SUSTAIN_MS: 20000,
+  FINAL_TIMEOUT_MS: 360000,
+  GOAROUND_DRIFT_M: 9000,
+  GOAROUND_DRIFT_SUSTAIN_MS: 20000,
+  FINAL_LOCK_RADIUS_M: 2000,
+  MAX_B2_TO_B1_S: 180,
+  FINAL_DRIFT_MAX_M: 2500,
+};
+
+
 const toRad = (deg: number) => (deg * Math.PI) / 180;
 const toDeg = (rad: number) => (rad * 180) / Math.PI;
 
@@ -261,6 +274,8 @@ export default function PistaScreen() {
     const raw = await AsyncStorage.getItem('airfieldActive');
     if (!raw) return;
     const af: Airfield = JSON.parse(raw);
+    af.atcSettings ||= DEFAULT_ATC_SETTINGS;
+    (af as any).atcSettings ||= DEFAULT_ATC_SETTINGS;
     if (!af?.runways?.[0]) return;
 
     (af.runways[0] as any).beacons = [
@@ -277,6 +292,8 @@ export default function PistaScreen() {
     const raw = await AsyncStorage.getItem('airfieldActive');
     if (!raw) return;
     const af: Airfield = JSON.parse(raw);
+    af.atcSettings ||= DEFAULT_ATC_SETTINGS;
+    (af as any).atcSettings ||= DEFAULT_ATC_SETTINGS;
     if (!af?.runways?.[0]) return;
 
     (af as any).apron = { lat: p.latitude, lng: p.longitude };
@@ -320,6 +337,8 @@ export default function PistaScreen() {
       if (!raw) return;
 
       const af: Airfield = JSON.parse(raw);
+      af.atcSettings ||= DEFAULT_ATC_SETTINGS;
+      (af as any).atcSettings ||= DEFAULT_ATC_SETTINGS;
       if (!af?.runways?.[0]) return;
 
       af.runways[0].active_end = nueva;
@@ -385,6 +404,7 @@ export default function PistaScreen() {
       lastUpdated: Date.now(),
       source: 'manual',
       ...(apron ? { apron: { lat: apron.latitude, lng: apron.longitude } } : {}),
+      atcSettings: DEFAULT_ATC_SETTINGS,
     };
 
     if (apron) (airfield as any).apron = { lat: apron.latitude, lng: apron.longitude };
@@ -576,6 +596,11 @@ export default function PistaScreen() {
                 setApronEdit(!apronEdit);
                 setTempApron(null);
               }}
+            />
+
+            <Button
+              title="⚙️ ATC Settings"
+              onPress={() => router.push('/AirfieldDetails?tab=atc')}
             />
 
             <Button
