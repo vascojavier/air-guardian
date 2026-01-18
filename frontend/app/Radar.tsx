@@ -572,6 +572,22 @@ const refreshPinnedDistance = () => {
   const lastPinnedDistRef = useRef<number | null>(null);
 
 
+const navTargetRef = useRef<{ latitude: number; longitude: number } | null>(null);
+
+function setNavTargetSafe(next: { latitude: number; longitude: number } | null) {
+  const prev = navTargetRef.current;
+
+  const same =
+    (!!prev && !!next &&
+      Math.abs(prev.latitude - next.latitude) < 1e-6 &&
+      Math.abs(prev.longitude - next.longitude) < 1e-6) ||
+    (!prev && !next);
+
+  if (same) return;
+
+  navTargetRef.current = next;
+  setNavTarget(next);
+}
 
 
 
@@ -1903,7 +1919,7 @@ s.on('atc-instruction', (instr: any) => {
 
   if (instr.type === 'goto-beacon' && typeof instr.lat === 'number' && typeof instr.lon === 'number') {
     if (finalLockedRef.current) return;  // ✅ no pisar FINAL
-    setNavTarget({ latitude: instr.lat, longitude: instr.lon });
+    setNavTargetSafe({ latitude: instr.lat, longitude: instr.lon });
 
     const bannerText = resolveText('nav.proceedToBeaconGeneric');
     const spokenText = resolveSpoken('nav.proceedToBeaconGenericSpoken');
@@ -1938,7 +1954,7 @@ s.on('atc-instruction', (instr: any) => {
             const lat = thr?.lat;
             const lon = thr?.lng ?? thr?.lon;
             if (typeof lat === 'number' && typeof lon === 'number') {
-              setNavTarget({ latitude: lat, longitude: lon });
+              setNavTargetSafe({ latitude: lat, longitude: lon });
             }
           }
 
@@ -2417,7 +2433,7 @@ if (next && (next === 'AIRBORNE' || next === 'FINAL')) {
     if (last !== next) {
 if (next === 'AIRBORNE') {
   apronLatchRef.current = false;
-  setNavTarget(null);
+  setNavTargetSafe(null);
   iAmOccupyingRef.current = null;
   takeoffRequestedRef.current = false;
 
@@ -2439,7 +2455,7 @@ if (next === 'AIRBORNE') {
 
         const apr = getApronPoint();
         if (apr) {
-          setNavTarget(apr);
+          setNavTargetSafe(apr);
           apronLatchRef.current = true;
         }
 
@@ -2624,11 +2640,12 @@ const centerMap = (lat = myPlane.lat, lon = myPlane.lon) => {
   }
 };
 
-
 useEffect(() => {
   if (!followMe) return;
   centerMap(myPlane.lat, myPlane.lon);
-}, [followMe, myPlane.lat, myPlane.lon, zoom.latitudeDelta, zoom.longitudeDelta]);
+}, [followMe, myPlane.lat, myPlane.lon]);
+
+
 
 
   // Mantener cualquier prioritizedWarning durante 6s y bloquear recálculos
@@ -2762,7 +2779,7 @@ if (touchdownLike && speedKmh < 50) {
 
   // Guía al APRON inmediatamente (línea azul cambia YA)
   const apr = getApronPoint();
-  if (apr) { setNavTarget(apr); apronLatchRef.current = true; }
+  if (apr) { setNavTargetSafe(apr); apronLatchRef.current = true; }
 
   // Forzar OPS a RUNWAY_OCCUPIED si aún estaba en FINAL
   emitOpsNow('RUNWAY_OCCUPIED');
@@ -2803,7 +2820,7 @@ if (touchdownLike && speedKmh < 50) {
 
     // Guía a APRON al salir de pista / tierra real
     const apr2 = getApronPoint();
-    if (apr2) { setNavTarget(apr2); apronLatchRef.current = true; }
+    if (apr2) { setNavTargetSafe(apr2); apronLatchRef.current = true; }
 
     iAmOccupyingRef.current = null;
   }
@@ -2917,7 +2934,7 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
       if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
         const end = rw?.active_end === 'B' ? 'B' : 'A';
         const thr = end === 'B' ? B_runway : A_runway;
-        setNavTarget(thr ?? null);
+        setNavTargetSafe(thr ?? null);
         return;
       }
 
@@ -2926,7 +2943,7 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
     {
       const apr = getApronPoint();
       if (apronLatchRef.current && apr) {
-        setNavTarget(apr);
+        setNavTargetSafe(apr);
         return; // no dejes que el resto del efecto pise el target
       }
     }
@@ -2936,7 +2953,7 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
       const myOps = lastOpsStateRef.current as OpsState | null;
       if (!landingRequestedRef.current && myOps && GROUND_OPS.has(myOps)) {
         const apr = getApronPoint();
-        setNavTarget(apr ?? null);
+        setNavTargetSafe(apr ?? null);
         return;
       }
     }
@@ -2944,12 +2961,12 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
 
 
     if (serverATCRef.current) { return; }  // ⬅️ INSERTAR AQUÍ
-    if (!rw || !beaconB1 || !beaconB2) { setNavTarget(null); return; }
+    if (!rw || !beaconB1 || !beaconB2) { setNavTargetSafe(null); return; }
     // Sólo guiamos si pediste aterrizaje y estás “volando”
 
     // Sólo guiamos si pediste aterrizaje y estás “volando”
     if (!landingRequestedRef.current || defaultActionForMe() !== 'land') {
-      setNavTarget(null);
+      setNavTargetSafe(null);
       // reset de máquina cuando dejo de necesitar guía
       navPhaseRef.current = null;
       prevIdxRef.current = null;
@@ -2959,7 +2976,7 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
     const me = myPlane?.id || username;
     const landings = runwayState?.state?.landings || [];
     let idx = landings.findIndex((x:any) => x?.name === me);
-    if (idx === -1) { setNavTarget(null); return; }
+    if (idx === -1) { setNavTargetSafe(null); return; }
 
     // 🆘 ¿Soy emergencia?
     const myLanding = landings.find((x:any) => x?.name === me);
@@ -2992,7 +3009,7 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
 if (isEmergency) {
   // Si no tenemos umbral activo, no podemos guiar
   if (!activeThreshold) {
-    setNavTarget(null);
+    setNavTargetSafe(null);
     return;
   }
 
@@ -3013,7 +3030,7 @@ if (isEmergency) {
     navTarget.latitude !== activeThreshold.latitude ||
     navTarget.longitude !== activeThreshold.longitude
   ) {
-    setNavTarget(activeThreshold);
+    setNavTargetSafe(activeThreshold);
     flashBanner(t("nav.emergencyDirectFinal"), 'emg-final');
     try {
       Speech.stop();
@@ -3042,10 +3059,10 @@ if (idx > 0) {
       if (!navTarget ||
           navTarget.latitude !== beaconB2.latitude ||
           navTarget.longitude !== beaconB2.longitude) {
-        setNavTarget(beaconB2);
+        setNavTargetSafe(beaconB2);
       }
     } else {
-      setNavTarget(null);
+      setNavTargetSafe(null);
     }
     return;
   }
@@ -3060,7 +3077,7 @@ if (idx > 0) {
   if (!navTarget ||
       navTarget.latitude !== targetBeacon.latitude ||
       navTarget.longitude !== targetBeacon.longitude) {
-    setNavTarget(targetBeacon);
+    setNavTargetSafe(targetBeacon);
 
     const label =
       slotIndex === 0 ? 'B2' :
@@ -3096,7 +3113,7 @@ if (idx > 0) {
       socketRef.current?.emit('sequence-freeze', { name: me, reason: 'locked-at-B1' });
 
       if (activeThreshold) {
-        setNavTarget(activeThreshold);
+        setNavTargetSafe(activeThreshold);
         flashBanner(t("nav.continueFinal"), 'continue-final');
         try { Speech.stop(); Speech.speak(t("nav.continueFinalSpoken"),{ language: ttsLang }
 ); } catch {}
@@ -3108,7 +3125,7 @@ if (idx > 0) {
     if (navPhaseRef.current === 'B1') {
       if (dToB1 <= FINAL_ENTER_M) {
         if (maybeSwitchPhase('FINAL') && activeThreshold) {
-          setNavTarget(activeThreshold);
+          setNavTargetSafe(activeThreshold);
           flashBanner(t("nav.continueFinal"), 'continue-final');
           try { Speech.stop(); Speech.speak(t("nav.continueFinalSpoken"),{ language: ttsLang }
 ); } catch {}
@@ -3116,7 +3133,7 @@ if (idx > 0) {
       } else {
         // Mantener B1 sin re-banners
         if (!navTarget || navTarget.latitude !== beaconB1.latitude || navTarget.longitude !== beaconB1.longitude) {
-          setNavTarget(beaconB1);
+          setNavTargetSafe(beaconB1);
           // 👇 IMPORTANTE: no volver a llamar flashBanner/voz aquí
         }
       }
@@ -3125,7 +3142,7 @@ if (idx > 0) {
   // Evita histéresis tras “Continúe a final”.
   if (!finalLockedRef.current && dToB1 >= B1_ENTER_M) {
     if (maybeSwitchPhase('B1')) {
-      setNavTarget(beaconB1);
+      setNavTargetSafe(beaconB1);
       flashBanner(t("nav.turnToB1"), 'turn-b1');
       try { Speech.stop(); Speech.speak(t("nav.turnToB1Spoken"),{ language: ttsLang }
 ); } catch {}
@@ -3133,7 +3150,7 @@ if (idx > 0) {
   } else if (activeThreshold) {
     // Mantener FINAL sin re-banners
     if (!navTarget || navTarget.latitude !== activeThreshold.latitude || navTarget.longitude !== activeThreshold.longitude) {
-      setNavTarget(activeThreshold);
+      setNavTargetSafe(activeThreshold);
     }
   }
 }
@@ -3200,6 +3217,7 @@ if (idx > 0) {
           latitudeDelta: zoom.latitudeDelta,
           longitudeDelta: zoom.longitudeDelta,
         }}
+        
 
         onRegionChangeComplete={(region) => {
           if (isProgrammaticMoveRef.current) return; // ✅ clave

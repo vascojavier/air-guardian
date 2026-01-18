@@ -2,11 +2,25 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
-// === FSM / sticky & compliance ===
-const FINAL_LOCK_RADIUS_M = 2000;   // dentro de 2 km de B1 no reordenar más (comprometido)
-const MAX_B2_TO_B1_S = 180;         // si en >180 s no progresa de B2→B1, pierde orden (vuelve a WAIT)
-const FINAL_DRIFT_MAX_M = 2500;     // si en FINAL se “abre” >2.5 km de B1, pierde FINAL
+const ATC_DEFAULTS = {
+    // === FSM / sticky & compliance ===
+    FINAL_LOCK_RADIUS_M : 2000,   // dentro de 2 km de B1 no reordenar más (comprometido)
+    MAX_B2_TO_B1_S : 180,         // si en >180 s no progresa de B2→B1, pierde orden (vuelve a WAIT)
+    FINAL_DRIFT_MAX_M : 2500,     // si en FINAL se “abre” >2.5 km de B1, pierde FINAL
+    // === B1 latch / anti-histéresis ===
+    B1_LATCH_ON_M  : 3500,   // latch ON si estás dentro de 3.5 km
+    B1_LATCH_OFF_M : 6000,   // latch OFF si te vas más allá de 6 km
+    B1_LATCH_OFF_SUSTAIN_MS : 20000, // debe sostenerse 20 s para soltar
 
+    // === Auto go-around ===
+    FINAL_TIMEOUT_MS : 6 * 60 * 1000,     // 6 min en B1/FINAL sin ocupar pista => go-around
+    GOAROUND_DRIFT_M : 9000,              // si se va >9 km de B1 (sostenido) => go-around
+    GOAROUND_DRIFT_SUSTAIN_MS : 20000,    // 20 s sostenido
+};
+
+const  b1LatchByName = new Map();     // name -> { latched:boolean, farSince:number|null }
+const  finalEnterByName = new Map();  // name -> timestamp cuando entró a B1/FINAL
+const  driftSinceByName = new Map();  // name -> timestamp cuando empezó a “drift” lejos de B1
 
 const app = express();
 const server = http.createServer(app);
@@ -23,6 +37,25 @@ const socketIdToName = {};
 
 // === Airfield (pista activa en memoria) ===
 let lastAirfield = null;
+
+function getAtcSettings() {
+  const s = lastAirfield?.atcSettings || {};
+  const N = (v, fb) => (typeof v === 'number' && Number.isFinite(v) ? v : fb);
+
+  return {
+    FINAL_LOCK_RADIUS_M: N(s.FINAL_LOCK_RADIUS_M, ATC_DEFAULTS.FINAL_LOCK_RADIUS_M),
+    MAX_B2_TO_B1_S: N(s.MAX_B2_TO_B1_S, ATC_DEFAULTS.MAX_B2_TO_B1_S),
+    FINAL_DRIFT_MAX_M: N(s.FINAL_DRIFT_MAX_M, ATC_DEFAULTS.FINAL_DRIFT_MAX_M),
+
+    B1_LATCH_ON_M: N(s.B1_LATCH_ON_M, ATC_DEFAULTS.B1_LATCH_ON_M),
+    B1_LATCH_OFF_M: N(s.B1_LATCH_OFF_M, ATC_DEFAULTS.B1_LATCH_OFF_M),
+    B1_LATCH_OFF_SUSTAIN_MS: N(s.B1_LATCH_OFF_SUSTAIN_MS, ATC_DEFAULTS.B1_LATCH_OFF_SUSTAIN_MS),
+
+    FINAL_TIMEOUT_MS: N(s.FINAL_TIMEOUT_MS, ATC_DEFAULTS.FINAL_TIMEOUT_MS),
+    GOAROUND_DRIFT_M: N(s.GOAROUND_DRIFT_M, ATC_DEFAULTS.GOAROUND_DRIFT_M),
+    GOAROUND_DRIFT_SUSTAIN_MS: N(s.GOAROUND_DRIFT_SUSTAIN_MS, ATC_DEFAULTS.GOAROUND_DRIFT_SUSTAIN_MS),
+  };
+}
 
 
 // === Distancia Haversine unificada (metros) ===
@@ -71,6 +104,83 @@ const landingStateByName = new Map(); // name -> { state: 'ORD'|..., ts:number }
   function getOpsState(name) {
     return opsStateByName.get(name)?.state || null;
   }
+
+function isB1Latched(name) {
+  return !!b1LatchByName.get(name)?.latched;
+}
+
+function updateB1LatchFor(name) {
+  const S = getAtcSettings();   // 👈 ACÁ
+  const g = activeRunwayGeom();
+  const u = userLocations[name];
+  if (!g || !u) return;
+
+  const B1 = g.B1;
+  const d = getDistance(u.latitude, u.longitude, B1.lat, B1.lon);
+  if (!isFinite(d)) return;
+
+  const cur = b1LatchByName.get(name) || { latched: false, farSince: null };
+
+  // Latch ON inmediato
+  if (d <= S.B1_LATCH_ON_M) {
+    cur.latched = true;
+    cur.farSince = null;
+    b1LatchByName.set(name, cur);
+    return;
+  }
+
+  // Latch OFF con histéresis + tiempo sostenido
+  if (cur.latched && d >= S.B1_LATCH_OFF_M) {
+    if (!cur.farSince) cur.farSince = Date.now();
+    if (Date.now() - cur.farSince >= S.B1_LATCH_OFF_SUSTAIN_MS) {
+      cur.latched = false;
+      cur.farSince = null;
+    }
+    b1LatchByName.set(name, cur);
+    return;
+  }
+
+  // Si está entre ON y OFF no hacemos nada (histeresis real)
+  b1LatchByName.set(name, cur);
+}
+
+function setFinalEnterNow(name) {
+  if (!finalEnterByName.has(name)) finalEnterByName.set(name, Date.now());
+}
+function clearFinalEnter(name) {
+  finalEnterByName.delete(name);
+  driftSinceByName.delete(name);
+}
+
+function autoGoAround(name, reason) {
+  // Si no está en cola, no hacemos nada
+  const L = runwayState.landings.find(l => l.name === name);
+  if (!L) return;
+
+  // Quitar freeze / committed
+  L.frozenLevel = 0;
+  L.committed = false;
+
+  // Reset de estados
+  resetLandingState(name, 'ORD');
+  try { setApproachPhase(name, 'TO_B1'); } catch {}
+  setPhase(name, 'WAIT');
+  markAdvancement(name);
+
+  // Soltar latch para que no “pegue” B1 artificialmente
+  b1LatchByName.set(name, { latched: false, farSince: null });
+
+  // Aviso al piloto
+  emitToUser(name, 'runway-msg', {
+    text: `Go-around automático (${reason}). Reingresando en secuencia.`,
+    key: 'auto-go-around'
+  });
+
+  // replanificar
+  enforceCompliance();
+  planRunwaySequence();
+  publishRunwayState();
+}
 
 
 function getLandingState(name) {
@@ -310,6 +420,35 @@ function assignBeaconsFor(name) {
   // B1 siempre es el fix interno, común a todos
   asg.b1 = baseB1;
 
+    // ✅ LATCH: si ya estás cerca de B1, nunca te degradamos a B2 aunque cambie el orden
+  try {
+    const u = userLocations[name];
+    if (u) {
+      const dToB1 = getDistance(u.latitude, u.longitude, baseB1.lat, baseB1.lon);
+
+      // elegí un radio razonable: 3000–4000m funciona bien
+      const LATCH_B1_M = 3500;
+
+      if (isFinite(dToB1) && dToB1 <= LATCH_B1_M) {
+        asg.b1 = baseB1;
+        asg.b2 = baseB1;
+        asg.beaconName = 'B1';
+        asg.beaconIndex = 1;
+        return asg;
+      }
+    }
+  } catch {}
+
+    // ✅ LATCH: si estás “pegado” a B1, tu beacon queda en B1 aunque cambie el orden
+    if (isB1Latched(name)) {
+      asg.b2 = baseB1;
+      asg.beaconName = 'B1';
+      asg.beaconIndex = 1;
+      return asg;
+    }
+
+
+
   if (queueIndex === 0) {
     // 👉 PRIMERO EN LA COLA: su beacon principal es B1
     asg.b2 = baseB1;          // usamos la posición de B1 también como "beacon" de espera
@@ -363,6 +502,7 @@ function markAdvancement(name) {
 
 // Determina si ya no debe reordenarse (comprometido a final)
 function isCommitted(name) {
+  const S = getAtcSettings();   
   const L = getLandingByName(name);
     // Si el front reporta FINAL o B1, consideramos comprometido
   const curOps = getOpsState(name);
@@ -377,7 +517,7 @@ function isCommitted(name) {
   const u = userLocations[name];
   if (!asg || !u) return false;
   const dB1 = getDistance(u.latitude, u.longitude, asg.b1.lat, asg.b1.lon);
-  return isFinite(dB1) && dB1 <= FINAL_LOCK_RADIUS_M;
+  return isFinite(dB1) && dB1 <= S.FINAL_LOCK_RADIUS_M;
 }
 
 function updateApproachPhase(name) {
@@ -418,6 +558,7 @@ function updateApproachPhase(name) {
 
 function enforceCompliance() {
   const now = Date.now();
+  const S = getAtcSettings();   // 👈 ACÁ
   for (const L of runwayState.landings) {
     const asg = assignBeaconsFor(L.name);
     const u = userLocations[L.name];
@@ -434,18 +575,53 @@ function enforceCompliance() {
      //  L.committed = false;
     // }
     // Evitar histéresis: NO degradar FINAL por alejarse de B1.
-// (Si querés una salvaguarda de go-around, hacelo por heading contrario + gran distancia.)
+    // (Si querés una salvaguarda de go-around, hacelo por heading contrario + gran distancia.)
 
 
     // Si estaba en B2 y no progresa a B1 en el tiempo máximo, pierde el orden
     if (L.phase === 'B2') {
       const since = now - (L.lastAdvancementTs || L.phaseTs || now);
-      if (since > MAX_B2_TO_B1_S * 1000) {
+      if (since > S.MAX_B2_TO_B1_S * 1000) {
         L.phase = 'WAIT';
         L.frozenLevel = 0;
         L.phaseTs = now;
         L.committed = false;
       }
+    }
+
+        // === AUTO GO-AROUND: drift lejos de B1 sostenido ===
+    const st = getOpsState(L.name);
+    const inFinalLike = (st === 'B1' || st === 'FINAL' || L.phase === 'FINAL' || L.phase === 'B1');
+
+    if (inFinalLike && isFinite(dB1)) {
+      if (dB1 >= S.GOAROUND_DRIFT_M) {
+        if (!driftSinceByName.has(L.name)) driftSinceByName.set(L.name, now);
+        if (now - driftSinceByName.get(L.name) >= S.GOAROUND_DRIFT_SUSTAIN_MS) {
+          autoGoAround(L.name, 'alejamiento de B1');
+          continue;
+        }
+      } else {
+        driftSinceByName.delete(L.name);
+      }
+    }
+
+    // === AUTO GO-AROUND: timeout en B1/FINAL sin ocupar pista ===
+    if (inFinalLike) {
+      setFinalEnterNow(L.name);
+      const t0 = finalEnterByName.get(L.name) || now;
+      const elapsed = now - t0;
+
+      // Si ocupa pista, limpiamos timer (no go-around)
+      const occ = (st === 'RUNWAY_OCCUPIED');
+      if (occ) {
+        clearFinalEnter(L.name);
+      } else if (elapsed >= S.FINAL_TIMEOUT_MS) {
+        autoGoAround(L.name, 'timeout en FINAL/B1');
+        continue;
+      }
+    } else {
+      // si sale de final, limpiamos timers
+      clearFinalEnter(L.name);
     }
 
     // Refrescar committed siempre
@@ -957,6 +1133,16 @@ function cleanupInUseIfDone() {
   if (Date.now() > end) runwayState.inUse = null;
 }
 
+// ✅ actualizar latch para todos los que están en la cola de aterrizaje
+for (const L of runwayState.landings) {
+  updateB1LatchFor(L.name);
+
+  // si el frontend reporta B1 o FINAL, marcamos “entró a final”
+  const st = getOpsState(L.name);
+  if (st === 'B1' || st === 'FINAL') setFinalEnterNow(L.name);
+}
+
+
   function planRunwaySequence() {
     cleanupInUseIfDone();
 
@@ -1125,56 +1311,61 @@ socket.broadcast.emit('traffic-update', [payload]);
  });
 
    // === Estado operativo reportado por el frontend ===
-  socket.on('ops/state', (msg) => {
-    try {
-      const { name, state, aux } = msg || {};
-      if (!name || !state) return;
-      opsStateByName.set(name, { state, ts: Date.now(), aux });
+socket.on('ops/state', (msg) => {
+  try {
+    const { name, state, aux } = msg || {};
+    if (!name || !state) return;
+    opsStateByName.set(name, { state, ts: Date.now(), aux });
 
-      // ▸ Ajustes suaves al scheduler según estado
-      // Si está ocupando pista, marcamos inUse (fallback por si front no llamó runway-occupy)
-      if (state === 'RUNWAY_OCCUPIED' && !runwayState.inUse) {
-        runwayState.inUse = { action: 'landing', name, callsign: userLocations[name]?.callsign || '', startedAt: Date.now(), slotMin: MIN_LDG_SEP_MIN };
-      }
+    // ▸ Ajustes suaves al scheduler según estado
+    // Si está ocupando pista, marcamos inUse (fallback por si front no llamó runway-occupy)
+    if (state === 'RUNWAY_OCCUPIED' && !runwayState.inUse) {
+      runwayState.inUse = { action: 'landing', name, callsign: userLocations[name]?.callsign || '', startedAt: Date.now(), slotMin: MIN_LDG_SEP_MIN };
+    }
 
-      // Si liberó pista, limpiamos inUse si era él
-      if (state === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
-        runwayState.inUse = null;
-      }
+    // Si liberó pista, limpiamos inUse si era él
+    if (state === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
+      runwayState.inUse = null;
+    }
 
     // ✅ Apenas toca pista (o la libera), ya NO pertenece más a la cola de aterrizajes.
     //    Así no sigue recibiendo cambios de turno de landing.
     if (state === 'RUNWAY_OCCUPIED' || state === 'RUNWAY_CLEAR') {
       runwayState.landings = runwayState.landings.filter(l => l.name !== name);
+
+      // ✅ LIMPIEZA (cuando ya tocó/liberó pista)
+      try { clearFinalEnter(name); } catch {}
+      try { b1LatchByName.delete(name); } catch {}
     }
 
+    // Congelar reorden al tocar B1/FINAL
+    if (state === 'B1' || state === 'FINAL') {
+      const L = runwayState.landings.find(l => l.name === name);
+      if (L) L.frozenLevel = 1;
+    }
 
-      // Congelar reorden al tocar B1/FINAL
-      if (state === 'B1' || state === 'FINAL') {
-        const L = runwayState.landings.find(l => l.name === name);
-        if (L) L.frozenLevel = 1;
-      }
-
-          // ✅ Si ya está taxiando al apron o detenido en él, ya terminó su aterrizaje:
+    // ✅ Si ya está taxiando al apron o detenido en él, ya terminó su aterrizaje:
     //    - sacarlo de la cola de aterrizajes
     //    - marcarlo como IN_STANDS en el estado sticky
     if (state === 'TAXI_APRON' || state === 'APRON_STOP') {
       runwayState.landings = runwayState.landings.filter(l => l.name !== name);
       setLandingStateForward(name, 'IN_STANDS');
+
+      // ✅ LIMPIEZA (cuando ya terminó y está en apron)
+      try { clearFinalEnter(name); } catch {}
+      try { b1LatchByName.delete(name); } catch {}
     }
 
-  
-
-
-      // Replanificar/publicar con el nuevo estado
-      if (runwayState.landings.length || runwayState.takeoffs.length) {
-        planRunwaySequence();
-      }
-      publishRunwayState();
-    } catch (e) {
-      console.error('ops/state error:', e);
+    // Replanificar/publicar con el nuevo estado
+    if (runwayState.landings.length || runwayState.takeoffs.length) {
+      planRunwaySequence();
     }
-  });
+    publishRunwayState();
+  } catch (e) {
+    console.error('ops/state error:', e);
+  }
+});
+
 
 
   socket.on('get-traffic', () => {
@@ -1329,24 +1520,29 @@ socket.on('warning-clear', (msg) => {
 
 
   // (1) Manejar air-guardian/leave
-  socket.on('air-guardian/leave', () => {
-    const name = socketIdToName[socket.id];
-    console.log('👋 air-guardian/leave desde', socket.id, '->', name);
-    if (name) {
-      delete userLocations[name];
-      delete socketIdToName[socket.id];
-      io.emit('user-removed', name);
-      console.log(`❌ Usuario ${name} eliminado por leave`);
-          // 👇 limpiar estado sticky
+socket.on('air-guardian/leave', () => {
+  const name = socketIdToName[socket.id];
+  console.log('👋 air-guardian/leave desde', socket.id, '->', name);
+  if (name) {
+    delete userLocations[name];
+    delete socketIdToName[socket.id];
+    io.emit('user-removed', name);
+    console.log(`❌ Usuario ${name} eliminado por leave`);
+    // 👇 limpiar estado sticky
     landingStateByName.delete(name);
-    }
 
-    // ►► (AGREGADO) limpiar de colas si corresponde
-    runwayState.landings = runwayState.landings.filter(x => x.name !== name);
-    runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
-    planRunwaySequence();
-    publishRunwayState();
-  });
+    // ✅ limpiar timers/latch (auto-go-around / B1 latch)
+    try { clearFinalEnter(name); } catch {}
+    try { b1LatchByName.delete(name); } catch {}
+  }
+
+  // ►► (AGREGADO) limpiar de colas si corresponde
+  runwayState.landings = runwayState.landings.filter(x => x.name !== name);
+  runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
+  planRunwaySequence();
+  publishRunwayState();
+});
+
 
   // 🔌 Cliente se desconecta físicamente (cierra app o pierde conexión)
   socket.on('disconnect', () => {
