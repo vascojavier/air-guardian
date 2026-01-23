@@ -53,20 +53,20 @@ export type Runway = {
 };
 
 export type Airfield = {
-  id: string; // "manual:<uuid>" o ICAO en el futuro
+  id: string;
   name?: string;
   icao?: string;
   iata?: string;
-  country?: string;                 // ISO-3166
+  country?: string;
   elevation_ft?: number;
-  location?: { lat: number; lng: number }; // centro aprox.
+  location?: { lat: number; lng: number };
   runways: Runway[];
   meteo?: Meteo;
   apron?: { lat: number; lng: number };
-  lastUpdated: number;              // epoch ms
+  lastUpdated: number;
   source: 'manual' | 'ourairports' | 'mixed' | 'openaip';
 
-    // ✅ NUEVO: settings del scheduler/ATC
+  // ✅ settings del scheduler/ATC
   atcSettings?: Partial<AtcSettings>;
-
 };
+

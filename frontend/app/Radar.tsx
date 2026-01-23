@@ -33,11 +33,13 @@ import io from "socket.io-client";
 import { socket } from '../utils/socket';
 //import { calcularWarningLocalMasPeligroso } from '../data/WarningSelector';
 import { Warning } from '../data/FunctionWarning';
-import { useFocusEffect } from "@react-navigation/native";
+import { useFocusEffect } from "expo-router";
+import { useCallback } from "react";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Airfield } from '../types/airfield';
 import * as Speech from 'expo-speech';
 import { iconMap } from '../utils/iconMap';
+
 
 function iconKeyFor(aircraftIcon?: string, alert?: 'none'|'TA'|'RA_LOW'|'RA_HIGH') {
   // normaliza: saca .png si viene como '2.png'
@@ -120,7 +122,12 @@ const PlaneIcon = ({ source, heading = 0 }: { source: any; heading?: number }) =
 type OpsState =
   | 'APRON_STOP' | 'TAXI_APRON' | 'TAXI_TO_RWY' | 'HOLD_SHORT'
   | 'RUNWAY_OCCUPIED' | 'RUNWAY_CLEAR' | 'AIRBORNE'
-  | 'LAND_QUEUE' | 'B2' | 'B1' | 'FINAL';
+  | 'LAND_QUEUE' | 'B1' | 'FINAL'
+  // Beacons dinámicos (B2, B3, B4, ...)
+  | `B${number}`
+  // Camino a beacon: A_TO_B2, A_TO_B3, ...
+  | `A_TO_B${number}`;
+
 
 interface LatLon {
   latitude: number;
@@ -283,6 +290,9 @@ const Radar = () => {
   const airborneCandidateSinceRef = useRef<number | null>(null);
   const lastGroundSeenAtRef = useRef<number>(Date.now());
   const didRandomizeOnEnterRef = useRef(false);
+  const sendIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+const isFocusedRef = useRef(false);
+
   const { t, i18n } = useTranslation();
   const lang = (i18n.language || "en").toLowerCase();
   const ttsLang =
@@ -414,6 +424,12 @@ const refreshPinnedDistance = () => {
       console.log('[OPS] Forced emit', next);
     }
   }
+
+  function emitOpsBeacon(label: `B${number}`, phase: 'TO' | 'AT') {
+  const st = (phase === 'TO') ? (`A_TO_${label}` as OpsState) : (label as OpsState);
+  emitOpsNow(st);
+  }
+
 
   const [zoom, setZoom] = useState({ latitudeDelta: 0.1, longitudeDelta: 0.1 });
   const [planes, setPlanes] = useState<Plane[]>([]);
@@ -556,7 +572,7 @@ const refreshPinnedDistance = () => {
   const [navTarget, setNavTarget] = useState<LatLon | null>(null);
   const mapRef = useRef<MapView | null>(null);
   const socketRef = useRef<ReturnType<typeof io> | null>(null);
-  const isFocusedRef = useRef(false);
+  //const isFocusedRef = useRef(false);
   const lastDistanceRef = useRef<Record<string, number>>({});
   const serverATCRef = useRef(false);
   // Candado de turno cuando paso por B1 (FINAL)
@@ -2531,20 +2547,36 @@ if (next === 'AIRBORNE') {
 
 
 
-  // === AG: NUEVO — avisar si la app va a background ===
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (state) => {
-    if (state === 'background' || state === 'inactive') {
-      if (socketRef.current && myPlane?.id) {
-        socketRef.current.emit('remove-user', myPlane.id); // 👈 NUEVO
-      }
-      //emitLeave(); // lo que ya tenías
-    }
+useFocusEffect(
+  useCallback(() => {
+    isFocusedRef.current = true;
 
-    });
-    return () => sub.remove();
-  }, []);
-  // === AG: fin background ===
+    // asegurar socket
+    try {
+      if (socketRef.current && !socketRef.current.connected) {
+        socketRef.current.connect();
+      }
+    } catch {}
+
+    // opcional pero recomendado: re-join explícito si tu backend lo usa
+    try {
+      socketRef.current?.emit?.("air-guardian/join");
+    } catch {}
+
+    // ✅ update inmediato + reiniciar interval
+    sendOnceNow();
+    startSending();
+
+    return () => {
+      isFocusedRef.current = false;
+      stopSending();
+
+      // ✅ importantísimo: si no, quedás congelado en los otros
+      try { socketRef.current?.emit?.("air-guardian/leave"); } catch {}
+    };
+  }, [username]) // o el id/nombre que usás como key
+);
+
 
 // ================= GPS REAL (watchPositionAsync) =================
 useEffect(() => {
@@ -2608,6 +2640,34 @@ useEffect(() => {
   };
 }, [simMode, username, aircraftModel, aircraftIcon, callsign]);
 
+const stopSending = () => {
+  if (sendIntervalRef.current) {
+    clearInterval(sendIntervalRef.current);
+    sendIntervalRef.current = null;
+  }
+};
+
+const startSending = () => {
+  stopSending();
+
+  // ⚠️ ARRANCA EL LOOP QUE YA TENÍAS (1s o 500ms)
+  sendIntervalRef.current = setInterval(() => {
+    if (!isFocusedRef.current) return;
+    if (!socketRef.current?.connected) return;
+
+    // acá va TU lógica actual de armar payload y emitir update
+    // socketRef.current.emit("update", payload)
+  }, 1000);
+};
+
+// update inmediato (para que no quede 1s congelado)
+const sendOnceNow = () => {
+  try {
+    if (!socketRef.current?.connected) return;
+    // acá armás el mismo payload que en el interval
+    // socketRef.current.emit("update", payload)
+  } catch {}
+};
 
 
 const centerMap = (lat = myPlane.lat, lon = myPlane.lon) => {
@@ -2847,6 +2907,13 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
         flashBanner(t("runway.clearedToLand"), 'clr-land');
         landClearShownRef.current = true; // mostrar una vez por “aproximación”
       }
+      if (activeThreshold) {
+      finalLockedRef.current = true;
+      navPhaseRef.current = 'FINAL';
+      lastPhaseSwitchRef.current = Date.now(); // evita dwell viejo
+      setNavTargetSafe(activeThreshold);
+}
+
     } else {
       // si te volviste a alejar, reseteamos para poder volver a mostrar al reingresar
       landClearShownRef.current = false;
@@ -3047,55 +3114,70 @@ if (isEmergency) {
 
 // === Modo #>0 → B2/B3/B4... según posición en la cola (sin spam) ===
 if (idx > 0) {
-  // Slot 0 de beacons "de espera" es B2; luego B3, B4...
   const beaconsChain: LatLon[] = [
     beaconB2!,
-    ...extraBeacons, // [B3, B4, ...]
-  ].filter(Boolean as any); // por si falta alguno
+    ...extraBeacons,
+  ].filter(Boolean as any);
 
   if (!beaconsChain.length) {
-    // fallback: si por alguna razón no hay nada, usar B2 como antes
-    if (beaconB2) {
-      if (!navTarget ||
-          navTarget.latitude !== beaconB2.latitude ||
-          navTarget.longitude !== beaconB2.longitude) {
-        setNavTargetSafe(beaconB2);
-      }
-    } else {
-      setNavTargetSafe(null);
-    }
+    if (beaconB2) setNavTargetSafe(beaconB2);
+    else setNavTargetSafe(null);
     return;
   }
 
-  // idx = 1 → B2 (slot 0)
-  // idx = 2 → B3 (slot 1)
-  // idx = 3 → B4 (slot 2)
-  // idx >= beaconsChain.length+1 → se queda en el último beacon
   const slotIndex = Math.min(idx - 1, beaconsChain.length - 1);
   const targetBeacon = beaconsChain[slotIndex];
 
-  if (!navTarget ||
-      navTarget.latitude !== targetBeacon.latitude ||
-      navTarget.longitude !== targetBeacon.longitude) {
-    setNavTargetSafe(targetBeacon);
+  // etiqueta del beacon asignado (B2/B3/B4/...)
+  const beaconLabel = (
+    slotIndex === 0 ? 'B2' :
+    slotIndex === 1 ? 'B3' :
+    slotIndex === 2 ? 'B4' :
+    `B${slotIndex + 2}`
+  ) as `B${number}`;
 
-    const label =
-      slotIndex === 0 ? 'B2' :
-      slotIndex === 1 ? 'B3' :
-      slotIndex === 2 ? 'B4' :
-      `B${slotIndex + 2}`;
+  // ✅ setear navTarget SOLO si cambió (tu setNavTargetSafe ya evita spam)
+  setNavTargetSafe(targetBeacon);
 
-    flashBanner(t("nav.proceedTo", { fix: label }), `goto-${label.toLowerCase()}`);
-    try {
-      Speech.stop();
-      Speech.speak(t("nav.proceedToSpoken", { fix: label }),{ language: ttsLang }
-);
-    } catch {}
+  // ✅ OPS A_TO_Bx / Bx (solo si NO hay ATC server guiando)
+  if (!serverATCRef.current) {
+    const mp = myPlaneRef.current; // ✅ evita stale reads
+    if (mp) {
+      const dToBeacon = getDistance(
+        mp.lat, mp.lon,
+        targetBeacon.latitude, targetBeacon.longitude
+      );
+
+      // Histeresis para no oscilar por ruido GPS
+      const BEACON_ENTER_M = 350; // llegué (AT)
+      const BEACON_EXIT_M  = 450; // si me alejo bastante, vuelvo a TO
+
+      // memoria por beacon actual (para no “tremolar”)
+      const last = lastOpsStateRef.current;
+
+      const atState = beaconLabel as OpsState;
+      const toState = (`A_TO_${beaconLabel}` as OpsState);
+
+      // Si ya estoy "AT Bx", no vuelvo a TO salvo que me aleje > EXIT
+      const currentlyAT = last === atState;
+
+      if (Number.isFinite(dToBeacon)) {
+        if (!currentlyAT && dToBeacon <= BEACON_ENTER_M) {
+          emitOpsBeacon(beaconLabel, 'AT');
+        } else if (currentlyAT && dToBeacon >= BEACON_EXIT_M) {
+          emitOpsBeacon(beaconLabel, 'TO');
+        } else if (!currentlyAT && dToBeacon > BEACON_ENTER_M) {
+          // mantener TO (pero emitOpsNow evita re-emit si ya está igual)
+          emitOpsBeacon(beaconLabel, 'TO');
+        }
+      }
+    }
   }
 
-  // los que no son #1 terminan acá, no pasan a B1/FINAL
+  // ⚠️ sin banners ni voz acá (como querías)
   return;
 }
+
 
 
     // === Soy #1 — histéresis + dwell

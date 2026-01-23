@@ -30,6 +30,18 @@ import { useTranslation } from "react-i18next";
 import i18n from "../src/i18n"; // si realmente exporta default i18n
 import { setAppLanguage, loadAppLanguageOnStart, AppLanguage } from "../src/i18n/language";
 
+const ADMIN_KEY_STORAGE = "airguardian.adminKey";
+
+async function getAdminKey() {
+  const saved = await AsyncStorage.getItem(ADMIN_KEY_STORAGE);
+  return (saved && saved.trim()) ? saved : "Pista"; // ✅ clave inicial
+}
+
+async function setAdminKey(newKey: string) {
+  await AsyncStorage.setItem(ADMIN_KEY_STORAGE, newKey);
+}
+
+
 
 const modelosDesdeLista = aircraftList.reduce(
   (acc, modelo) => {
@@ -59,7 +71,7 @@ export default function IndexScreen() {
   const [modelosMotor, setModelosMotor] = useState<string[]>(modelosDesdeLista.motor);
   const [modelosGlider, setModelosGlider] = useState<string[]>(modelosDesdeLista.glider);
   const [iconosPersonalizados, setIconosPersonalizados] = useState<Record<string, string>>({});
-
+  const [showPwd, setShowPwd] = useState(false);
   const [lang, setLang] = useState<AppLanguage>("system");
 
 
@@ -226,7 +238,9 @@ const changeLang = async (newLang: AppLanguage) => {
       }
     }
 
-    const isAdmin = password === "aeroclub123";
+    const adminKey = await getAdminKey();
+    const isAdmin = password.trim().toLowerCase() === adminKey.toLowerCase();
+
     const role = isAdmin ? "aeroclub" : "pilot";
 
     const finalIcon = iconMap[iconoPreview] ? iconoPreview : "2";
@@ -250,8 +264,11 @@ const changeLang = async (newLang: AppLanguage) => {
     router.push("/Radar");
   };
 
-  const goToPistaConClave = () => {
-    if (password !== "aeroclub123") {
+  const goToPistaConClave = async () => {
+
+    const adminKey = await getAdminKey();
+    if (password.trim().toLowerCase() !== adminKey.toLowerCase()) {
+
       Alert.alert(t("index.restrictedTitle"), t("index.restrictedBody"));
       return;
     }
@@ -441,15 +458,28 @@ return (
             </>
           )}
 
-          <Text style={styles.label}>{t("index.adminPasswordLabel")}:</Text>
-          <TextInput
-            style={styles.input}
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry
-            placeholder={t("index.optional")}
-            onFocus={() => scrollRef.current?.scrollToEnd({ animated: true })}
-          />
+<Text style={styles.label}>{t("index.adminPasswordLabel")}:</Text>
+
+<View style={{ position: "relative" }}>
+  <TextInput
+    style={[styles.input, { paddingRight: 50 }]}
+    value={password}
+    onChangeText={setPassword}
+    secureTextEntry={!showPwd}
+    placeholder={t("index.optional")}
+    onFocus={() => {
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 150);
+    }}
+  />
+
+  <TouchableOpacity
+    onPress={() => setShowPwd((v) => !v)}
+    style={{ position: "absolute", right: 12, top: 12 }}
+  >
+    <Text style={{ fontSize: 18 }}>{showPwd ? "🙈" : "👁️"}</Text>
+  </TouchableOpacity>
+</View>
+
 
           <View style={{ gap: 8, marginTop: 6 }}>
             <Button title={t("index.enter")} onPress={handleLogin} />

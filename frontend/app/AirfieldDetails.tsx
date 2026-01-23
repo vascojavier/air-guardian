@@ -12,6 +12,7 @@ import {
   KeyboardAvoidingView,
   TouchableWithoutFeedback,
   Keyboard,
+  TouchableOpacity,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Airfield, Runway } from '../types/airfield';
@@ -34,6 +35,8 @@ const DEFAULT_ATC_SETTINGS = {
   FINAL_DRIFT_MAX_M: 2500,
 };
 
+const ADMIN_KEY_STORAGE = 'airguardian.adminKey';
+
 export default function AirfieldDetails() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -41,6 +44,8 @@ export default function AirfieldDetails() {
   const startOnATC = tab === 'atc'; // (por ahora no se usa en UI, pero queda listo)
 
   const [airfield, setAirfield] = useState<Airfield | null>(null);
+  const [adminKey, setAdminKeyState] = useState<string>('Pista');
+  const [showAdminKey, setShowAdminKey] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -57,6 +62,11 @@ export default function AirfieldDetails() {
       } catch (e) {
         console.warn('No pude leer airfieldActive:', e);
       }
+
+      try {
+        const savedKey = await AsyncStorage.getItem(ADMIN_KEY_STORAGE);
+        setAdminKeyState(savedKey && savedKey.trim() ? savedKey : 'Pista');
+      } catch {}
     })();
   }, []);
 
@@ -69,6 +79,14 @@ export default function AirfieldDetails() {
     if (!airfield) return;
     const rw = { ...airfield.runways[0], ...patch };
     setAirfield({ ...airfield, runways: [rw], lastUpdated: Date.now() });
+  };
+
+  // ✅ ATC settings updater (merge seguro)
+  const updateAtc = (patch: Partial<typeof DEFAULT_ATC_SETTINGS>) => {
+    if (!airfield) return;
+    const prev = { ...DEFAULT_ATC_SETTINGS, ...(((airfield as any).atcSettings || {}) as any) };
+    const next = { ...prev, ...patch };
+    setAirfield({ ...(airfield as any), atcSettings: next, lastUpdated: Date.now() });
   };
 
   const ensureSocketConnected = () =>
@@ -90,11 +108,22 @@ export default function AirfieldDetails() {
   const save = async () => {
     if (!airfield) return;
 
+    // ✅ Guardar admin key (si queda vacía, vuelve a "Pista")
+    const finalKey = adminKey && adminKey.trim() ? adminKey.trim() : 'Pista';
+    try {
+      await AsyncStorage.setItem(ADMIN_KEY_STORAGE, finalKey);
+    } catch {}
+
     // 🔒 asegurar settings antes de persistir/publicar
     const afToSave: Airfield = {
       ...airfield,
       lastUpdated: Date.now(),
-      ...( { atcSettings: { ...DEFAULT_ATC_SETTINGS, ...((airfield as any).atcSettings || {}) } } as any ),
+      ...({
+        atcSettings: {
+          ...DEFAULT_ATC_SETTINGS,
+          ...(((airfield as any).atcSettings || {}) as any),
+        },
+      } as any),
     };
 
     // 1) Guardar local
@@ -107,10 +136,7 @@ export default function AirfieldDetails() {
       Alert.alert('Publicado', 'La pista fue publicada y se enviará a todos.');
     } catch (e) {
       console.warn('airfield-upsert falló:', e);
-      Alert.alert(
-        'Aviso',
-        'Se guardó localmente, pero no pude publicarla al servidor.'
-      );
+      Alert.alert('Aviso', 'Se guardó localmente, pero no pude publicarla al servidor.');
     }
 
     // 3) Ir a Radar
@@ -130,6 +156,12 @@ export default function AirfieldDetails() {
   }
 
   const rw = airfield.runways[0];
+  const atc = { ...DEFAULT_ATC_SETTINGS, ...(((airfield as any).atcSettings || {}) as any) };
+
+  const num = (v: string) => {
+    const n = Number(String(v).replace(',', '.'));
+    return Number.isFinite(n) ? n : undefined;
+  };
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -144,7 +176,7 @@ export default function AirfieldDetails() {
               style={styles.flex}
               contentContainerStyle={[
                 styles.content,
-                { paddingBottom: (insets.bottom || 16) + 100 }, // espacio para el footer fijo
+                { paddingBottom: (insets.bottom || 16) + 100 },
               ]}
               keyboardShouldPersistTaps="handled"
             >
@@ -198,14 +230,148 @@ export default function AirfieldDetails() {
                     style={styles.input}
                     keyboardType="numeric"
                     value={airfield.elevation_ft?.toString() ?? ''}
-                    onChangeText={(v) =>
-                      update({ elevation_ft: v ? Number(v) : undefined })
-                    }
+                    onChangeText={(v) => update({ elevation_ft: v ? Number(v) : undefined })}
                     placeholder="Ej: 1500"
                   />
                 </View>
               </View>
 
+              {/* ✅ NUEVO: Seguridad */}
+              <Text style={[styles.h1, { marginTop: 16 }]}>Seguridad</Text>
+
+              <Text style={styles.label}>Clave de administrador (para entrar a Pista)</Text>
+              <View style={{ position: 'relative' }}>
+                <TextInput
+                  style={[styles.input, { paddingRight: 50 }]}
+                  value={adminKey}
+                  onChangeText={setAdminKeyState}
+                  secureTextEntry={!showAdminKey}
+                  placeholder="Pista"
+                  autoCapitalize="none"
+                />
+                <TouchableOpacity
+                  onPress={() => setShowAdminKey((v) => !v)}
+                  style={{ position: 'absolute', right: 12, top: 12 }}
+                >
+                  <Text style={{ fontSize: 18 }}>{showAdminKey ? '🙈' : '👁️'}</Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={{ color: '#666', marginTop: 6 }}>
+                Si la dejás vacía, se usa "Pista".
+              </Text>
+
+              {/* ✅ NUEVO: ATC Settings */}
+              <Text style={[styles.h1, { marginTop: 16 }]}>ATC Settings</Text>
+
+              <Text style={styles.label}>B1 latch ON (m)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="numeric"
+                value={String(atc.B1_LATCH_ON_M)}
+                onChangeText={(v) => {
+                  const n = num(v);
+                  if (n != null) updateAtc({ B1_LATCH_ON_M: n });
+                }}
+                placeholder="3500"
+              />
+
+              <Text style={styles.label}>B1 latch OFF (m)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="numeric"
+                value={String(atc.B1_LATCH_OFF_M)}
+                onChangeText={(v) => {
+                  const n = num(v);
+                  if (n != null) updateAtc({ B1_LATCH_OFF_M: n });
+                }}
+                placeholder="6000"
+              />
+
+              <Text style={styles.label}>B1 latch OFF sustain (ms)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="numeric"
+                value={String(atc.B1_LATCH_OFF_SUSTAIN_MS)}
+                onChangeText={(v) => {
+                  const n = num(v);
+                  if (n != null) updateAtc({ B1_LATCH_OFF_SUSTAIN_MS: n });
+                }}
+                placeholder="20000"
+              />
+
+              <Text style={styles.label}>FINAL timeout (ms)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="numeric"
+                value={String(atc.FINAL_TIMEOUT_MS)}
+                onChangeText={(v) => {
+                  const n = num(v);
+                  if (n != null) updateAtc({ FINAL_TIMEOUT_MS: n });
+                }}
+                placeholder="360000"
+              />
+
+              <Text style={styles.label}>Go-around drift (m)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="numeric"
+                value={String(atc.GOAROUND_DRIFT_M)}
+                onChangeText={(v) => {
+                  const n = num(v);
+                  if (n != null) updateAtc({ GOAROUND_DRIFT_M: n });
+                }}
+                placeholder="9000"
+              />
+
+              <Text style={styles.label}>Go-around drift sustain (ms)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="numeric"
+                value={String(atc.GOAROUND_DRIFT_SUSTAIN_MS)}
+                onChangeText={(v) => {
+                  const n = num(v);
+                  if (n != null) updateAtc({ GOAROUND_DRIFT_SUSTAIN_MS: n });
+                }}
+                placeholder="20000"
+              />
+
+              <Text style={styles.label}>FINAL lock radius (m)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="numeric"
+                value={String(atc.FINAL_LOCK_RADIUS_M)}
+                onChangeText={(v) => {
+                  const n = num(v);
+                  if (n != null) updateAtc({ FINAL_LOCK_RADIUS_M: n });
+                }}
+                placeholder="2000"
+              />
+
+              <Text style={styles.label}>MAX B2 → B1 (s)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="numeric"
+                value={String(atc.MAX_B2_TO_B1_S)}
+                onChangeText={(v) => {
+                  const n = num(v);
+                  if (n != null) updateAtc({ MAX_B2_TO_B1_S: n });
+                }}
+                placeholder="180"
+              />
+
+              <Text style={styles.label}>FINAL drift max (m)</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="numeric"
+                value={String(atc.FINAL_DRIFT_MAX_M)}
+                onChangeText={(v) => {
+                  const n = num(v);
+                  if (n != null) updateAtc({ FINAL_DRIFT_MAX_M: n });
+                }}
+                placeholder="2500"
+              />
+
+              {/* --- Pista --- */}
               <Text style={[styles.h1, { marginTop: 16 }]}>Pista</Text>
 
               <View style={styles.row}>
@@ -238,9 +404,7 @@ export default function AirfieldDetails() {
                     style={styles.input}
                     keyboardType="numeric"
                     value={rw.length_m?.toString() ?? ''}
-                    onChangeText={(v) =>
-                      updateRunway({ length_m: v ? Number(v) : undefined })
-                    }
+                    onChangeText={(v) => updateRunway({ length_m: v ? Number(v) : undefined })}
                     placeholder="Ej: 1200"
                   />
                 </View>
@@ -250,9 +414,7 @@ export default function AirfieldDetails() {
                     style={styles.input}
                     keyboardType="numeric"
                     value={rw.width_m?.toString() ?? ''}
-                    onChangeText={(v) =>
-                      updateRunway({ width_m: v ? Number(v) : undefined })
-                    }
+                    onChangeText={(v) => updateRunway({ width_m: v ? Number(v) : undefined })}
                     placeholder="Ej: 30"
                   />
                 </View>
@@ -279,20 +441,13 @@ export default function AirfieldDetails() {
               <TextInput
                 style={styles.input}
                 value={rw.active_end ?? 'A'}
-                onChangeText={(v) =>
-                  updateRunway({ active_end: v === 'B' ? 'B' : 'A' })
-                }
+                onChangeText={(v) => updateRunway({ active_end: v === 'B' ? 'B' : 'A' })}
                 placeholder="A o B"
               />
             </ScrollView>
 
             {/* Footer fijo con safe area */}
-            <View
-              style={[
-                styles.footer,
-                { paddingBottom: (insets.bottom || 8) + 6 },
-              ]}
-            >
+            <View style={[styles.footer, { paddingBottom: (insets.bottom || 8) + 6 }]}>
               <View style={styles.footerInner}>
                 <View style={styles.footerBtn}>
                   <Button title="Cancelar" color="#666" onPress={cancel} />
@@ -329,7 +484,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 0, // se respeta safe area con paddingBottom dinámico
+    bottom: 0,
     backgroundColor: 'rgba(255,255,255,0.95)',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#ddd',
