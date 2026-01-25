@@ -1503,6 +1503,7 @@ socket.on('ops/state', (msg) => {
   try {
     const { name, state, aux } = msg || {};
     if (!name || !state) return;
+    io.emit('ops/state', { name, state: finalState, ts: Date.now(), aux: aux || null });
 
     opsStateByName.set(name, { state, ts: Date.now(), aux });
 
@@ -1520,14 +1521,28 @@ socket.on('ops/state', (msg) => {
       // Si NO era líder, sigue el flujo normal más abajo
     }
 
-    // ✅ (MOVIDO AQUÍ) Anti-FINAL: recién después del trigger
-    const leader = leaderName();
-    if (state === 'FINAL' && leader && name !== leader) {
-      // ignorar el FINAL reportado por alguien que no es #1
-      opsStateByName.set(name, { state: 'B1', ts: Date.now(), aux });
-      lastOpsStateByName.set(name, 'B1'); // ✅ mantener coherencia del flanco
-      return;
-    }
+// ✅ (MOVIDO AQUÍ) Anti-FINAL: recién después del trigger
+const leader = leaderName();
+let finalState = state;
+
+if (state === 'FINAL' && leader && name !== leader) {
+  // ignorar FINAL reportado por alguien que no es #1
+  finalState = 'B1';
+  opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
+  lastOpsStateByName.set(name, finalState);
+} else {
+  // ya lo guardaste arriba, pero aseguramos consistencia
+  opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
+}
+
+// ✅ AHORA sí: broadcast global del OPS para que todos lo vean inmediato
+io.emit('ops/state', {
+  name,
+  state: finalState,
+  ts: Date.now(),
+  aux: aux || null,
+});
+
 
     // ▸ Ajustes suaves al scheduler según estado
     if (state === 'RUNWAY_OCCUPIED' && !runwayState.inUse) {

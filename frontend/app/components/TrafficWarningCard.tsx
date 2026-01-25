@@ -2,12 +2,17 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useTranslation } from 'react-i18next';
 
-import { Plane } from '../../types/Plane';
+import type { Plane } from '../../types/Plane';
+import type { Warning } from '../../data/FunctionWarning';
+import type { OpsState } from '../../types/OpsState';
 import { useUnits } from '../../src/units/UnitsContext';
 import { useUser } from '../../context/UserContext';
 
+type AircraftLike = (Plane | Warning) & { ops?: OpsState | string | null };
+
+
 type Props = {
-  aircraft: Plane & { ops?: string };
+  aircraft: AircraftLike;
   distance: number; // metros
 };
 
