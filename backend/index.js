@@ -1153,12 +1153,7 @@ function maybeSendInstruction(opId, opsById) {
 
 let lastPublishMs = 0;
 
-function publishRunwayStateThrottled() {
-  const now = Date.now();
-  if (now - lastPublishMs < 500) return; // máx 2 Hz
-  lastPublishMs = now;
-  publishRunwayState();
-}
+
 
 
 
@@ -1255,7 +1250,12 @@ function publishRunwayState() {
 
 }
 
-
+function publishRunwayStateThrottled() {
+  const now = Date.now();
+  if (now - lastPublishMs < 500) return; // máx 2 Hz
+  lastPublishMs = now;
+  publishRunwayState();
+}
 
 
 // ========= Ciclo principal =========
