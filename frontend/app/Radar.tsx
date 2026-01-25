@@ -3207,13 +3207,7 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
     const landings = runwayState?.state?.landings || [];
 
     let idx = landings.findIndex((x:any) => x?.name === me);
-
-    // ✅ NO BORRES el target si por 1 update no aparezco en landings
-    // (pasa cuando el server reordena / publica en dos pasos)
-    if (idx === -1) { 
-      return; 
-    }
-
+    if (idx === -1) { setNavTargetSafe(null); return; }
 
     // ✅ líder real según backend (landings[0])
     const leaderName = landings[0]?.name;
@@ -3257,12 +3251,13 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
     if (prevIdxRef.current != null && prevIdxRef.current > 0 && idx === 0) {
       lastPhaseSwitchRef.current = 0;   // quita “dwell”
       navPhaseRef.current = null;       // resetea máquina
-      navPhaseRef.current = 'B1';
+
       // ✅ Regla: líder siempre empieza en B1 (salvo emergencia, que la manejás aparte)
       finalLockedRef.current = false;   // por las dudas
       setNavTargetSafe(beaconB1);       // fuerza el primer target
     }
     prevIdxRef.current = idx;
+
 
 
 
@@ -3425,33 +3420,7 @@ if (idx > 0) {
 
 
 // === Soy #1 — histéresis + dwell
-
-const myOpsBackend = getOpsOf(me);// runwayState.state.opsStates[me]
-
-if (myOpsBackend === 'FINAL') {
-  finalLockedRef.current = true;
-  navPhaseRef.current = 'FINAL';
-  if (activeThreshold) setNavTargetSafe(activeThreshold);
-  return;
-}
-
 const dToB1 = getDistance(myPlane.lat, myPlane.lon, beaconB1.latitude, beaconB1.longitude);
-
-// ✅ GATE DURO: #1 NO puede ir a FINAL si todavía no alcanzó B1
-
-const BEACON_REACHED_M = 600;      // “llegué a B1” (ajustable)
-const reachedB1 =
-  myOpsBackend === 'B1' ||
-  (Number.isFinite(dToB1) && dToB1 <= BEACON_REACHED_M);
-
-// Si NO alcancé B1: target SIEMPRE B1 (aunque sea #1 por ETA)
-if (!reachedB1) {
-  finalLockedRef.current = false;
-  navPhaseRef.current = 'B1';
-  setNavTargetSafe(beaconB1);
-  return; // ⛔️ Prohibido ir a cabecera/FINAL antes de B1
-}
-
 
 // ✅ Regla: #1 SIEMPRE arranca en B1 (salvo emergencia)
 if (!navPhaseRef.current) {
@@ -3461,45 +3430,30 @@ if (!navPhaseRef.current) {
 }
 
   // B1 → FINAL (banner/voz SOLO al cambiar)
-if (navPhaseRef.current === 'B1') {
-  if (activeThreshold && reachedB1) {
-    // ✅ 1) La línea azul va a FINAL SIEMPRE (sin depender de maybeSwitchPhase)
-    setNavTargetSafe(activeThreshold);
+  if (navPhaseRef.current === 'B1') {
+    if (dToB1 <= FINAL_ENTER_M) {
+      if (maybeSwitchPhase('FINAL') && activeThreshold) {
+        // ✅ Candado: una vez que me manda a FINAL, no debo volver a competir por ETA
+        finalLockedRef.current = true;
+        socketRef.current?.emit('sequence-freeze', { name: me, reason: 'locked-final' });
 
-    // 🔥 FIX CLAVE: avisar FINAL al backend UNA SOLA VEZ
-    if (!serverATCRef.current && lastOpsStateRef.current !== 'FINAL') {
-      socketRef.current?.emit('ops/state', {
-        name: me,
-        state: 'FINAL',
-      });
-      lastOpsStateRef.current = 'FINAL';
+        setNavTargetSafe(activeThreshold);
+        flashBanner(t("nav.continueFinal"), 'continue-final');
+        try {
+          Speech.stop();
+          Speech.speak(t("nav.continueFinalSpoken"), { language: ttsLang });
+        } catch {}
+      }
+    } else {
+      // Mantener B1 sin re-banners
+      if (
+        !navTarget ||
+        navTarget.latitude !== beaconB1.latitude ||
+        navTarget.longitude !== beaconB1.longitude
+      ) {
+        setNavTargetSafe(beaconB1);
+      }
     }
-
-    // ✅ 2) Solo el flanco (fase + banner/voz) depende de tu histéresis
-    if (maybeSwitchPhase('FINAL')) {
-      finalLockedRef.current = true;
-      socketRef.current?.emit('sequence-freeze', { name: me, reason: 'locked-final' });
-
-      flashBanner(t("nav.continueFinal"), 'continue-final');
-      try {
-        Speech.stop();
-        Speech.speak(t("nav.continueFinalSpoken"), { language: ttsLang });
-      } catch {}
-    }
-
-    return;
-  }
-
-  // Mantener B1 sin re-banners
-  if (
-    !navTarget ||
-    navTarget.latitude !== beaconB1.latitude ||
-    navTarget.longitude !== beaconB1.longitude
-  ) {
-    setNavTargetSafe(beaconB1);
-  }
-  return;
-
   } else {
     // FINAL → (posible) B1: solo si NO está candado y realmente te abriste bastante
     if (!finalLockedRef.current && dToB1 >= B1_ENTER_M) {

@@ -64,6 +64,7 @@ function dropFromLandings(name, reason) {
   // Replanificar inmediatamente
   try { enforceCompliance(); } catch {}
   try { planRunwaySequence(); } catch {}
+  try { publishRunwayState(); } catch {}
 }
 
 
@@ -231,6 +232,7 @@ function autoGoAround(name, reason) {
   // replanificar
   enforceCompliance();
   planRunwaySequence();
+  publishRunwayState();
 }
 
 
@@ -689,42 +691,44 @@ function enforceCompliance() {
     // === LEADER OUT: timeout en B1/FINAL sin ocupar pista ===
     // Sólo aplica al #1 (líder). Si no cumple, pierde turno y sale de la cola.
     const leader = leaderName();
-const isFinalL = (stL === 'FINAL');
+    if (leader && leader === L.name) {
+      const stL = getOpsState(L.name);
+      const inFinalLikeL = (stL === 'B1' || stL === 'FINAL');
 
-if (isFinalL) {
-  const S2 = getAtcSettings();
-  const lease = turnLeaseByName.get(L.name) || { startMs: now, lastAlongM: null, lastSeenMs: now };
-  if (!turnLeaseByName.has(L.name)) turnLeaseByName.set(L.name, lease);
+      if (inFinalLikeL) {
+        const S2 = getAtcSettings();
+        const lease = turnLeaseByName.get(L.name) || { startMs: now, lastAlongM: null, lastSeenMs: now };
+        if (!turnLeaseByName.has(L.name)) turnLeaseByName.set(L.name, lease);
 
-  const elapsed = now - lease.startMs;
+        const elapsed = now - lease.startMs;
 
-  // 1) Overshoot: cruzó umbral sin ocupar
-  if (crossedThreshold(L.name)) {
-    dropFromLandings(L.name, 'pasó el umbral sin ocupar pista');
-    continue;
-  }
+        // 1) Overshoot: cruzó umbral sin ocupar
+        if (crossedThreshold(L.name)) {
+          dropFromLandings(L.name, 'pasó el umbral sin ocupar pista');
+          continue;
+        }
 
-  // 2) Timeout SOLO en FINAL
-  if (elapsed >= S2.LEADER_TIMEOUT_MS) {
-    dropFromLandings(L.name, 'timeout como #1 en FINAL');
-    continue;
-  }
+        // 2) Timeout en FINAL/B1
+        if (elapsed >= S2.LEADER_TIMEOUT_MS) {
+          dropFromLandings(L.name, 'timeout como #1 en FINAL/B1');
+          continue;
+        }
 
-  // 3) Drift SOLO en FINAL
-  const g = activeRunwayGeom();
-  const uL = userLocations[L.name];
-  if (g && uL) {
-    const dThr = getDistance(uL.latitude, uL.longitude, g.thr.lat, g.thr.lon);
-    if (isFinite(dThr) && dThr >= S2.LEADER_DRIFT_MAX_M) {
-      dropFromLandings(L.name, 'se alejó demasiado del umbral activo');
-      continue;
+        // 3) Se alejó demasiado del umbral activo (desobedeció / abandonó circuito)
+        const g = activeRunwayGeom();
+        const uL = userLocations[L.name];
+        if (g && uL) {
+          const dThr = getDistance(uL.latitude, uL.longitude, g.thr.lat, g.thr.lon);
+          if (isFinite(dThr) && dThr >= S2.LEADER_DRIFT_MAX_M) {
+            dropFromLandings(L.name, 'se alejó demasiado del umbral activo');
+            continue;
+          }
+        }
+      } else {
+        // Si el líder no está en final-like, reseteamos lease (aún no "consumió" turno)
+        clearTurnLease(L.name);
+      }
     }
-  }
-} else {
-  // Si NO está en FINAL, no le corre el timer de OUT (B1 es transitorio)
-  clearTurnLease(L.name);
-}
-
 
 
     // Refrescar committed siempre
@@ -1151,10 +1155,6 @@ function maybeSendInstruction(opId, opsById) {
 }
 
 
-let lastPublishMs = 0;
-
-
-
 
 
 // ========= Publicación de estado =========
@@ -1250,12 +1250,7 @@ function publishRunwayState() {
 
 }
 
-function publishRunwayStateThrottled() {
-  const now = Date.now();
-  if (now - lastPublishMs < 500) return; // máx 2 Hz
-  lastPublishMs = now;
-  publishRunwayState();
-}
+
 
 
 // ========= Ciclo principal =========
@@ -1322,7 +1317,7 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
   }
 
   // (5) Publicar estado actualizado
-  try { publishRunwayStateThrottled(); } catch {}
+  try { publishRunwayState(); } catch {}
   return true;
 }
 
@@ -1427,7 +1422,7 @@ io.on('connection', (socket) => {
   console.log('🟢 Cliente conectado vía WebSocket:', socket.id);
 
   socket.on('update', (data) => {
-    
+    console.log('✈️ UPDATE recibido:', data);
 
     const {
       name,
@@ -1474,7 +1469,7 @@ io.on('connection', (socket) => {
 
     socketIdToName[socket.id] = name;
 
-    
+    console.log('🗺️ Estado actual de userLocations:', userLocations);
 
  const payload = {
   name,
@@ -1496,12 +1491,12 @@ socket.broadcast.emit('traffic-update', [payload]);
     
 
     // ►► (AGREGADO) replanificar si hay solicitudes pendientes y cambió la kinemática
-    //if (runwayState.landings.length || runwayState.takeoffs.length) {
-     // enforceCompliance();
-     // planRunwaySequence();
-     // publishRunwayState();
-   // }
-});
+    if (runwayState.landings.length || runwayState.takeoffs.length) {
+      enforceCompliance();
+      planRunwaySequence();
+      publishRunwayState();
+    }
+ });
 
    // === Estado operativo reportado por el frontend ===
 socket.on('ops/state', (msg) => {
@@ -1526,27 +1521,27 @@ socket.on('ops/state', (msg) => {
       // Si NO era líder, sigue el flujo normal más abajo
     }
 
-  // ✅ (MOVIDO AQUÍ) Anti-FINAL: recién después del trigger
-  const leader = leaderName();
-  let finalState = state;
+// ✅ (MOVIDO AQUÍ) Anti-FINAL: recién después del trigger
+const leader = leaderName();
+let finalState = state;
 
-  if (state === 'FINAL' && leader && name !== leader) {
-    // ignorar FINAL reportado por alguien que no es #1
-    finalState = 'B1';
-    opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
-    lastOpsStateByName.set(name, finalState);
-  } else {
-    // ya lo guardaste arriba, pero aseguramos consistencia
-    opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
-  }
+if (state === 'FINAL' && leader && name !== leader) {
+  // ignorar FINAL reportado por alguien que no es #1
+  finalState = 'B1';
+  opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
+  lastOpsStateByName.set(name, finalState);
+} else {
+  // ya lo guardaste arriba, pero aseguramos consistencia
+  opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
+}
 
-  // ✅ AHORA sí: broadcast global del OPS para que todos lo vean inmediato
-  io.emit('ops/state', {
-    name,
-    state: finalState,
-    ts: Date.now(),
-    aux: aux || null,
-  });
+// ✅ AHORA sí: broadcast global del OPS para que todos lo vean inmediato
+io.emit('ops/state', {
+  name,
+  state: finalState,
+  ts: Date.now(),
+  aux: aux || null,
+});
 
 
     // ▸ Ajustes suaves al scheduler según estado
@@ -1586,7 +1581,7 @@ socket.on('ops/state', (msg) => {
     if (runwayState.landings.length || runwayState.takeoffs.length) {
       planRunwaySequence();
     }
-    publishRunwayStateThrottled();
+    publishRunwayState();
   } catch (e) {
     console.error('ops/state error:', e);
   }
@@ -1624,7 +1619,7 @@ socket.on('ops/state', (msg) => {
       // ►► (AGREGADO) replanificar con nueva cabecera/airfield
       if (runwayState.landings.length || runwayState.takeoffs.length) {
         planRunwaySequence();
-        publishRunwayStateThrottled();
+        publishRunwayState();
       }
     } catch (e) {
       console.error('airfield-upsert error:', e);
@@ -1638,7 +1633,7 @@ socket.on('ops/state', (msg) => {
         console.log('📨 airfield-get → enviado airfield-update al solicitante');
       }
       // ►► (AGREGADO) también enviar estado de pista al abrir cartel
-      publishRunwayStateThrottled();
+      publishRunwayState();
     } catch (e) {
       console.error('airfield-get error:', e);
     }
@@ -1769,7 +1764,7 @@ socket.on('air-guardian/leave', () => {
   runwayState.landings = runwayState.landings.filter(x => x.name !== name);
   runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
   planRunwaySequence();
-  publishRunwayStateThrottled();
+  publishRunwayState();
 });
 
 
@@ -1793,7 +1788,7 @@ socket.on('air-guardian/leave', () => {
     runwayState.landings = runwayState.landings.filter(x => x.name !== name);
     runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
     planRunwaySequence();
-    publishRunwayStateThrottled();
+    publishRunwayState();
   });
 
   // 🛑 Cliente pide ser eliminado manualmente (cambio de avión o sale de Radar)
@@ -1822,7 +1817,7 @@ socket.on('air-guardian/leave', () => {
     runwayState.landings = runwayState.landings.filter(x => x.name !== name);
     runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
     planRunwaySequence();
-    publishRunwayStateThrottled();
+    publishRunwayState();
   });
 
   /* =====================  LISTENERS NUEVOS: RUNWAY  ===================== */
@@ -1903,7 +1898,7 @@ else if (action === 'takeoff') {
 
 
     planRunwaySequence();
-    publishRunwayStateThrottled();
+    publishRunwayState();
   } catch (e) {
     console.error('runway-request error:', e);
   }
@@ -1918,7 +1913,7 @@ else if (action === 'takeoff') {
       runwayState.landings = runwayState.landings.filter(x => x.name !== name);
       runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
       planRunwaySequence();
-      publishRunwayStateThrottled();
+      publishRunwayState();
     } catch (e) {
       console.error('runway-cancel error:', e);
     }
@@ -1949,7 +1944,7 @@ socket.on('runway-occupy', (msg) => {
       } catch {}
     }
 
-    publishRunwayStateThrottled();
+    publishRunwayState();
   } catch (e) {
     console.error('runway-occupy error:', e);
   }
@@ -1969,7 +1964,7 @@ socket.on('runway-occupy', (msg) => {
       if (lastName) setLandingStateForward(lastName, 'RUNWAY_CLEAR');
 
       planRunwaySequence();
-      publishRunwayStateThrottled();
+      publishRunwayState();
     } catch (e) {
       console.error('runway-clear error:', e);
     }
@@ -1980,7 +1975,7 @@ socket.on('runway-occupy', (msg) => {
   socket.on('runway-get', () => {
     try {
       cleanupInUseIfDone();
-      publishRunwayStateThrottled();
+      publishRunwayState();
     } catch (e) {
       console.error('runway-get error:', e);
     }
@@ -2021,7 +2016,7 @@ socket.on('go-around', (msg = {}) => {
     // Reinicia a estado post-arremetida (vuelve a ordenar y luego a B1 cuando corresponda)
     resetLandingState(name, 'ORD');
     planRunwaySequence();
-    publishRunwayStateThrottled();
+    publishRunwayState();
     // 🔁 Volver a fase de aproximación (no tan agresivo como TO_B2)
     try { setApproachPhase(name, 'TO_B1'); } catch {}
 
@@ -2100,7 +2095,7 @@ setInterval(() => {
       runwayState.landings = runwayState.landings.filter(x => x.name !== name);
       runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
       planRunwaySequence();
-      publishRunwayStateThrottled();
+      publishRunwayState();
     }
   }
 }, 30000);
