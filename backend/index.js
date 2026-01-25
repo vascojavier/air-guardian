@@ -64,7 +64,6 @@ function dropFromLandings(name, reason) {
   // Replanificar inmediatamente
   try { enforceCompliance(); } catch {}
   try { planRunwaySequence(); } catch {}
-  try { publishRunwayState(); } catch {}
 }
 
 
@@ -232,7 +231,6 @@ function autoGoAround(name, reason) {
   // replanificar
   enforceCompliance();
   planRunwaySequence();
-  publishRunwayState();
 }
 
 
@@ -1153,6 +1151,15 @@ function maybeSendInstruction(opId, opsById) {
 }
 
 
+let lastPublishMs = 0;
+
+function publishRunwayStateThrottled() {
+  const now = Date.now();
+  if (now - lastPublishMs < 500) return; // máx 2 Hz
+  lastPublishMs = now;
+  publishRunwayState();
+}
+
 
 
 // ========= Publicación de estado =========
@@ -1315,7 +1322,7 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
   }
 
   // (5) Publicar estado actualizado
-  try { publishRunwayState(); } catch {}
+  try { publishRunwayStateThrottled(); } catch {}
   return true;
 }
 
@@ -1420,7 +1427,7 @@ io.on('connection', (socket) => {
   console.log('🟢 Cliente conectado vía WebSocket:', socket.id);
 
   socket.on('update', (data) => {
-    console.log('✈️ UPDATE recibido:', data);
+    
 
     const {
       name,
@@ -1467,7 +1474,7 @@ io.on('connection', (socket) => {
 
     socketIdToName[socket.id] = name;
 
-    console.log('🗺️ Estado actual de userLocations:', userLocations);
+    
 
  const payload = {
   name,
@@ -1489,12 +1496,12 @@ socket.broadcast.emit('traffic-update', [payload]);
     
 
     // ►► (AGREGADO) replanificar si hay solicitudes pendientes y cambió la kinemática
-    if (runwayState.landings.length || runwayState.takeoffs.length) {
-      enforceCompliance();
-      planRunwaySequence();
-      publishRunwayState();
-    }
- });
+    //if (runwayState.landings.length || runwayState.takeoffs.length) {
+     // enforceCompliance();
+     // planRunwaySequence();
+     // publishRunwayState();
+   // }
+});
 
    // === Estado operativo reportado por el frontend ===
 socket.on('ops/state', (msg) => {
@@ -1519,27 +1526,27 @@ socket.on('ops/state', (msg) => {
       // Si NO era líder, sigue el flujo normal más abajo
     }
 
-// ✅ (MOVIDO AQUÍ) Anti-FINAL: recién después del trigger
-const leader = leaderName();
-let finalState = state;
+  // ✅ (MOVIDO AQUÍ) Anti-FINAL: recién después del trigger
+  const leader = leaderName();
+  let finalState = state;
 
-if (state === 'FINAL' && leader && name !== leader) {
-  // ignorar FINAL reportado por alguien que no es #1
-  finalState = 'B1';
-  opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
-  lastOpsStateByName.set(name, finalState);
-} else {
-  // ya lo guardaste arriba, pero aseguramos consistencia
-  opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
-}
+  if (state === 'FINAL' && leader && name !== leader) {
+    // ignorar FINAL reportado por alguien que no es #1
+    finalState = 'B1';
+    opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
+    lastOpsStateByName.set(name, finalState);
+  } else {
+    // ya lo guardaste arriba, pero aseguramos consistencia
+    opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
+  }
 
-// ✅ AHORA sí: broadcast global del OPS para que todos lo vean inmediato
-io.emit('ops/state', {
-  name,
-  state: finalState,
-  ts: Date.now(),
-  aux: aux || null,
-});
+  // ✅ AHORA sí: broadcast global del OPS para que todos lo vean inmediato
+  io.emit('ops/state', {
+    name,
+    state: finalState,
+    ts: Date.now(),
+    aux: aux || null,
+  });
 
 
     // ▸ Ajustes suaves al scheduler según estado
@@ -1579,7 +1586,7 @@ io.emit('ops/state', {
     if (runwayState.landings.length || runwayState.takeoffs.length) {
       planRunwaySequence();
     }
-    publishRunwayState();
+    publishRunwayStateThrottled();
   } catch (e) {
     console.error('ops/state error:', e);
   }
@@ -1617,7 +1624,7 @@ io.emit('ops/state', {
       // ►► (AGREGADO) replanificar con nueva cabecera/airfield
       if (runwayState.landings.length || runwayState.takeoffs.length) {
         planRunwaySequence();
-        publishRunwayState();
+        publishRunwayStateThrottled();
       }
     } catch (e) {
       console.error('airfield-upsert error:', e);
@@ -1631,7 +1638,7 @@ io.emit('ops/state', {
         console.log('📨 airfield-get → enviado airfield-update al solicitante');
       }
       // ►► (AGREGADO) también enviar estado de pista al abrir cartel
-      publishRunwayState();
+      publishRunwayStateThrottled();
     } catch (e) {
       console.error('airfield-get error:', e);
     }
@@ -1762,7 +1769,7 @@ socket.on('air-guardian/leave', () => {
   runwayState.landings = runwayState.landings.filter(x => x.name !== name);
   runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
   planRunwaySequence();
-  publishRunwayState();
+  publishRunwayStateThrottled();
 });
 
 
@@ -1786,7 +1793,7 @@ socket.on('air-guardian/leave', () => {
     runwayState.landings = runwayState.landings.filter(x => x.name !== name);
     runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
     planRunwaySequence();
-    publishRunwayState();
+    publishRunwayStateThrottled();
   });
 
   // 🛑 Cliente pide ser eliminado manualmente (cambio de avión o sale de Radar)
@@ -1815,7 +1822,7 @@ socket.on('air-guardian/leave', () => {
     runwayState.landings = runwayState.landings.filter(x => x.name !== name);
     runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
     planRunwaySequence();
-    publishRunwayState();
+    publishRunwayStateThrottled();
   });
 
   /* =====================  LISTENERS NUEVOS: RUNWAY  ===================== */
@@ -1896,7 +1903,7 @@ else if (action === 'takeoff') {
 
 
     planRunwaySequence();
-    publishRunwayState();
+    publishRunwayStateThrottled();
   } catch (e) {
     console.error('runway-request error:', e);
   }
@@ -1911,7 +1918,7 @@ else if (action === 'takeoff') {
       runwayState.landings = runwayState.landings.filter(x => x.name !== name);
       runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
       planRunwaySequence();
-      publishRunwayState();
+      publishRunwayStateThrottled();
     } catch (e) {
       console.error('runway-cancel error:', e);
     }
@@ -1942,7 +1949,7 @@ socket.on('runway-occupy', (msg) => {
       } catch {}
     }
 
-    publishRunwayState();
+    publishRunwayStateThrottled();
   } catch (e) {
     console.error('runway-occupy error:', e);
   }
@@ -1962,7 +1969,7 @@ socket.on('runway-occupy', (msg) => {
       if (lastName) setLandingStateForward(lastName, 'RUNWAY_CLEAR');
 
       planRunwaySequence();
-      publishRunwayState();
+      publishRunwayStateThrottled();
     } catch (e) {
       console.error('runway-clear error:', e);
     }
@@ -1973,7 +1980,7 @@ socket.on('runway-occupy', (msg) => {
   socket.on('runway-get', () => {
     try {
       cleanupInUseIfDone();
-      publishRunwayState();
+      publishRunwayStateThrottled();
     } catch (e) {
       console.error('runway-get error:', e);
     }
@@ -2014,7 +2021,7 @@ socket.on('go-around', (msg = {}) => {
     // Reinicia a estado post-arremetida (vuelve a ordenar y luego a B1 cuando corresponda)
     resetLandingState(name, 'ORD');
     planRunwaySequence();
-    publishRunwayState();
+    publishRunwayStateThrottled();
     // 🔁 Volver a fase de aproximación (no tan agresivo como TO_B2)
     try { setApproachPhase(name, 'TO_B1'); } catch {}
 
@@ -2093,7 +2100,7 @@ setInterval(() => {
       runwayState.landings = runwayState.landings.filter(x => x.name !== name);
       runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
       planRunwaySequence();
-      publishRunwayState();
+      publishRunwayStateThrottled();
     }
   }
 }, 30000);

@@ -3207,7 +3207,13 @@ if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
     const landings = runwayState?.state?.landings || [];
 
     let idx = landings.findIndex((x:any) => x?.name === me);
-    if (idx === -1) { setNavTargetSafe(null); return; }
+
+    // ✅ NO BORRES el target si por 1 update no aparezco en landings
+    // (pasa cuando el server reordena / publica en dos pasos)
+    if (idx === -1) { 
+      return; 
+    }
+
 
     // ✅ líder real según backend (landings[0])
     const leaderName = landings[0]?.name;
