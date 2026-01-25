@@ -691,44 +691,42 @@ function enforceCompliance() {
     // === LEADER OUT: timeout en B1/FINAL sin ocupar pista ===
     // Sólo aplica al #1 (líder). Si no cumple, pierde turno y sale de la cola.
     const leader = leaderName();
-    if (leader && leader === L.name) {
-      const stL = getOpsState(L.name);
-      const inFinalLikeL = (stL === 'B1' || stL === 'FINAL');
+const isFinalL = (stL === 'FINAL');
 
-      if (inFinalLikeL) {
-        const S2 = getAtcSettings();
-        const lease = turnLeaseByName.get(L.name) || { startMs: now, lastAlongM: null, lastSeenMs: now };
-        if (!turnLeaseByName.has(L.name)) turnLeaseByName.set(L.name, lease);
+if (isFinalL) {
+  const S2 = getAtcSettings();
+  const lease = turnLeaseByName.get(L.name) || { startMs: now, lastAlongM: null, lastSeenMs: now };
+  if (!turnLeaseByName.has(L.name)) turnLeaseByName.set(L.name, lease);
 
-        const elapsed = now - lease.startMs;
+  const elapsed = now - lease.startMs;
 
-        // 1) Overshoot: cruzó umbral sin ocupar
-        if (crossedThreshold(L.name)) {
-          dropFromLandings(L.name, 'pasó el umbral sin ocupar pista');
-          continue;
-        }
+  // 1) Overshoot: cruzó umbral sin ocupar
+  if (crossedThreshold(L.name)) {
+    dropFromLandings(L.name, 'pasó el umbral sin ocupar pista');
+    continue;
+  }
 
-        // 2) Timeout en FINAL/B1
-        if (elapsed >= S2.LEADER_TIMEOUT_MS) {
-          dropFromLandings(L.name, 'timeout como #1 en FINAL/B1');
-          continue;
-        }
+  // 2) Timeout SOLO en FINAL
+  if (elapsed >= S2.LEADER_TIMEOUT_MS) {
+    dropFromLandings(L.name, 'timeout como #1 en FINAL');
+    continue;
+  }
 
-        // 3) Se alejó demasiado del umbral activo (desobedeció / abandonó circuito)
-        const g = activeRunwayGeom();
-        const uL = userLocations[L.name];
-        if (g && uL) {
-          const dThr = getDistance(uL.latitude, uL.longitude, g.thr.lat, g.thr.lon);
-          if (isFinite(dThr) && dThr >= S2.LEADER_DRIFT_MAX_M) {
-            dropFromLandings(L.name, 'se alejó demasiado del umbral activo');
-            continue;
-          }
-        }
-      } else {
-        // Si el líder no está en final-like, reseteamos lease (aún no "consumió" turno)
-        clearTurnLease(L.name);
-      }
+  // 3) Drift SOLO en FINAL
+  const g = activeRunwayGeom();
+  const uL = userLocations[L.name];
+  if (g && uL) {
+    const dThr = getDistance(uL.latitude, uL.longitude, g.thr.lat, g.thr.lon);
+    if (isFinite(dThr) && dThr >= S2.LEADER_DRIFT_MAX_M) {
+      dropFromLandings(L.name, 'se alejó demasiado del umbral activo');
+      continue;
     }
+  }
+} else {
+  // Si NO está en FINAL, no le corre el timer de OUT (B1 es transitorio)
+  clearTurnLease(L.name);
+}
+
 
 
     // Refrescar committed siempre
