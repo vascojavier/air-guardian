@@ -1209,6 +1209,7 @@ function publishRunwayState() {
   const slots = runwayState.timelineSlots || [];
   const airfield = lastAirfield || null;
 
+  // Compatibilidad con tu UI actual (timeline simple de aterrizajes)
   const timelineCompat = slots
     .filter(s => s.type === 'ARR')
     .map(s => ({
@@ -1218,18 +1219,72 @@ function publishRunwayState() {
       slotMin: Math.round((s.endMs - s.startMs) / 60000),
     }));
 
-  const assignedOpsStates = computeAssignedOpsStates();
+  // --- FRONT-REPORTED OPS (lo que reporta el frontend) ---
+  const reportedOpsStates = Object.fromEntries(
+    Array.from(opsStateByName.entries()).map(([k, v]) => [k, v.state])
+  );
 
+  // --- BACKEND ASSIGNMENTS (la verdad para navegación) ---
+  // assignedOps: dinámica central tipo A_TO_Bx + estados fijos B1/FINAL
+  const assignedOps = {}; // name -> 'A_TO_B2'|'A_TO_B3'|...|'B1'|'FINAL'
+  const opsTargets  = {}; // name -> { fix:'B2'|'B3'|'B1'|'FINAL', lat, lon }
+
+  const gNow = activeRunwayGeom();
+  const leaderNow = leaderName();
+
+  for (const L of runwayState.landings || []) {
+    const name = L.name;
+    if (!name) continue;
+
+    const stReported = getOpsState(name); // lo que reporta el front
+    const b1Latched = isB1Latched(name) || stReported === 'B1';
+
+    // #1 (líder): target FINAL (umbral activo)
+    if (leaderNow && name === leaderNow) {
+      if (gNow?.thr && typeof gNow.thr.lat === 'number' && typeof gNow.thr.lon === 'number') {
+        assignedOps[name] = 'FINAL';
+        opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+      } else {
+        assignedOps[name] = 'FINAL';
+      }
+      continue;
+    }
+
+    // Latched en B1: fijo (no compite)
+    if (b1Latched) {
+      const asg = assignBeaconsFor(name);
+      assignedOps[name] = 'B1';
+      if (asg?.b1 && typeof asg.b1.lat === 'number' && typeof asg.b1.lon === 'number') {
+        opsTargets[name] = { fix: 'B1', lat: asg.b1.lat, lon: asg.b1.lon };
+      }
+      continue;
+    }
+
+    // Resto: compiten por ETA => A_TO_Bx (Bx viene de assignBeaconsFor)
+    const asg = assignBeaconsFor(name);
+    const bn = asg?.beaconName || 'B2';
+    const lat = asg?.b2?.lat;
+    const lon = asg?.b2?.lon;
+
+    assignedOps[name] = `A_TO_${bn}`;
+    if (typeof lat === 'number' && typeof lon === 'number') {
+      opsTargets[name] = { fix: bn, lat, lon };
+    }
+  }
+
+  // Emit principal runway-state (lo que Radar necesita)
   io.emit('runway-state', {
     airfield,
     state: {
-      // ✅ ESTE es el mapa que tu Radar debe obedecer para NAV
-      opsStates: assignedOpsStates,
+      // explícito: lo reportado por el front
+      reportedOpsStates,
 
-      // opcional: lo reportado por frontend (útil para debug)
-      reportedOpsStates: Object.fromEntries(
-        Array.from(opsStateByName.entries()).map(([k, v]) => [k, v.state])
-      ),
+      // compatibilidad: si tu Radar todavía mira opsStates, por ahora dejamos “lo reportado”
+      opsStates: reportedOpsStates,
+
+      // nuevo: lo que decide el backend para navegación
+      assignedOps,
+      opsTargets,
 
       landings: runwayState.landings,
       takeoffs: runwayState.takeoffs,
@@ -1242,10 +1297,10 @@ function publishRunwayState() {
     },
   });
 
-  // Secuencia “avanzada” + beacons para guiar
+  // ===== sequence-update (tu stream avanzado) =====
   const g = activeRunwayGeom();
 
-  // Construir beacons “apilados” para cada llegada en orden
+  // Beacons “apilados” para cada llegada en orden
   let stackedBeacons = [];
   if (g) {
     const arrSlots = slots.filter(s => s.type === 'ARR');
@@ -1254,10 +1309,10 @@ function publishRunwayState() {
       const asg = assignBeaconsFor(name);
       const beaconName = asg?.beaconName || `B${idx + 2}`;
       return {
-        name,               // nombre del avión
-        beacon: beaconName, // 'B2','B3','B4',...
-        lat: asg?.b2.lat ?? g.B2.lat,
-        lon: asg?.b2.lon ?? g.B2.lon,
+        name,
+        beacon: beaconName,
+        lat: asg?.b2?.lat ?? g.B2.lat,
+        lon: asg?.b2?.lon ?? g.B2.lon,
       };
     });
   }
@@ -1267,12 +1322,12 @@ function publishRunwayState() {
     airfield,
     beacons: g ? {
       B1: g.B1,
-      B2: g.B2,          // base
-      stack: stackedBeacons,  // 👈 NUEVO: beacons B2/B3/B4... por avión
+      B2: g.B2,
+      stack: stackedBeacons,
     } : null,
     slots: slots.map((s, idx) => {
       const op = lastOpsById.get(s.opId) || {};
-      const prev = idx > 0 ? slots[idx-1] : null;
+      const prev = idx > 0 ? slots[idx - 1] : null;
       const prevOp = prev ? lastOpsById.get(prev.opId) : null;
 
       const rotSec = ROT_BY_CAT[op.category] ?? 100;
@@ -1295,10 +1350,7 @@ function publishRunwayState() {
       };
     }),
   });
-
 }
-
-
 
 
 // ========= Ciclo principal =========
@@ -1552,28 +1604,37 @@ socket.on('ops/state', (msg) => {
     const { name, state, aux } = msg || {};
     if (!name || !state) return;
 
-    // ✅ Detectar flanco real
-    const prev = lastOpsStateByName.get(name) || null;
-    lastOpsStateByName.set(name, state);
-
-    // ✅ Trigger consume líder si entra a RUNWAY_OCCUPIED
-    if (prev !== 'RUNWAY_OCCUPIED' && state === 'RUNWAY_OCCUPIED') {
-      const didConsume = consumeLeaderOnRunwayOccupied(name);
-      if (didConsume) return; // ya publicó estado adentro
-    }
-
-    // ✅ Anti-FINAL para no líderes
+    // --- normalizamos FINAL sólo si NO es el líder ---
     const leader = leaderName();
     let finalState = state;
+
     if (state === 'FINAL' && leader && name !== leader) {
+      // ignorar FINAL reportado por alguien que no es #1
       finalState = 'B1';
     }
 
-    // Guardar estado final
+    // Guardar ops reportado por el frontend
     opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
 
-    // Broadcast
-    io.emit('ops/state', { name, state: finalState, ts: Date.now(), aux: aux || null });
+    // ✅ Detectar flanco real (prev -> next)
+    const prev = lastOpsStateByName.get(name) || null;
+    lastOpsStateByName.set(name, finalState);
+
+    // ✅ Broadcast ÚNICO del OPS reportado
+    io.emit('ops/state', {
+      name,
+      state: finalState,
+      ts: Date.now(),
+      aux: aux || null,
+    });
+
+    // ✅ Trigger: SOLO si hubo flanco hacia RUNWAY_OCCUPIED y SOLO si es el líder actual
+    if (prev !== 'RUNWAY_OCCUPIED' && finalState === 'RUNWAY_OCCUPIED') {
+      const didConsume = consumeLeaderOnRunwayOccupied(name);
+      if (didConsume) {
+        return;
+      }
+    }
 
     // Ajustes suaves al scheduler
     if (finalState === 'RUNWAY_OCCUPIED' && !runwayState.inUse) {
@@ -1612,14 +1673,12 @@ socket.on('ops/state', (msg) => {
     if (runwayState.landings.length || runwayState.takeoffs.length) {
       planRunwaySequence();
     }
+
     publishRunwayState();
   } catch (e) {
     console.error('ops/state error:', e);
   }
 });
-
-
-
 
 
   socket.on('get-traffic', () => {

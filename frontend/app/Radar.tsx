@@ -405,7 +405,13 @@ const refreshPinnedDistance = () => {
       inUse?: any | null;
       timeline?: any[];
       serverTime?: number;
-    }
+
+      // ✅ NUEVO (backend truth)
+      assignedOps?: Record<string, string>;
+      opsTargets?: Record<string, { fix?: string; lat: number; lon: number }>;
+      reportedOpsStates?: Record<string, OpsState>;
+      opsStates?: Record<string, OpsState>;
+    };
   }>(null);
 
   function emitOpsNow(next: OpsState) {
@@ -2761,9 +2767,9 @@ useEffect(() => {
   // 1) "Liberar pista" solo si voy lento sobre la pista (< 50 km/h)
   const agl = getAGLmeters();
   const speedKmh =
-  (myPlane && typeof myPlane.speed === 'number') ? myPlane.speed : 0;
+    (myPlane && typeof myPlane.speed === 'number') ? myPlane.speed : 0;
 
-    const touchdownLike =
+  const touchdownLike =
     isOnRunwayStrip() &&
     agl < 8 &&
     speedKmh < 80;
@@ -2773,9 +2779,8 @@ useEffect(() => {
   if (touchdownLike && speedKmh < 50) {
     flashBanner(t("runway.vacateRunway"), 'free-runway');
 
-    // Guía al APRON inmediatamente (línea azul cambia YA)
-    const apr = getApronPoint();
-    if (apr) { setNavTargetSafe(apr); apronLatchRef.current = true; }
+    // ✅ NO setNavTarget acá (lo hace el NAV único vía apronLatchRef)
+    apronLatchRef.current = true;
 
     // Forzar OPS a RUNWAY_OCCUPIED si aún estaba en FINAL
     emitOpsNow('RUNWAY_OCCUPIED');
@@ -2789,7 +2794,7 @@ useEffect(() => {
       markRunwayOccupy('landing');
       iAmOccupyingRef.current = 'landing';
 
-      // ✅ acá sí: ya aterrizaste, podés cancelar la “request”
+      // ✅ ya aterrizaste, podés cancelar la “request”
       try { cancelMyRequest(); } catch {}
       landingRequestedRef.current = false;
       finalLockedRef.current = false;
@@ -2800,8 +2805,8 @@ useEffect(() => {
     // Versión conservadora: hacer "clear" solo si venías ocupando
     // o si estás en un estado de tierra real cerca de la cabecera activa
     let activeEnd: 'A' | 'B' | null = null;
-    if (rw && (rw as any).active_end === 'B') activeEnd = 'B';
-    else if (rw) activeEnd = 'A';
+    if ((rw as any).active_end === 'B') activeEnd = 'B';
+    else activeEnd = 'A';
 
     const nearActiveThreshold =
       activeEnd ? isNearThreshold(activeEnd, 200) : false;
@@ -2810,24 +2815,28 @@ useEffect(() => {
       markRunwayClear();
 
       // Reset de aproximación y OPS visible
-      
       finalLockedRef.current = false;
       emitOpsNow('RUNWAY_CLEAR');
 
-      // Guía a APRON al salir de pista / tierra real
-      const apr2 = getApronPoint();
-      if (apr2) { setNavTargetSafe(apr2); apronLatchRef.current = true; }
+      // ✅ NO setNavTarget acá (lo hace el NAV único vía apronLatchRef)
+      apronLatchRef.current = true;
 
       iAmOccupyingRef.current = null;
     }
     // Si no se cumple la condición conservadora, NO limpies nada.
   }
 
-
-
   // 2) Permisos según turno y huecos
   const me = myPlane?.id || username;
-  const st = runwayState?.state;
+  const st = (runwayState as any)?.state as any;
+
+  console.log('[DYN]', {
+    me,
+    assigned: st?.assignedOps?.[me],
+    target: st?.opsTargets?.[me],
+    reported: st?.reportedOpsStates?.[me],
+  });
+
   if (!st) return;
 
   // permiso de aterrizar: sólo si soy #1, pista libre y estoy dentro del radio según tipo
@@ -2843,12 +2852,11 @@ useEffect(() => {
           flashBanner(t("runway.clearedToLand"), 'clr-land');
           landClearShownRef.current = true; // mostrar una vez por “aproximación”
         }
+
         if (activeThreshold) {
-        finalLockedRef.current = true;
-        navPhaseRef.current = 'FINAL';
-        lastPhaseSwitchRef.current = Date.now(); // evita dwell viejo
-        setNavTargetSafe(activeThreshold);
-  }
+          // ✅ lock final, pero NO setNavTarget acá
+          finalLockedRef.current = true;
+        }
 
       } else {
         // si te volviste a alejar, reseteamos para poder volver a mostrar al reingresar
@@ -2860,16 +2868,19 @@ useEffect(() => {
     landClearShownRef.current = false;
   }
 
-
   // solicitud despegue: guiar a cabecera, ocupar, y despegar
-  if (takeoffRequestedRef.current && defaultActionForMe()==='takeoff') {
-    const activeEnd = rw.active_end==='B'?'B':'A';
+  if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
+    const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
     const nearThr = isNearThreshold(activeEnd, 80);
-    const nextLanding = (st.timeline||[]).find((x:any)=>x.action==='landing' && new Date(x.at).getTime() > Date.now());
-    const gapMin = nextLanding ? Math.round((new Date(nextLanding.at).getTime()-Date.now())/60000) : 999;
+    const nextLanding = (st.timeline || []).find((x: any) =>
+      x.action === 'landing' && new Date(x.at).getTime() > Date.now()
+    );
+    const gapMin = nextLanding
+      ? Math.round((new Date(nextLanding.at).getTime() - Date.now()) / 60000)
+      : 999;
 
     if (nearThr) {
-      const meTk = (st.takeoffs||[]).find((t:any)=>t.name===me);
+      const meTk = (st.takeoffs || []).find((tt: any) => tt.name === me);
       const waited = meTk?.waitedMin ?? 0;
       const opsMap = (runwayState as any)?.state?.opsStates || {};
       const landings = st.landings || [];
@@ -2890,84 +2901,89 @@ useEffect(() => {
         !landingOnShortFinal &&
         (gapMin >= 5 || waited >= 15);
 
-        if (can && iAmOccupyingRef.current !== 'takeoff') {
-        flashBanner(t("runway.lineUp"), 'lineup');
-
-        if (isOnRunwayStrip()) {
-          markRunwayOccupy('takeoff');
-          iAmOccupyingRef.current = 'takeoff';
-          flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
-        }
-        } else {
-          // opcional: feedback al piloto
-          if (landingOnShortFinal) flashBanner(t("runway.trafficOnFinalWait"), 'tko-wait-final');
-        }
-
-
       if (can && iAmOccupyingRef.current !== 'takeoff') {
         flashBanner(t("runway.lineUp"), 'lineup');
-        // cuando te vemos entrar a pista cerca de cabecera -> occupy + "puede despegar"
+
         if (isOnRunwayStrip()) {
           markRunwayOccupy('takeoff');
           iAmOccupyingRef.current = 'takeoff';
           flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
         }
+      } else {
+        if (landingOnShortFinal) flashBanner(t("runway.trafficOnFinalWait"), 'tko-wait-final');
       }
     }
   }
 
-
 }, [myPlane.lat, myPlane.lon, myPlane.alt, myPlane.speed, runwayState, rw]);
 
-// REEMPLAZO DEL VIEJO NAV
 
+// ===============================
+// NAV (ÚNICO): backend → ATC → takeoff → apron/ground → landing(OPS)
+// ===============================
 useEffect(() => {
   const me = myPlane?.id || username;
   if (!me) return;
 
-  const myOps = getOpsOf(me);
+  const st = runwayState?.state;
 
-  // takeoff requested: siempre threshold
-  if (takeoffRequestedRef.current && defaultActionForMe() === "takeoff") {
-    const end = rw?.active_end === "B" ? "B" : "A";
-    const thr = end === "B" ? B_runway : A_runway;
+  // 1) PRIORIDAD ABSOLUTA: backend opsTargets
+  const backendTarget = st?.opsTargets?.[me];
+  if (
+    backendTarget &&
+    typeof backendTarget.lat === 'number' &&
+    typeof backendTarget.lon === 'number'
+  ) {
+    setNavTargetSafe({ latitude: backendTarget.lat, longitude: backendTarget.lon });
+    return;
+  }
+
+  // 2) Si ATC dirigido está activo, no tocar navTarget (lo maneja atc-instruction)
+  if (serverATCRef.current) return;
+
+  // 3) TAKEOFF: siempre a cabecera activa
+  if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
+    const end = rw?.active_end === 'B' ? 'B' : 'A';
+    const thr = end === 'B' ? B_runway : A_runway;
     setNavTargetSafe(thr ?? null);
     return;
   }
 
-  // latch apron / ground ops
+  // 4) APRON latch / ground ops → apron
   if (apronLatchRef.current) {
-    const apr = getApronPoint();
-    setNavTargetSafe(apr ?? null);
+    setNavTargetSafe(getApronPoint() ?? null);
     return;
   }
+
+  const myOpsFromMap = st?.opsStates?.[me] ?? null;
+  const myOps = (myOpsFromMap || (lastOpsStateRef.current as OpsState | null));
 
   if (myOps && GROUND_OPS.has(myOps)) {
-    const apr = getApronPoint();
-    setNavTargetSafe(apr ?? null);
+    setNavTargetSafe(getApronPoint() ?? null);
     return;
   }
 
-  // si no hay pedido de aterrizaje, no guiar
-  if (!landingRequestedRef.current || defaultActionForMe() !== "land") {
+  // 5) Si no pedí aterrizaje, no guiar
+  if (!landingRequestedRef.current || defaultActionForMe() !== 'land') {
     setNavTargetSafe(null);
     return;
   }
 
-  // --- guía por OPS ---
-  if (myOps === "FINAL") {
+  // 6) LANDING por OPS (fallback si no hay backendTarget)
+  if (myOps === 'FINAL') {
     setNavTargetSafe(activeThreshold ?? null);
     return;
   }
-  if (myOps === "B1") {
+
+  if (myOps === 'B1') {
     setNavTargetSafe(beaconB1 ?? null);
     return;
   }
 
-  // A_TO_B2, A_TO_B3, A_TO_B4...
-  if (typeof myOps === "string" && myOps.startsWith("A_TO_B")) {
-    const n = Number(myOps.replace("A_TO_B", "")); // 2,3,4...
-    if (n === 2) return setNavTargetSafe(beaconB2 ?? null);
+  // A_TO_B2 / A_TO_B3 / A_TO_B4...
+  if (typeof myOps === 'string' && myOps.startsWith('A_TO_B')) {
+    const n = Number(myOps.replace('A_TO_B', '')); // 2,3,4...
+    if (n === 2) { setNavTargetSafe(beaconB2 ?? null); return; }
     if (n >= 3) {
       const idx = n - 3; // B3 -> 0
       const b = extraBeacons[idx];
@@ -2976,163 +2992,32 @@ useEffect(() => {
     }
   }
 
-  // fallback: si no hay ops claro, no tocar el target
+  // B2/B3/B4 directos (si alguna vez los usás)
+  if (typeof myOps === 'string' && /^B\d+$/.test(myOps)) {
+    const n = Number(myOps.slice(1));
+    if (n === 1) { setNavTargetSafe(beaconB1 ?? null); return; }
+    if (n === 2) { setNavTargetSafe(beaconB2 ?? null); return; }
+    if (n >= 3) {
+      const idx = n - 3;
+      setNavTargetSafe(extraBeacons[idx] ?? beaconB2 ?? null);
+      return;
+    }
+  }
+
+  // fallback: no tocar
 }, [
   username,
-  myPlane?.id,
-  landingRequestedRef.current,
-  takeoffRequestedRef.current,
   runwayState,
   rw,
   beaconB1,
   beaconB2,
   activeThreshold,
   extraBeacons,
+  myPlane?.id,
   myPlane.lat,
   myPlane.lon,
   myPlane.speed,
 ]);
-
-
-
-  // === NAV: guía simple con B2 → B1 → Umbral, según turno en cola (con voz) ===
-useEffect(() => {
-  // ✅ D2: NAV legacy desactivado (idx/ETA/local phases).
-  // A partir de ahora, el navTarget se decide SOLO por OPS (y/o backend).
-  // Dejamos este efecto vacío para no romper dependencias ni orden del archivo.
-
-  // (Opcional) Si querés, podés loguear una vez para verificar que no corre:
-  // console.log('[NAV legacy] disabled');
-
-  return;
-}, [
-  rw,
-  runwayState,          // cambia cuando se replanifica la cola
-  beaconB1, beaconB2,
-  activeThreshold,
-  myPlane.lat, myPlane.lon,
-  username,
-  navTarget
-]);
-
-// Nuevo NAV con Beacons
-
-useEffect(() => {
-  // ✅ Si el backend/ATC está activo, NO tocamos navTarget acá
-  if (serverATCRef.current) return;
-
-  // ✅ Si pedí despegue, guiar SIEMPRE a cabecera activa
-  if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
-    const end = rw?.active_end === 'B' ? 'B' : 'A';
-    const thr = end === 'B' ? B_runway : A_runway;
-    if (
-      thr &&
-      (!navTarget ||
-        navTarget.latitude !== thr.latitude ||
-        navTarget.longitude !== thr.longitude)
-    ) {
-      setNavTargetSafe(thr);
-    }
-    return;
-  }
-
-  // ⛳️ APRON latch: si está activo, mandamos a APRON y salimos
-  {
-    const apr = getApronPoint();
-    if (apronLatchRef.current && apr) {
-      if (
-        !navTarget ||
-        navTarget.latitude !== apr.latitude ||
-        navTarget.longitude !== apr.longitude
-      ) {
-        setNavTargetSafe(apr);
-      }
-      return;
-    }
-  }
-
-  // 👉 Si estoy en ground ops y no pedí aterrizaje: guiar a APRON
-  {
-    const myOps = lastOpsStateRef.current as OpsState | null;
-    if (!landingRequestedRef.current && myOps && GROUND_OPS.has(myOps)) {
-      const apr = getApronPoint();
-      if (apr) {
-        if (
-          !navTarget ||
-          navTarget.latitude !== apr.latitude ||
-          navTarget.longitude !== apr.longitude
-        ) {
-          setNavTargetSafe(apr);
-        }
-      } else {
-        setNavTargetSafe(null);
-      }
-      return;
-    }
-  }
-
-  // ✅ Solo guiamos aterrizaje si lo pediste y tu acción es LAND
-  if (!landingRequestedRef.current || defaultActionForMe() !== 'land') {
-    if (navTarget) setNavTargetSafe(null);
-    return;
-  }
-
-  // ✅ Tomo mi OPS desde backend si existe; si no, uso el último conocido local
-  const me = myPlane?.id || username;
-  const opsMap = (runwayState as any)?.state?.opsStates || {};
-  const myOps = (opsMap[me] as OpsState | undefined) ?? (lastOpsStateRef.current as OpsState | null);
-  console.log('[D1 OPS]', { me, myOps, opsMap });
-
-  // Helpers: cadena de beacons
-  const chain: LatLon[] = [beaconB2, ...extraBeacons].filter(Boolean) as LatLon[];
-
-  // ✅ Resolver target SOLO por OPS
-  let target: LatLon | null = null;
-
-  if (myOps === 'FINAL') {
-    target = activeThreshold ?? null;
-  } else if (myOps === 'B1') {
-    target = beaconB1 ?? null;
-  } else if (typeof myOps === 'string' && myOps.startsWith('B')) {
-    // B2/B3/B4/... → índice en la cadena (B2 es 0)
-    const n = parseInt(myOps.slice(1), 10);
-    if (Number.isFinite(n) && n >= 2) {
-      const idx = Math.min(Math.max(n - 2, 0), Math.max(chain.length - 1, 0));
-      target = chain.length ? chain[idx] : (beaconB2 ?? null);
-    } else {
-      target = beaconB2 ?? null;
-    }
-  } else {
-    // si no tengo OPS válido: no guío
-    target = null;
-  }
-
-  // ✅ Setear solo si cambió (evita renders en loop)
-  if (!target) {
-    if (navTarget) setNavTargetSafe(null);
-    return;
-  }
-
-  if (
-    !navTarget ||
-    navTarget.latitude !== target.latitude ||
-    navTarget.longitude !== target.longitude
-  ) {
-    setNavTargetSafe(target);
-  }
-}, [
-  rw,
-  runwayState,
-  beaconB1,
-  beaconB2,
-  extraBeacons,
-  activeThreshold,
-  username,
-  myPlane?.id,
-  navTarget,
-]);
-
-
 
 
   useEffect(() => {
