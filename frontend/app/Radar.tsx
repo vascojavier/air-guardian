@@ -1333,6 +1333,66 @@ function getOpsOf(name: string): OpsState | null {
   return opsStates[name] ?? null;
 }
 
+type AtcAssigned = string | null; // 'A_TO_Bx' | 'FINAL' | null
+type AtcTarget = { fix?: string; lat: number; lon: number } | null;
+
+function keysForPlane(p: Plane): string[] {
+  const keys = [p.id, p.name, p.callsign].filter(Boolean) as string[];
+  // único + estable
+  return Array.from(new Set(keys.map(String)));
+}
+
+// OPS (frontend) que viene dentro de runway-state (reportedOpsStates)
+function getReportedOpsOfPlane(p: Plane): OpsState | null {
+  const st: any = runwayState?.state;
+  const map =
+    (st?.reportedOpsStates as Record<string, OpsState> | undefined) ??
+    (st?.opsStates as Record<string, OpsState> | undefined);
+
+  if (!map) return null;
+
+  for (const k of keysForPlane(p)) {
+    const v = map[k];
+    if (typeof v === 'string' && v) return v as OpsState;
+  }
+  return null;
+}
+
+
+// ATC (backend) asignación A_TO_Bx / FINAL
+function getAssignedOpsOfPlane(p: Plane): AtcAssigned {
+  const st: any = runwayState?.state;
+  const map = st?.assignedOps as Record<string, string> | undefined;
+  if (!map) return null;
+
+  for (const k of keysForPlane(p)) {
+    const v = map[k];
+    if (typeof v === 'string' && v) return v;
+  }
+  return null;
+}
+
+// Target (backend) fix + lat/lon
+function getOpsTargetOfPlane(p: Plane): AtcTarget {
+  const st: any = runwayState?.state;
+  const map = st?.opsTargets as Record<string, any> | undefined;
+  if (!map) return null;
+
+  for (const k of keysForPlane(p)) {
+    const v = map[k];
+    const lon =
+      typeof v?.lon === 'number' ? v.lon :
+      typeof v?.lng === 'number' ? v.lng :
+      typeof v?.longitude === 'number' ? v.longitude :
+      null;
+
+    if (v && typeof v.lat === 'number' && typeof lon === 'number') {
+      return { fix: v.fix, lat: v.lat, lon };
+    }
+  }
+  return null;
+}
+
 
 function inferOpsForDisplay(p: Plane): OpsState | null {
   const fieldElev = (airfield as any)?.elevation ?? (runwayState?.airfield?.elevation ?? 0);
@@ -1347,6 +1407,7 @@ function inferOpsForDisplay(p: Plane): OpsState | null {
   if (!onRunwayApprox && aglP < 30 && (p.speed ?? 0) >= 5) return 'TAXI_APRON';
   return null;
 }
+
 
 
 function distToActiveThresholdM(): number | null {
@@ -3366,17 +3427,37 @@ useEffect(() => {
           plane.alertLevel
         )}
         onPress={() => {
-         let ops = (getOpsOf(plane.id) || getOpsOf(plane.name) || (plane.callsign ? getOpsOf(plane.callsign) : null)) as OpsState | null;
+          // 1) OPS que ves hoy en mapa (socket 'ops/state') + fallback inferido
+          let ops = (getOpsOf(plane.id) ||
+            getOpsOf(plane.name) ||
+            (plane.callsign ? getOpsOf(plane.callsign) : null)) as OpsState | null;
 
           ops = ops || inferOpsForDisplay(plane);
-          setSelected({ ...plane, ops } as any);
+
+          // 2) OPS (frontend / reported) desde runway-state
+          const opsReported = getReportedOpsOfPlane(plane);
+
+          // 3) ATC (backend / assigned) A_TO_Bx / FINAL desde runway-state
+          const atcAssigned = getAssignedOpsOfPlane(plane);
+
+          // 4) Target (backend) fix + lat/lon desde runway-state
+          const atcTarget = getOpsTargetOfPlane(plane);
+
+          setSelected({
+            ...plane,
+            ops,          // compat con tu UI actual
+            opsReported,  // FRONTEND (reported)
+            atcAssigned,  // BACKEND (assignedOps)
+            atcTarget,    // BACKEND (opsTargets)
+          } as any);
+
           const warning = warnings[plane.id];
           const isPureInfo =
             !warning &&
             (plane.alertLevel === 'none' || !plane.alertLevel);
           selectedHoldUntilRef.current = isPureInfo ? Date.now() + 5000 : 0;
           if (warning) {
-            const w = { ...warning, ops } as any;
+            const w = { ...warning, ops, opsReported, atcAssigned, atcTarget } as any;
             priorizarWarningManual(w);
             maybeEmitWarning(w);
           } else if (
@@ -3399,6 +3480,9 @@ useEffect(() => {
               callsign: plane.callsign,
               aircraftIcon: plane.aircraftIcon,
               ops,
+              opsReported,
+              atcAssigned,
+              atcTarget,
             } as any);
           }
           if (hideSelectedTimeout.current) {

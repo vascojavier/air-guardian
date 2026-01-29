@@ -172,26 +172,13 @@ function updateB1LatchFor(name) {
   const d = getDistance(u.latitude, u.longitude, B1.lat, B1.lon);
   if (!isFinite(d)) return;
 
-  const cur = b1LatchByName.get(name) || { latched: false, farSince: null };
+  // ✅ SOLO latch si el FRONTEND confirmó B1/FINAL
+  const st = getOpsState(name);
+  const latched = (st === 'B1' || st === 'FINAL');
 
-  // Latch ON inmediato
-  if (d <= S.B1_LATCH_ON_M) {
-    cur.latched = true;
-    cur.farSince = null;
-    b1LatchByName.set(name, cur);
-    return;
-  }
+  b1LatchByName.set(name, { latched, farSince: null });
+  return;
 
-  // Latch OFF con histéresis + tiempo sostenido
-  if (cur.latched && d >= S.B1_LATCH_OFF_M) {
-    if (!cur.farSince) cur.farSince = Date.now();
-    if (Date.now() - cur.farSince >= S.B1_LATCH_OFF_SUSTAIN_MS) {
-      cur.latched = false;
-      cur.farSince = null;
-    }
-    b1LatchByName.set(name, cur);
-    return;
-  }
 
   // Si está entre ON y OFF no hacemos nada (histeresis real)
   b1LatchByName.set(name, cur);
@@ -611,28 +598,19 @@ function markAdvancement(name) {
 
 // Determina si ya no debe reordenarse (comprometido a final)
 function isCommitted(name) {
-  const S = getAtcSettings();
   const L = getLandingByName(name);
 
-  // Fuente de verdad del front
+  // ✅ Fuente de verdad: SOLO el OPS reportado por el frontend
   const curOps = getOpsState(name);
   if (curOps === 'FINAL' || curOps === 'B1') return true;
 
-  // ✅ latch anti-histéresis: si está latcheado, es committed
-  if (isB1Latched(name)) return true;
+  // ✅ Si ya estaba congelado por lógica interna (p.ej. cuando el front confirmó B1/FINAL),
+  // lo consideramos committed también.
+  if (L?.frozenLevel === 1) return true;
 
-  if (!L) return false;
-  if (L.frozenLevel === 1) return true;
-  //if (L.phase === 'FINAL') return true;
-
-  // margen a B1
-  const asg = assignBeaconsFor(name);
-  const u = userLocations[name];
-  if (!asg || !u) return false;
-
-  const dB1 = getDistance(u.latitude, u.longitude, asg.b1.lat, asg.b1.lon);
-  return isFinite(dB1) && dB1 <= S.FINAL_LOCK_RADIUS_M;
+  return false;
 }
+
 
 
 function updateApproachPhase(name) {
@@ -1226,8 +1204,6 @@ function publishRunwayState() {
     Array.from(opsStateByName.entries()).map(([k, v]) => [k, v.state])
   );
 
-  // --- BACKEND OPS (autoridad): A_TO_Bx / FINAL ---
-  const backendOpsStates = {}; // name -> 'A_TO_B1'..'A_TO_B30' | 'FINAL'
 
   // --- BACKEND NAV ASSIGNMENTS (target de navegación) ---
   const assignedOps = {}; // name -> 'A_TO_Bx' | 'FINAL'
@@ -1255,11 +1231,11 @@ function publishRunwayState() {
       const okToFinal = (stReported === 'B1' || stReported === 'FINAL' || b1Latched);
 
       if (okToFinal && gNow?.thr) {
-        backendOpsStates[name] = 'FINAL';
+        
         assignedOps[name] = 'FINAL';
         opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
       } else {
-        backendOpsStates[name] = 'A_TO_B1';
+        
         assignedOps[name] = 'A_TO_B1';
 
         const lat = asg?.b1?.lat;
@@ -1276,7 +1252,7 @@ function publishRunwayState() {
     //    (aunque esté latcheado, lo “manda” a B1 con A_TO_B1, pero NO setea OPS=B1)
     // -------------------------
     if (b1Latched) {
-      backendOpsStates[name] = 'A_TO_B1';
+      
       assignedOps[name] = 'A_TO_B1';
 
       const lat = asg?.b1?.lat;
@@ -1292,7 +1268,7 @@ function publishRunwayState() {
     const lat = asg?.b2?.lat;
     const lon = asg?.b2?.lon;
 
-    backendOpsStates[name] = `A_TO_${bn}`;
+    
     assignedOps[name] = `A_TO_${bn}`;
 
     if (typeof lat === 'number' && typeof lon === 'number') {
@@ -1309,8 +1285,9 @@ function publishRunwayState() {
       reportedOpsStates,
 
       // ✅ BACKEND OPS (autoridad): A_TO_Bx / FINAL
-      opsStates: backendOpsStates,
 
+      // opsStates = espejo de lo reportado por el frontend (para UI/debug consistente)
+      opsStates: reportedOpsStates,
 
       // nuevo: lo que decide el backend para navegación
       assignedOps,

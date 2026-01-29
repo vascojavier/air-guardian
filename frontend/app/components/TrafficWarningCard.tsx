@@ -8,7 +8,15 @@ import type { OpsState } from '../../types/OpsState';
 import { useUnits } from '../../src/units/UnitsContext';
 import { useUser } from '../../context/UserContext';
 
-type AircraftLike = (Plane | Warning) & { ops?: OpsState | string | null };
+type AtcTarget = { fix?: string; lat: number; lon: number };
+
+type AircraftLike = (Plane | Warning) & {
+  ops?: OpsState | string | null;          // OPS (frontend / reported)
+  opsReported?: OpsState | string | null;  // OPS reportado (si querés diferenciar)
+  atcAssigned?: string | null;             // ATC (backend): A_TO_Bx / FINAL
+  atcTarget?: AtcTarget | null;            // Target (backend): fix + lat/lon
+};
+
 
 
 type Props = {
@@ -68,6 +76,28 @@ export default function TrafficWarningCard({ aircraft, distance }: Props) {
           OPS: <Text style={styles.value}>{aircraft.ops}</Text>
         </Text>
       )}
+
+            {!!aircraft.opsReported && (
+        <Text style={[styles.label, { color: textColor }]}>
+          OPS (reported): <Text style={styles.value}>{aircraft.opsReported}</Text>
+        </Text>
+      )}
+
+      {!!aircraft.atcAssigned && (
+        <Text style={[styles.label, { color: textColor }]}>
+          ATC (assigned): <Text style={styles.value}>{aircraft.atcAssigned}</Text>
+        </Text>
+      )}
+
+      {!!aircraft.atcTarget && (
+        <Text style={[styles.label, { color: textColor }]}>
+          Target:{" "}
+          <Text style={styles.value}>
+            {(aircraft.atcTarget.fix || "—")} @ {aircraft.atcTarget.lat.toFixed(5)}, {aircraft.atcTarget.lon.toFixed(5)}
+          </Text>
+        </Text>
+      )}
+
 
       <Text style={[styles.label, { color: textColor }]}>
         {t('warnings.distance')}: <Text style={styles.value}>{formatDistance(distance)}</Text>
