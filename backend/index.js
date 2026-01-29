@@ -217,7 +217,6 @@ function autoGoAround(name, reason) {
   // Reset de estados
   resetLandingState(name, 'ORD');
   try { setApproachPhase(name, 'TO_B1'); } catch {}
-  setPhase(name, 'WAIT');
   markAdvancement(name);
 
   // Soltar latch para que no “pegue” B1 artificialmente
@@ -462,7 +461,7 @@ function wakeExtraSeconds(prevCat, nextCat) {
 
 // ========= Estado de scheduler =========
 const runwayState = {
-  landings: [],   // { name, callsign, type, priority, etaB2, etaB1, frozenLevel, phase, phaseTs, lastAdvancementTs, committed }
+  landings: [],   // { name, callsign, type, priority, etaB2, etaB1, frozenLevel, lastAdvancementTs, committed, emergency? }
   takeoffs: [],   // { name, callsign, type, ready, etReady }
   inUse: null,    // { action:'landing'|'takeoff', name, callsign, startedAt, slotMin }
   timelineSlots: [], // [{opId, type:'ARR'|'DEP', startMs, endMs, frozen}]
@@ -542,13 +541,13 @@ function assignBeaconsFor(name) {
       // elegí un radio razonable: 3000–4000m funciona bien
       const LATCH_B1_M = 3500;
 
-      if (isFinite(dToB1) && dToB1 <= LATCH_B1_M) {
-        asg.b1 = baseB1;
+      if (isB1Latched(name)) {
         asg.b2 = baseB1;
         asg.beaconName = 'B1';
         asg.beaconIndex = 1;
         return asg;
       }
+
     }
   } catch {}
 
@@ -599,14 +598,7 @@ function getLandingByName(name) {
   return runwayState.landings.find(l => l.name === name);
 }
 
-function setPhase(name, phase) {
-  const L = getLandingByName(name);
-  if (!L) return;
-  if (L.phase !== phase) {
-    L.phase = phase;
-    L.phaseTs = Date.now();
-  }
-}
+
 
 function markAdvancement(name) {
   const L = getLandingByName(name);
@@ -615,27 +607,34 @@ function markAdvancement(name) {
 
 // Determina si ya no debe reordenarse (comprometido a final)
 function isCommitted(name) {
-  const S = getAtcSettings();   
+  const S = getAtcSettings();
   const L = getLandingByName(name);
-    // Si el front reporta FINAL o B1, consideramos comprometido
+
+  // Fuente de verdad del front
   const curOps = getOpsState(name);
   if (curOps === 'FINAL' || curOps === 'B1') return true;
 
+  // ✅ latch anti-histéresis: si está latcheado, es committed
+  if (isB1Latched(name)) return true;
+
   if (!L) return false;
   if (L.frozenLevel === 1) return true;
-  if (L.phase === 'B1' || L.phase === 'FINAL') return true;
+  //if (L.phase === 'FINAL') return true;
 
-  // margen de 2 km a B1: no reordenar aunque otro tenga ETA menor
+  // margen a B1
   const asg = assignBeaconsFor(name);
   const u = userLocations[name];
   if (!asg || !u) return false;
+
   const dB1 = getDistance(u.latitude, u.longitude, asg.b1.lat, asg.b1.lon);
   return isFinite(dB1) && dB1 <= S.FINAL_LOCK_RADIUS_M;
 }
 
+
 function updateApproachPhase(name) {
   const L = getLandingByName(name);
   if (!L) return;
+
   const asg = assignBeaconsFor(name);
   const u = userLocations[name];
   if (!asg || !u) return;
@@ -643,29 +642,26 @@ function updateApproachPhase(name) {
   const dB2 = getDistance(u.latitude, u.longitude, asg.b2.lat, asg.b2.lon);
   const dB1 = getDistance(u.latitude, u.longitude, asg.b1.lat, asg.b1.lon);
 
-// Llegó a B2 (NOTA: B2+ NO es fijo; no cambia fase del backend)
-// Si querés, podés registrar sticky visual, pero no usarlo para lógica.
-if (isFinite(dB2) && dB2 <= BEACON_REACHED_M) {
-  // NO setPhase('B2')
-  // NO markAdvancement() por B2 (porque no es progreso "congelable")
-  setLandingStateForward(name, 'B2'); // opcional
-}
-
+  // Llegó a B2 (B2+ NO es fijo; no cambia fase del backend)
+  if (isFinite(dB2) && dB2 <= BEACON_REACHED_M) {
+    setLandingStateForward(name, 'B2'); // opcional
+  }
 
   // Llegó a B1
   if (isFinite(dB1) && dB1 <= BEACON_REACHED_M) {
-    if (L.phase !== 'FINAL') {
-      setPhase(name, 'FINAL');     // entra en final
-      markAdvancement(name);
-      L.frozenLevel = 1;           // opcional: freeze al tocar B1
-    }
-      // ➕ avance sticky (NO retrocede)
-      setLandingStateForward(name, 'B1');
+    markAdvancement(name);
+    L.frozenLevel = 1;
+
+    setLandingStateForward(name, 'B1');
+
+    // FSM de aproximación (la que usa maybeSendInstruction)
+    try { setApproachPhase(name, 'FINAL'); } catch {}
   }
 
   // Commit dinámico
   L.committed = isCommitted(name);
 }
+
 
 
 function enforceCompliance() {
@@ -684,7 +680,9 @@ function enforceCompliance() {
 
         // === AUTO GO-AROUND: drift lejos de B1 sostenido ===
     const st = getOpsState(L.name);
-    const inFinalLike = (st === 'B1' || st === 'FINAL' || L.phase === 'FINAL' || L.phase === 'B1');
+    const inFinalLike =
+    (st === 'B1' || st === 'FINAL' || isB1Latched(L.name) || getLandingState(L.name) === 'FINAL');
+
 
 
 
@@ -1225,7 +1223,6 @@ function publishRunwayState() {
   );
 
   // --- BACKEND ASSIGNMENTS (la verdad para navegación) ---
-  // assignedOps: dinámica central tipo A_TO_Bx + estados fijos B1/FINAL
   const assignedOps = {}; // name -> 'A_TO_B2'|'A_TO_B3'|...|'B1'|'FINAL'
   const opsTargets  = {}; // name -> { fix:'B2'|'B3'|'B1'|'FINAL', lat, lon }
 
@@ -1236,16 +1233,27 @@ function publishRunwayState() {
     const name = L.name;
     if (!name) continue;
 
-    const stReported = getOpsState(name); // lo que reporta el front
-    const b1Latched = isB1Latched(name) || stReported === 'B1';
+    // ✅ FIX: b1Latched definido por avión
+    const b1Latched = isB1Latched(name);
 
-    // #1 (líder): target FINAL (umbral activo)
     if (leaderNow && name === leaderNow) {
-      if (gNow?.thr && typeof gNow.thr.lat === 'number' && typeof gNow.thr.lon === 'number') {
+      // FINAL solo si el frontend reportó B1 (o ya está en FINAL por su cuenta)
+      const stReported = getOpsState(name);
+      const okToFinal = (stReported === 'B1' || stReported === 'FINAL' || b1Latched);
+
+      if (okToFinal && gNow?.thr) {
         assignedOps[name] = 'FINAL';
         opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
       } else {
-        assignedOps[name] = 'FINAL';
+        // mientras no confirme B1, guiarlo a B1
+        const asg = assignBeaconsFor(name);
+        assignedOps[name] = 'A_TO_B1';
+
+        const lat = asg?.b1?.lat;
+        const lon = asg?.b1?.lon;
+        if (typeof lat === 'number' && typeof lon === 'number') {
+          opsTargets[name] = { fix: 'B1', lat, lon };
+        }
       }
       continue;
     }
@@ -1276,10 +1284,9 @@ function publishRunwayState() {
   io.emit('runway-state', {
     airfield,
     state: {
-      // explícito: lo reportado por el front
       reportedOpsStates,
 
-      // compatibilidad: si tu Radar todavía mira opsStates, por ahora dejamos “lo reportado”
+      // compatibilidad
       opsStates: reportedOpsStates,
 
       // nuevo: lo que decide el backend para navegación
@@ -1300,7 +1307,6 @@ function publishRunwayState() {
   // ===== sequence-update (tu stream avanzado) =====
   const g = activeRunwayGeom();
 
-  // Beacons “apilados” para cada llegada en orden
   let stackedBeacons = [];
   if (g) {
     const arrSlots = slots.filter(s => s.type === 'ARR');
@@ -1351,6 +1357,7 @@ function publishRunwayState() {
     }),
   });
 }
+
 
 
 // ========= Ciclo principal =========
@@ -1411,7 +1418,8 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
       });
 
       // Server-side: lo ponemos en FINAL para que tu FSM no lo degrade
-      try { setApproachPhase(newLead, 'FINAL'); } catch {}
+      const ph = getApproachPhase(newLead);
+      if (ph !== 'CLRD') setApproachPhase(newLead, 'FINAL');
       try { setLandingStateForward(newLead, 'FINAL'); } catch {}
     }
   }

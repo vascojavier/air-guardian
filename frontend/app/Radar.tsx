@@ -148,6 +148,7 @@ const getDistance = (lat1: number, lon1: number, lat2: number, lon2: number): nu
   const φ2 = toRad(lat2);
   const Δφ = toRad(lat2 - lat1);
   const Δλ = toRad(lon2 - lon1);
+  
 
   const a =
     Math.sin(Δφ / 2) ** 2 +
@@ -156,6 +157,17 @@ const getDistance = (lat1: number, lon1: number, lat2: number, lon2: number): nu
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return EARTH_RADIUS_M * c;
 };
+
+function inRadiusM(
+  p: { lat: number; lon: number },
+  t: { latitude: number; longitude: number } | null,
+  r: number
+) {
+  if (!t) return false;
+  const d = getDistance(p.lat, p.lon, t.latitude, t.longitude);
+  return Number.isFinite(d) && d <= r;
+}
+
 
 function formatDistance(meters: number, settings: any) {
   if (!Number.isFinite(meters)) return "—";
@@ -294,6 +306,9 @@ const Radar = () => {
   const sendIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isFocusedRef = useRef(false);
   const [opsStates, setOpsStates] = useState<Record<string, OpsState>>({});
+  const arrivedSinceRef = useRef<Record<string, number>>({});
+  const ARRIVE_DWELL_MS = 1500; // 1.5s estable dentro del radio
+  const ARRIVE_R_M = 120;       // radio para "llegué" (ajustable)
   
   const { t, i18n } = useTranslation();
   const lang = (i18n.language || "en").toLowerCase();
@@ -414,25 +429,41 @@ const refreshPinnedDistance = () => {
     };
   }>(null);
 
-  function emitOpsNow(next: OpsState) {
-    const now = Date.now();
-    if (lastOpsStateRef.current !== next) {
-      lastOpsStateRef.current = next;
-      lastOpsStateTsRef.current = now;
-      socketRef.current?.emit('ops/state', {
-        name: username,
-        state: next,
-        aux: {
-          airportId: (airfield as any)?.icao || (airfield as any)?.id || (airfield as any)?.name || '',
-          rwyIdent: (rw?.active_end === 'B' ? (rw?.identB ?? '') : (rw?.identA ?? '')) || '',
-          aglM: getAGLmeters(),
-          onRunway: isOnRunwayStrip(),
-          nearHoldShort: isNearThreshold((rw?.active_end === 'B' ? 'B' : 'A') as any, 100),
-        },
-      });
-      console.log('[OPS] Forced emit', next);
-    }
+function emitOpsNow(next: OpsState) {
+  const now = Date.now();
+
+  // ❌ Nunca confirmar FINAL desde frontend
+  if (FRONTEND_FORBIDDEN_OPS.has(next)) {
+    console.log('[OPS] Ignored FINAL (backend-only).');
+    return;
   }
+
+  // ✅ Sólo confirmamos los estados permitidos
+  if (!FRONTEND_ALLOWED_OPS.has(next)) {
+    console.log('[OPS] Ignored (not allowed):', next);
+    return;
+  }
+
+  // ✅ anti-spam: no repetir si no cambió
+  if (lastOpsStateRef.current === next) return;
+
+  lastOpsStateRef.current = next;
+  lastOpsStateTsRef.current = now;
+
+  socketRef.current?.emit('ops/state', {
+    name: username,
+    state: next,
+    aux: {
+      airportId: (airfield as any)?.icao || (airfield as any)?.id || (airfield as any)?.name || '',
+      rwyIdent: (rw?.active_end === 'B' ? (rw?.identB ?? '') : (rw?.identA ?? '')) || '',
+      aglM: getAGLmeters(),
+      onRunway: isOnRunwayStrip(),
+      nearHoldShort: isNearThreshold((rw?.active_end === 'B' ? 'B' : 'A') as any, 100),
+    },
+  });
+
+  console.log('[OPS] emit →', next);
+}
 
   function emitOpsBeacon(label: `B${number}`, phase: 'TO' | 'AT') {
   const st = (phase === 'TO') ? (`A_TO_${label}` as OpsState) : (label as OpsState);
@@ -620,6 +651,24 @@ const emitUpdate = (p: PosUpdate) => {
   const finalLockedRef = useRef(false);
   const lastOpsStateRef = useRef<OpsState | null>(null);
   const lastOpsStateTsRef = useRef<number>(0);
+  // ✅ Estados que el FRONTEND tiene permitido CONFIRMAR al backend
+const FRONTEND_ALLOWED_OPS = new Set<OpsState>([
+  // Beacons confirmables por llegada
+  'B1','B2','B3','B4','B5','B6','B7','B8','B9',
+
+  // Pista / tierra confirmables
+  'RUNWAY_OCCUPIED',
+  'RUNWAY_CLEAR',
+  'TAXI_APRON',
+  'APRON_STOP',
+  'TAXI_TO_RWY',
+  'HOLD_SHORT',
+  'AIRBORNE',
+]);
+
+// ⚠️ El frontend NO confirma FINAL nunca (backend-only asignación/slot)
+const FRONTEND_FORBIDDEN_OPS = new Set<OpsState>(['FINAL']);
+
   const OPS_DWELL_MS = 4000; // permanecer 4s antes de anunciar cambio
   // Mantener visible el APRON hasta volver a volar
   const apronLatchRef = useRef(false);
@@ -814,6 +863,80 @@ const shouldShowApronMarker = useMemo(() => {
   return false;
 }, [rw, myPlane.lat, myPlane.lon, myPlane.speed, runwayState]);
 
+useEffect(() => {
+  const me = myPlane?.id || username;
+  if (!me) return;
+
+  const st = (runwayState as any)?.state;
+  if (!st) return;
+
+  const assigned: string | undefined = st?.assignedOps?.[me];   // 'A_TO_B2'|'A_TO_B3'|'B1'|'FINAL'
+  const target = st?.opsTargets?.[me];                          // {fix, lat, lon}
+
+  if (!assigned) return;
+
+  // Si el backend ya te ve en B1/FINAL, no “auto-reportes” más aquí.
+  // (El backend puede latchear B1 por stReported === 'B1')
+  if (assigned === 'B1' || assigned === 'FINAL') return;
+
+  // Sólo reportamos llegada para A_TO_Bx
+  if (!assigned.startsWith('A_TO_')) return;
+
+  // Resolvemos el fix (por assigned o por opsTargets)
+  const fix =
+    (typeof target?.fix === 'string' ? target.fix : null) ??
+    (assigned.replace('A_TO_', '') as string); // 'B2','B3','B1'
+
+  // Coordenada del fix (preferir opsTargets; si no, local)
+  let fixLL: LatLon | null = null;
+
+  if (typeof target?.lat === 'number' && typeof target?.lon === 'number') {
+    fixLL = { latitude: target.lat, longitude: target.lon };
+  } else {
+    if (fix === 'B1') fixLL = beaconB1;
+    else if (fix === 'B2') fixLL = beaconB2;
+    else if (fix.startsWith('B')) {
+      const n = parseInt(fix.slice(1), 10);
+      if (Number.isFinite(n) && n >= 3) {
+        fixLL = extraBeacons[n - 3] ?? beaconB2 ?? null;
+      }
+    }
+  }
+
+  if (!fixLL) return;
+
+  // Check dentro de radio + dwell
+  const inside = inRadiusM({ lat: myPlane.lat, lon: myPlane.lon }, fixLL, ARRIVE_R_M);
+  const key = `${me}:${fix}`;
+
+  if (!inside) {
+    delete arrivedSinceRef.current[key];
+    return;
+  }
+
+  const now = Date.now();
+  const since = arrivedSinceRef.current[key] ?? now;
+  arrivedSinceRef.current[key] = since;
+
+  if (now - since < ARRIVE_DWELL_MS) return;
+
+  // ✅ Llegué: reportar OPS como 'B#'
+  const report = fix as OpsState; // 'B1'|'B2'|'B3'...
+  emitOpsNow(report);
+
+  // Limpieza para no re-disparar
+  delete arrivedSinceRef.current[key];
+
+}, [
+  runwayState,
+  username,
+  myPlane?.id,
+  myPlane.lat,
+  myPlane.lon,
+  beaconB1,
+  beaconB2,
+  extraBeacons,
+]);
 
 
   // --- NAV: anti-histeresis ---
@@ -2065,22 +2188,15 @@ s.on('atc-instruction', (instr: any) => {
         ? asString(t(String(instr.spokenKey), instr.spokenParams || instr.params || {}))
         : asString(t('runway.clearedToLandSpoken', { rwy: instr.rwy || '' }));
 
-          // ✅ ACA MISMO:
-          finalLockedRef.current = true;
-          try { emitOpsNow('FINAL'); } catch {}
-          if (rw) {
-            const activeEnd: 'A' | 'B' = (rw as any).active_end === 'B' ? 'B' : 'A';
-            const thr = activeEnd === 'A' ? (rw as any).thresholdA : (rw as any).thresholdB;
-            const lat = thr?.lat;
-            const lon = thr?.lng ?? thr?.lon;
-            if (typeof lat === 'number' && typeof lon === 'number') {
-              setNavTargetSafe({ latitude: lat, longitude: lon });
-            }
-          }
+    // ✅ NO tocar OPS aquí
+    // ✅ NO setNavTarget aquí
+    // finalLockedRef, si querés, úsalo solo para UI (opcional)
+    finalLockedRef.current = true;
 
     flashBanner(bannerText, 'atc-clr');
     try { Speech.stop(); Speech.speak(String(spokenText), { language: String(ttsLang) }); } catch {}
   }
+
 });
 
 
@@ -2212,24 +2328,26 @@ if (!VALID.has(st as OpsState)) return;
 
 const next = st as OpsState;
 
+  // ✅ si es mi avión, actualizo el ref “rápido”
+  const me = (myPlaneRef.current?.id || username);
+  if (name === me) {
+    lastOpsStateRef.current = next;
+    lastOpsStateTsRef.current = Date.now();
+  }
+
 
   // (1) fuente de verdad en mapa
-  setOpsStates(prev => {
-    if (prev[name] === next) return prev; // evita re-render spam
-    return { ...prev, [name]: next };
-  });
+  setOpsStates(prev => (prev[name] === next ? prev : { ...prev, [name]: next }));
 
   // (2) espejo dentro del Plane (para UI/tap/markers)
   setTraffic(prev => {
     let changed = false;
-
     const out = prev.map(p => {
-      if (p.id !== String(name)) return p;
-      if (p.ops === next) return p; // evita trabajo
+      if (p.id !== name) return p;
+      if (p.ops === next) return p;
       changed = true;
       return { ...p, ops: next };
     });
-
     return changed ? out : prev;
   });
 });
@@ -2760,6 +2878,29 @@ useEffect(() => {
 }, [runwayState, myPlane.lat, myPlane.lon, myPlane.speed]);
 
 
+function reportIfDwellInside(
+  key: string,
+  inside: boolean,
+  dwellMs: number,
+  onArrive: () => void
+) {
+  const now = Date.now();
+
+  if (!inside) {
+    delete arrivedSinceRef.current[key];
+    return;
+  }
+
+  const since = arrivedSinceRef.current[key] ?? now;
+  arrivedSinceRef.current[key] = since;
+
+  if (now - since < dwellMs) return;
+
+  delete arrivedSinceRef.current[key];
+  onArrive();
+}
+
+
   // === RUNWAY: Automatismos de avisos y ocupación/liberación ===
 useEffect(() => {
   if (!rw) return;
@@ -2783,7 +2924,15 @@ useEffect(() => {
     apronLatchRef.current = true;
 
     // Forzar OPS a RUNWAY_OCCUPIED si aún estaba en FINAL
-    emitOpsNow('RUNWAY_OCCUPIED');
+    // ✅ Reportar RUNWAY_OCCUPIED solo con dwell real (anti-flicker GPS)
+    const me = myPlane?.id || username;
+    reportIfDwellInside(
+      `${me}:RUNWAY_OCCUPIED`,
+      touchdownLike,           // misma condición que ya calculaste
+      ARRIVE_DWELL_MS,         // o 1500 fijo si querés
+      () => emitOpsNow('RUNWAY_OCCUPIED')
+    );
+
 
     // Si estoy aterrizando y aún no marqué occupy, marcar
     if (
