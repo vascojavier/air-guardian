@@ -583,9 +583,13 @@ function assignBeaconsFor(name) {
 
     asg.b2 = stackedBn;
 
-    const beaconOrdinal = 2 + offsetIndex; // 2,3,4,...
+    // ✅ clamp: nunca más de B30
+    const beaconOrdinalRaw = 2 + offsetIndex;      // 2,3,4,...
+    const beaconOrdinal = Math.min(30, beaconOrdinalRaw);
+
     asg.beaconName = `B${beaconOrdinal}`;
     asg.beaconIndex = beaconOrdinal;
+
   }
 
   return asg;
@@ -1222,9 +1226,13 @@ function publishRunwayState() {
     Array.from(opsStateByName.entries()).map(([k, v]) => [k, v.state])
   );
 
-  // --- BACKEND ASSIGNMENTS (la verdad para navegación) ---
-  const assignedOps = {}; // name -> 'A_TO_B2'|'A_TO_B3'|...|'B1'|'FINAL'
-  const opsTargets  = {}; // name -> { fix:'B2'|'B3'|'B1'|'FINAL', lat, lon }
+  // --- BACKEND OPS (autoridad): A_TO_Bx / FINAL ---
+  const backendOpsStates = {}; // name -> 'A_TO_B1'..'A_TO_B30' | 'FINAL'
+
+  // --- BACKEND NAV ASSIGNMENTS (target de navegación) ---
+  const assignedOps = {}; // name -> 'A_TO_Bx' | 'FINAL'
+  const opsTargets  = {}; // name -> { fix:'B#'|'FINAL', lat, lon }
+
 
   const gNow = activeRunwayGeom();
   const leaderNow = leaderName();
@@ -1233,20 +1241,25 @@ function publishRunwayState() {
     const name = L.name;
     if (!name) continue;
 
-    // ✅ FIX: b1Latched definido por avión
     const b1Latched = isB1Latched(name);
+    const stReported = getOpsState(name); // lo que dijo el frontend: B#, RUNWAY_*, etc.
 
+    const asg = assignBeaconsFor(name);
+    const leaderNow = leaderName();
+
+    // -------------------------
+    // 1) LÍDER: si ya confirmó B1 (o está latcheado), backend lo promueve a FINAL
+    //    Si NO confirmó B1, backend lo manda a B1 (A_TO_B1)
+    // -------------------------
     if (leaderNow && name === leaderNow) {
-      // FINAL solo si el frontend reportó B1 (o ya está en FINAL por su cuenta)
-      const stReported = getOpsState(name);
       const okToFinal = (stReported === 'B1' || stReported === 'FINAL' || b1Latched);
 
       if (okToFinal && gNow?.thr) {
+        backendOpsStates[name] = 'FINAL';
         assignedOps[name] = 'FINAL';
         opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
       } else {
-        // mientras no confirme B1, guiarlo a B1
-        const asg = assignBeaconsFor(name);
+        backendOpsStates[name] = 'A_TO_B1';
         assignedOps[name] = 'A_TO_B1';
 
         const lat = asg?.b1?.lat;
@@ -1258,36 +1271,46 @@ function publishRunwayState() {
       continue;
     }
 
-    // Latched en B1: fijo (no compite)
+    // -------------------------
+    // 2) NO-LÍDER: SIEMPRE compite y backend manda A_TO_Bx (x=1..30)
+    //    (aunque esté latcheado, lo “manda” a B1 con A_TO_B1, pero NO setea OPS=B1)
+    // -------------------------
     if (b1Latched) {
-      const asg = assignBeaconsFor(name);
-      assignedOps[name] = 'B1';
-      if (asg?.b1 && typeof asg.b1.lat === 'number' && typeof asg.b1.lon === 'number') {
-        opsTargets[name] = { fix: 'B1', lat: asg.b1.lat, lon: asg.b1.lon };
+      backendOpsStates[name] = 'A_TO_B1';
+      assignedOps[name] = 'A_TO_B1';
+
+      const lat = asg?.b1?.lat;
+      const lon = asg?.b1?.lon;
+      if (typeof lat === 'number' && typeof lon === 'number') {
+        opsTargets[name] = { fix: 'B1', lat, lon };
       }
       continue;
     }
 
-    // Resto: compiten por ETA => A_TO_Bx (Bx viene de assignBeaconsFor)
-    const asg = assignBeaconsFor(name);
-    const bn = asg?.beaconName || 'B2';
+    // Resto: A_TO_B2..A_TO_B30 según beaconName
+    const bn = asg?.beaconName || 'B2'; // ya viene clamped a B30 por CAMBIO 1
     const lat = asg?.b2?.lat;
     const lon = asg?.b2?.lon;
 
+    backendOpsStates[name] = `A_TO_${bn}`;
     assignedOps[name] = `A_TO_${bn}`;
+
     if (typeof lat === 'number' && typeof lon === 'number') {
       opsTargets[name] = { fix: bn, lat, lon };
     }
   }
 
+
   // Emit principal runway-state (lo que Radar necesita)
   io.emit('runway-state', {
     airfield,
     state: {
+      // lo que reporta el frontend (B#, RUNWAY_*, etc.)
       reportedOpsStates,
 
-      // compatibilidad
-      opsStates: reportedOpsStates,
+      // ✅ BACKEND OPS (autoridad): A_TO_Bx / FINAL
+      opsStates: backendOpsStates,
+
 
       // nuevo: lo que decide el backend para navegación
       assignedOps,
@@ -1610,6 +1633,34 @@ socket.broadcast.emit('traffic-update', [payload]);
 socket.on('ops/state', (msg) => {
   try {
     const { name, state, aux } = msg || {};
+
+        // ✅ VALID dinámico: B1..B30 + estados tierra/pista
+    const B_STATES = new Set(Array.from({ length: 30 }, (_, i) => `B${i + 1}`));
+
+    const FRONTEND_ALLOWED_OPS = new Set([
+      'APRON_STOP',
+      'TAXI_APRON',
+      'TAXI_TO_RWY',
+      'HOLD_SHORT',
+      'RUNWAY_OCCUPIED',
+      'RUNWAY_CLEAR',
+      'AIRBORNE',
+      'LAND_QUEUE',
+      // el frontend puede reportar FINAL si lo querés permitir para el líder,
+      // pero igual lo normalizamos abajo
+      'FINAL',
+      ...B_STATES,
+    ]);
+
+    // ⛔️ El frontend NUNCA puede mandar A_TO_*
+    if (typeof state === 'string' && state.startsWith('A_TO_')) {
+      return;
+    }
+
+    if (!FRONTEND_ALLOWED_OPS.has(state)) {
+      return;
+    }
+
     if (!name || !state) return;
 
     // --- normalizamos FINAL sólo si NO es el líder ---
@@ -1617,8 +1668,8 @@ socket.on('ops/state', (msg) => {
     let finalState = state;
 
     if (state === 'FINAL' && leader && name !== leader) {
-      // ignorar FINAL reportado por alguien que no es #1
-      finalState = 'B1';
+      // si no es líder, ignoramos FINAL (no lo degradamos a B1)
+      return;
     }
 
     // Guardar ops reportado por el frontend

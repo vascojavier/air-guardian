@@ -429,26 +429,123 @@ const refreshPinnedDistance = () => {
     };
   }>(null);
 
-function emitOpsNow(next: OpsState) {
+function canConfirmRunwayOccupiedNow(): boolean {
+  const assigned = getBackendAssignedForMe();   // 'FINAL'|'B1'|'A_TO_Bx'|...
+  const reported = getBackendReportedForMe();   // backend truth
+
+  // Si estás en flujo takeoff, no confirmes occupied por touchdown-like
+  if (takeoffRequestedRef.current) return false;
+
+  // Si vos pediste aterrizar, OK
+  if (landingRequestedRef.current) return true;
+
+  // Si el backend te tenía ya en FINAL o B1, OK
+  if (reported === 'FINAL' || reported === 'B1') return true;
+
+  // Si el backend te asignó FINAL o B1, OK
+  if (assigned === 'FINAL' || assigned === 'B1') return true;
+
+  return false;
+}
+
+
+function getBackendAssignedForMe(): string | null {
+  const me = myPlaneRef.current?.id || username;
+  if (!me) return null;
+  const st: any = runwayState?.state;
+  return (st?.assignedOps?.[me] as string) || null;
+}
+
+function getBackendReportedForMe(): OpsState | null {
+  const me = myPlaneRef.current?.id || username;
+  if (!me) return null;
+  const st: any = runwayState?.state;
+  const rep = st?.reportedOpsStates?.[me] || st?.opsStates?.[me];
+  return (typeof rep === 'string' ? (rep as OpsState) : null);
+}
+
+function canConfirmBeaconNow(fix: string): boolean {
+  // fix = 'B2','B17',...
+  const assigned = getBackendAssignedForMe(); // 'A_TO_B17' etc
+  const reported = getBackendReportedForMe(); // lo que backend cree ya reportado
+
+  if (!/^B\d+$/.test(fix)) return false;
+
+  // si el backend ya te tiene en B1 o FINAL, no confirmes nada de beacons
+  if (reported === 'B1' || reported === 'FINAL') return false;
+
+  // Debe haber asignación tipo A_TO_Bx
+  if (!assigned || !assigned.startsWith('A_TO_')) return false;
+
+  const assignedFix = assigned.replace('A_TO_', ''); // 'B17'
+  if (assignedFix !== fix) return false;
+
+  return true;
+}
+
+
+
+function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<string, any>) {
   const now = Date.now();
 
   // ❌ Nunca confirmar FINAL desde frontend
   if (FRONTEND_FORBIDDEN_OPS.has(next)) {
-    console.log('[OPS] Ignored FINAL (backend-only).');
+    console.log('[OPS] Ignored FINAL (backend-only).', { next, source });
     return;
   }
 
   // ✅ Sólo confirmamos los estados permitidos
   if (!FRONTEND_ALLOWED_OPS.has(next)) {
-    console.log('[OPS] Ignored (not allowed):', next);
+    console.log('[OPS] Ignored (not allowed):', { next, source });
     return;
   }
 
-  // ✅ anti-spam: no repetir si no cambió
-  if (lastOpsStateRef.current === next) return;
+  // ✅ anti-spam: mismo estado en <2s (y también evita repetir exacto)
+  if (
+    lastOpsStateRef.current === next &&
+    (now - (lastOpsStateTsRef.current || 0)) < 2000
+  ) {
+    return;
+  }
 
   lastOpsStateRef.current = next;
   lastOpsStateTsRef.current = now;
+
+  // ---- contexto útil para debug ----
+  const me = username;
+  const st = runwayState?.state as any;
+
+  const assigned = st?.assignedOps?.[me];
+  const reported = st?.reportedOpsStates?.[me];
+  const backendOps = st?.opsStates?.[me];
+
+  const ctx = {
+    t: new Date(now).toISOString(),
+    next,
+    source,
+
+    // fase / flags
+    landingRequested: !!landingRequestedRef.current,
+    takeoffRequested: !!takeoffRequestedRef.current,
+    finalLocked: !!finalLockedRef.current,
+
+    // backend
+    assigned,
+    reported,
+    backendOps,
+
+    // kin
+    aglM: Number.isFinite(getAGLmeters()) ? Math.round(getAGLmeters()) : getAGLmeters(),
+    speedKmh: Math.round(myPlane?.speed ?? 0),
+    onRunway: !!isOnRunwayStrip(),
+
+    // runway
+    activeRwy: (rw?.active_end === 'B' ? (rw?.identB ?? 'B') : (rw?.identA ?? 'A')),
+
+    ...(extra || {}),
+  };
+
+  console.log('[OPS] emit →', ctx);
 
   socketRef.current?.emit('ops/state', {
     name: username,
@@ -459,11 +556,12 @@ function emitOpsNow(next: OpsState) {
       aglM: getAGLmeters(),
       onRunway: isOnRunwayStrip(),
       nearHoldShort: isNearThreshold((rw?.active_end === 'B' ? 'B' : 'A') as any, 100),
+      source,
+      ...(extra || {}),
     },
   });
-
-  console.log('[OPS] emit →', next);
 }
+
 
   function emitOpsBeacon(label: `B${number}`, phase: 'TO' | 'AT') {
   const st = (phase === 'TO') ? (`A_TO_${label}` as OpsState) : (label as OpsState);
@@ -651,12 +749,10 @@ const emitUpdate = (p: PosUpdate) => {
   const finalLockedRef = useRef(false);
   const lastOpsStateRef = useRef<OpsState | null>(null);
   const lastOpsStateTsRef = useRef<number>(0);
+  
   // ✅ Estados que el FRONTEND tiene permitido CONFIRMAR al backend
+// ✅ Estados que el FRONTEND tiene permitido CONFIRMAR al backend (sin beacons hardcodeados)
 const FRONTEND_ALLOWED_OPS = new Set<OpsState>([
-  // Beacons confirmables por llegada
-  'B1','B2','B3','B4','B5','B6','B7','B8','B9',
-
-  // Pista / tierra confirmables
   'RUNWAY_OCCUPIED',
   'RUNWAY_CLEAR',
   'TAXI_APRON',
@@ -665,6 +761,7 @@ const FRONTEND_ALLOWED_OPS = new Set<OpsState>([
   'HOLD_SHORT',
   'AIRBORNE',
 ]);
+
 
 // ⚠️ El frontend NO confirma FINAL nunca (backend-only asignación/slot)
 const FRONTEND_FORBIDDEN_OPS = new Set<OpsState>(['FINAL']);
@@ -780,6 +877,7 @@ const beaconB2 = useMemo<LatLon | null>(() => {
 
 
 // === Beacons extra B3, B4... generados extendiendo la línea B2 -> "hacia afuera" ===
+// === Beacons extra B3..B30 generados extendiendo la línea B2 -> "hacia afuera" ===
 const extraBeacons = useMemo<LatLon[]>(() => {
   if (!beaconB1 || !beaconB2) return [];
 
@@ -794,21 +892,27 @@ const extraBeacons = useMemo<LatLon[]>(() => {
     beaconB2.latitude, beaconB2.longitude,
     beaconB1.latitude, beaconB1.longitude
   );
-  // para colocar B3/B4 "detrás" de B2, nos vamos al rumbo contrario
+
+  // para colocar B3/B4/... "detrás" de B2, nos vamos al rumbo contrario
   const outbound = (inbound + 180) % 360;
 
   const result: LatLon[] = [];
 
-  // B3 = B2 + d
-  const b3 = movePoint(beaconB2.latitude, beaconB2.longitude, outbound, d);
-  result.push(b3);
+  // Queremos B3..B30 => 28 beacons extra
+  const MAX_B = 30;
+  const count = Math.max(0, MAX_B - 2); // B3..BMAX => MAX-2 items
 
-  // B4 = B3 + d
-  const b4 = movePoint(b3.latitude, b3.longitude, outbound, d);
-  result.push(b4);
+  let prev = { latitude: beaconB2.latitude, longitude: beaconB2.longitude };
 
-  return result; // [B3, B4]
+  for (let i = 0; i < count; i++) {
+    const next = movePoint(prev.latitude, prev.longitude, outbound, d);
+    result.push(next);
+    prev = next;
+  }
+
+  return result; // index 0 = B3, index 1 = B4, ... index 27 = B30
 }, [beaconB1, beaconB2]);
+
 
 
   const activeThreshold = useMemo<LatLon | null>(() => {
@@ -920,12 +1024,21 @@ useEffect(() => {
 
   if (now - since < ARRIVE_DWELL_MS) return;
 
-  // ✅ Llegué: reportar OPS como 'B#'
-  const report = fix as OpsState; // 'B1'|'B2'|'B3'...
-  emitOpsNow(report);
+// ✅ Llegué: reportar OPS como 'B#' SOLO si el backend me asignó A_TO_B#
+const report = fix as OpsState; // 'B1'|'B2'|'B3'...
 
-  // Limpieza para no re-disparar
-  delete arrivedSinceRef.current[key];
+if (canConfirmBeaconNow(String(report))) {
+  emitOpsNow(report, 'ARRIVE_DWELL', { fix });
+} else {
+  console.log('[OPS] Skip beacon confirm (not assigned by backend):', {
+    report,
+    assigned: getBackendAssignedForMe(),
+    reported: getBackendReportedForMe(),
+  });
+}
+
+// Limpieza para no re-disparar
+delete arrivedSinceRef.current[key];
 
 }, [
   runwayState,
@@ -1340,7 +1453,7 @@ const markRunwayClear = () => {
       if (thr) setNavTarget(thr);
 
       // ✅ estado OPS explícito (camino a pista)
-      emitOpsNow('TAXI_TO_RWY');
+      emitOpsNow('TAXI_TO_RWY', 'UI_REQUEST_TAKEOFF');
 
       // ✅ pedir al backend
       requestTakeoff(false);
@@ -2316,17 +2429,23 @@ s.on('ops/state', (msg: any) => {
 
   if (!name || typeof st !== 'string') return;
 
-  const VALID: Set<OpsState> = new Set([
-  'APRON_STOP','TAXI_APRON','TAXI_TO_RWY','HOLD_SHORT',
-  'RUNWAY_OCCUPIED','RUNWAY_CLEAR',
-  'AIRBORNE','LAND_QUEUE','B2','B1','FINAL',
-  // si usás estos en tu frontend, agregalos:
-  'A_TO_B1','A_TO_B2','A_TO_B3','A_TO_B4'
-] as OpsState[]);
+  const stRaw = String(st);
 
-if (!VALID.has(st as OpsState)) return;
+  // ✅ Permitimos patrones dinámicos:
+  const isBeacon = /^B\d+$/.test(stRaw);         // B1, B2, B12...
+  const isToBeacon = /^A_TO_B\d+$/.test(stRaw);  // A_TO_B2, A_TO_B17...
 
-const next = st as OpsState;
+  // ✅ Estados "no-pattern" válidos:
+  const VALID_BASE = new Set<OpsState>([
+    'APRON_STOP','TAXI_APRON','TAXI_TO_RWY','HOLD_SHORT',
+    'RUNWAY_OCCUPIED','RUNWAY_CLEAR',
+    'AIRBORNE','LAND_QUEUE','FINAL',
+  ] as OpsState[]);
+
+  if (!VALID_BASE.has(stRaw as OpsState) && !isBeacon && !isToBeacon) return;
+
+  const next = stRaw as OpsState;
+
 
   // ✅ si es mi avión, actualizo el ref “rápido”
   const me = (myPlaneRef.current?.id || username);
@@ -2641,43 +2760,6 @@ useEffect(() => {
 }, [simMode]);
 
 
-useFocusEffect(
-  useCallback(() => {
-    isFocusedRef.current = true;
-
-    // asegurar socket
-    try {
-      if (socketRef.current && !socketRef.current.connected) {
-        socketRef.current.connect();
-      }
-    } catch {}
-
-    // join (una sola vez)
-    try {
-      socketRef.current?.emit?.("air-guardian/join");
-    } catch {}
-
-    return () => {
-      isFocusedRef.current = false;
-
-      // cortar SIM interval si existe
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-
-      // cortar GPS watch si existe
-      try { gpsWatchRef.current?.remove?.(); } catch {}
-      gpsWatchRef.current = null;
-
-      try {
-        socketRef.current?.emit?.("air-guardian/leave");
-      } catch {}
-    };
-  }, [username])
-);
-
-
 
 
 // ================= GPS REAL (watchPositionAsync) =================
@@ -2926,12 +3008,24 @@ useEffect(() => {
     // Forzar OPS a RUNWAY_OCCUPIED si aún estaba en FINAL
     // ✅ Reportar RUNWAY_OCCUPIED solo con dwell real (anti-flicker GPS)
     const me = myPlane?.id || username;
-    reportIfDwellInside(
-      `${me}:RUNWAY_OCCUPIED`,
-      touchdownLike,           // misma condición que ya calculaste
-      ARRIVE_DWELL_MS,         // o 1500 fijo si querés
-      () => emitOpsNow('RUNWAY_OCCUPIED')
-    );
+reportIfDwellInside(
+  `${me}:RUNWAY_OCCUPIED`,
+  touchdownLike,           // misma condición que ya calculaste
+  ARRIVE_DWELL_MS,         // o 1500 fijo si querés
+  () => {
+    if (canConfirmRunwayOccupiedNow()) {
+     emitOpsNow('RUNWAY_OCCUPIED', 'TOUCHDOWN_DWELL', { touchdownLike })
+    } else {
+      console.log('[OPS] Skip RUNWAY_OCCUPIED (not in landing flow):', {
+        assigned: getBackendAssignedForMe(),
+        reported: getBackendReportedForMe(),
+        landingRequested: landingRequestedRef.current,
+        takeoffRequested: takeoffRequestedRef.current,
+      });
+    }
+  }
+);
+
 
 
     // Si estoy aterrizando y aún no marqué occupy, marcar
@@ -2965,7 +3059,7 @@ useEffect(() => {
 
       // Reset de aproximación y OPS visible
       finalLockedRef.current = false;
-      emitOpsNow('RUNWAY_CLEAR');
+      emitOpsNow('RUNWAY_CLEAR', 'AUTOCLEAR');
 
       // ✅ NO setNavTarget acá (lo hace el NAV único vía apronLatchRef)
       apronLatchRef.current = true;
