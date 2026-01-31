@@ -483,6 +483,8 @@ function canConfirmBeaconNow(fix: string): boolean {
   return true;
 }
 
+const isBeaconOps = (s: any): s is OpsState =>
+typeof s === 'string' && /^B\d+$/.test(s);
 
 
 function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<string, any>) {
@@ -494,11 +496,13 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
     return;
   }
 
-  // ✅ Sólo confirmamos los estados permitidos
-  if (!FRONTEND_ALLOWED_OPS.has(next)) {
+ 
+  // ✅ Sólo confirmamos los estados permitidos (o beacons B#)
+  if (!FRONTEND_ALLOWED_OPS.has(next) && !isBeaconOps(next)) {
     console.log('[OPS] Ignored (not allowed):', { next, source });
     return;
   }
+
 
   // ✅ anti-spam: mismo estado en <2s (y también evita repetir exacto)
   if (
@@ -1324,6 +1328,34 @@ function iAmGroundish(): boolean {
   // Sólo considerar tierra por geometría de pista + AGL bajo
   if (isOnRunwayStrip() && agl < 30) return true;
 
+  return false;
+}
+
+function isPlaneInAssignedOps(p: Plane): boolean {
+  const st: any = runwayState?.state;
+  const map = st?.assignedOps as Record<string, string> | undefined;
+  if (!map) return false;
+
+  for (const k of keysForPlane(p)) {
+    if (typeof map[k] === 'string' && map[k]) return true;
+  }
+  return false;
+}
+
+function isPlaneInQueues(p: Plane): boolean {
+  const st: any = runwayState?.state;
+  const land = Array.isArray(st?.landings) ? st.landings : [];
+  const tk   = Array.isArray(st?.takeoffs) ? st.takeoffs : [];
+
+  // landings/takeoffs suelen ser [{name, ...}] — matcheamos por keys
+  const names = new Set<string>([
+    ...land.map((x: any) => String(x?.name || '')).filter(Boolean),
+    ...tk.map((x: any) => String(x?.name || '')).filter(Boolean),
+  ]);
+
+  for (const k of keysForPlane(p)) {
+    if (names.has(String(k))) return true;
+  }
   return false;
 }
 
@@ -3440,8 +3472,12 @@ useEffect(() => {
           // 3) ATC (backend / assigned) A_TO_Bx / FINAL desde runway-state
           const atcAssigned = getAssignedOpsOfPlane(plane);
 
+          // ✅ Si perdió turno: o ya no está en assignedOps, o ya no está en colas => borrar nav
+          const stillHasTurn = isPlaneInAssignedOps(plane) && isPlaneInQueues(plane);
+
           // 4) Target (backend) fix + lat/lon desde runway-state
-          const atcTarget = getOpsTargetOfPlane(plane);
+          const atcTarget = stillHasTurn ? getOpsTargetOfPlane(plane) : null;
+
 
           setSelected({
             ...plane,

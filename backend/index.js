@@ -1208,34 +1208,43 @@ function publishRunwayState() {
   // --- BACKEND NAV ASSIGNMENTS (target de navegación) ---
   const assignedOps = {}; // name -> 'A_TO_Bx' | 'FINAL'
   const opsTargets  = {}; // name -> { fix:'B#'|'FINAL', lat, lon }
-
-
   const gNow = activeRunwayGeom();
+ 
+
+  const landings = runwayState.landings || [];
   const leaderNow = leaderName();
 
-  for (const L of runwayState.landings || []) {
-    const name = L.name;
+  // 1) ¿El líder "debe" estar en FINAL? (solo guía ATC)
+  let leaderWillBeFinal = false;
+  if (leaderNow) {
+    const b1LatchedLead = isB1Latched(leaderNow);
+    const stLead = getOpsState(leaderNow); // lo que dijo el frontend: B#, RUNWAY_*, etc.
+    leaderWillBeFinal =
+      (stLead === 'B1' || stLead === 'FINAL' || b1LatchedLead) && !!gNow?.thr;
+  }
+
+  // 2) ¿Quién es #2 ahora mismo?
+  const secondNow =
+    landings?.[0]?.name === leaderNow ? landings?.[1]?.name : null;
+
+  // 3) UN SOLO LOOP: construir assignedOps / opsTargets
+  for (const L of landings) {
+    const name = L?.name;
     if (!name) continue;
 
     const b1Latched = isB1Latched(name);
     const stReported = getOpsState(name); // lo que dijo el frontend: B#, RUNWAY_*, etc.
-
     const asg = assignBeaconsFor(name);
-    const leaderNow = leaderName();
 
     // -------------------------
-    // 1) LÍDER: si ya confirmó B1 (o está latcheado), backend lo promueve a FINAL
-    //    Si NO confirmó B1, backend lo manda a B1 (A_TO_B1)
+    // 1) LÍDER: si ya confirmó B1 (o está latcheado), backend lo guía a FINAL
+    //    Si NO confirmó B1, backend lo guía a B1 (A_TO_B1)
     // -------------------------
     if (leaderNow && name === leaderNow) {
-      const okToFinal = (stReported === 'B1' || stReported === 'FINAL' || b1Latched);
-
-      if (okToFinal && gNow?.thr) {
-        
+      if (leaderWillBeFinal) {
         assignedOps[name] = 'FINAL';
         opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
       } else {
-        
         assignedOps[name] = 'A_TO_B1';
 
         const lat = asg?.b1?.lat;
@@ -1247,12 +1256,23 @@ function publishRunwayState() {
       continue;
     }
 
+    // ✅ PARCHE MÍNIMO:
+    // Si el líder ya está en FINAL, empujar #2 a B1 YA MISMO (sin esperar RUNWAY_OCCUPIED)
+    if (leaderWillBeFinal && secondNow && name === secondNow) {
+      assignedOps[name] = 'A_TO_B1';
+
+      const lat = asg?.b1?.lat;
+      const lon = asg?.b1?.lon;
+      if (typeof lat === 'number' && typeof lon === 'number') {
+        opsTargets[name] = { fix: 'B1', lat, lon };
+      }
+      continue;
+    }
+
     // -------------------------
-    // 2) NO-LÍDER: SIEMPRE compite y backend manda A_TO_Bx (x=1..30)
-    //    (aunque esté latcheado, lo “manda” a B1 con A_TO_B1, pero NO setea OPS=B1)
+    // 2) NO-LÍDER: tu lógica original
     // -------------------------
     if (b1Latched) {
-      
       assignedOps[name] = 'A_TO_B1';
 
       const lat = asg?.b1?.lat;
@@ -1268,13 +1288,13 @@ function publishRunwayState() {
     const lat = asg?.b2?.lat;
     const lon = asg?.b2?.lon;
 
-    
     assignedOps[name] = `A_TO_${bn}`;
 
     if (typeof lat === 'number' && typeof lon === 'number') {
       opsTargets[name] = { fix: bn, lat, lon };
     }
   }
+
 
 
   // Emit principal runway-state (lo que Radar necesita)
