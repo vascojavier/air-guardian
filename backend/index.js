@@ -1628,8 +1628,11 @@ socket.broadcast.emit('traffic-update', [payload]);
 
    // === Estado operativo reportado por el frontend ===
 socket.on('ops/state', (msg) => {
+
+  
   try {
     const { name, state, aux } = msg || {};
+
 
         // ✅ VALID dinámico: B1..B30 + estados tierra/pista
     const B_STATES = new Set(Array.from({ length: 30 }, (_, i) => `B${i + 1}`));
@@ -1648,6 +1651,7 @@ socket.on('ops/state', (msg) => {
       'FINAL',
       ...B_STATES,
     ]);
+
 
     // ⛔️ El frontend NUNCA puede mandar A_TO_*
     if (typeof state === 'string' && state.startsWith('A_TO_')) {
@@ -1669,8 +1673,34 @@ socket.on('ops/state', (msg) => {
       return;
     }
 
+        // ✅ Diagnóstico: YA tenemos name/finalState/leader
+    console.log(
+      '[ops/state]',
+      'name=', name,
+      'state=', finalState,
+      'leaderNow=', leader,
+      'getOpsState(leaderNow)=', leader ? getOpsState(leader) : null,
+      'aux=', aux
+      );
     // Guardar ops reportado por el frontend
-    opsStateByName.set(name, { state: finalState, ts: Date.now(), aux });
+   const rec = { state: finalState, ts: Date.now(), aux };
+
+    // armamos todas las keys que podrían usarse para referenciar a ese avión
+    const k1 = name;
+    const k2 = userLocations?.[name]?.id;        // si existe
+    const k3 = userLocations?.[name]?.callsign;  // si existe
+    const k4 = aux?.id;                          // si el frontend lo manda
+    const k5 = aux?.callsign;                    // si el frontend lo manda
+
+    const keys = [k1, k2, k3, k4, k5]
+      .filter(Boolean)
+      .map(String);
+
+    // ✅ guardamos el mismo OPS bajo TODAS las keys (name/id/callsign)
+    for (const k of new Set(keys)) {
+      opsStateByName.set(k, rec);
+    }
+
 
     // ✅ Detectar flanco real (prev -> next)
     const prev = lastOpsStateByName.get(name) || null;

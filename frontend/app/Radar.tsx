@@ -562,6 +562,9 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
       nearHoldShort: isNearThreshold((rw?.active_end === 'B' ? 'B' : 'A') as any, 100),
       source,
       ...(extra || {}),
+        id: myPlane?.id,
+      callsign: myPlane?.callsign,
+      planeName: myPlane?.name,
     },
   });
 }
