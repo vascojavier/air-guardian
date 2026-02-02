@@ -658,8 +658,6 @@ function enforceCompliance() {
     const dB2 = getDistance(u.latitude, u.longitude, asg.b2.lat, asg.b2.lon);
 
 
-
-
         // === AUTO GO-AROUND: drift lejos de B1 sostenido ===
     const st = getOpsState(L.name);
     const inFinalLike =
@@ -683,10 +681,10 @@ function enforceCompliance() {
         const elapsed = now - lease.startMs;
 
         // 1) Overshoot: cruzó umbral sin ocupar
-        if (crossedThreshold(L.name)) {
-          dropFromLandings(L.name, 'pasó el umbral sin ocupar pista');
-          continue;
-        }
+        // if (crossedThreshold(L.name)) {
+        //  dropFromLandings(L.name, 'pasó el umbral sin ocupar pista');
+        //   continue;
+        //  }
 
         // 2) Timeout en FINAL/B1
         if (elapsed >= S2.LEADER_TIMEOUT_MS) {
