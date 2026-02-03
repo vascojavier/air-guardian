@@ -643,6 +643,51 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
     socket.emit('warning', payload);
   };
 
+
+  useFocusEffect(
+  useCallback(() => {
+    isFocusedRef.current = true;
+
+    return () => {
+      isFocusedRef.current = false;
+
+      // 1) Frenar timers / intervalos
+      try { if (sendIntervalRef.current) clearInterval(sendIntervalRef.current as any); } catch {}
+      sendIntervalRef.current = null;
+
+      // 2) Limpiar timeouts
+      try { if (hideSelectedTimeout.current) clearTimeout(hideSelectedTimeout.current as any); } catch {}
+      hideSelectedTimeout.current = null;
+
+      // 3) Reset TOTAL de refs “pegadas”
+      landingRequestedRef.current = false;
+      takeoffRequestedRef.current = false;
+      finalLockedRef.current = false;
+
+      lastOpsStateRef.current = null;
+      lastOpsStateTsRef.current = 0;
+
+      selectedHoldUntilRef.current = 0;
+
+      // 4) Reset TOTAL de UI local
+      try { setSelected(null); } catch {}
+      try { setBackendWarning(null); } catch {}
+      try { setWarnings({}); } catch {}
+      try { setBanner(null); } catch {}
+
+      // 5) Reset runway-state local (clave para que NO redibuje línea al re-entrar)
+      try { setRunwayState(null as any); } catch {}
+      try { setSlots([]); } catch {}
+
+      // 6) Avisar al backend: hard reset del usuario
+      try {
+        socketRef.current?.emit('leave', { name: username });
+      } catch {}
+    };
+  }, [username])
+);
+
+
   const clearWarningFor = (planeId: string) => {
     // 1) sacá el warning del diccionario
     setWarnings(prev => {
@@ -1391,6 +1436,41 @@ function getReportedOpsOfPlane(p: Plane): OpsState | null {
     if (typeof v === 'string' && v) return v as OpsState;
   }
   return null;
+}
+
+function planeIsInQueue(p: Plane): boolean {
+  const st: any = runwayState?.state;
+  const land = Array.isArray(st?.landings) ? st.landings : [];
+  const tk   = Array.isArray(st?.takeoffs) ? st.takeoffs : [];
+
+  // comparo por keys (id/name/callsign), porque tu sistema usa mezcla
+  const keys = new Set(keysForPlane(p));
+
+  const inLand = land.some((x: any) => x?.name && keys.has(String(x.name)));
+  if (inLand) return true;
+
+  const inTk = tk.some((x: any) => x?.name && keys.has(String(x.name)));
+  return inTk;
+}
+
+function planeHasAssignedOps(p: Plane): boolean {
+  const st: any = runwayState?.state;
+  const asg = st?.assignedOps || null;
+  if (!asg) return false;
+
+  for (const k of keysForPlane(p)) {
+    if (typeof asg[k] === 'string' && asg[k]) return true;
+  }
+  return false;
+}
+
+/**
+ * Regla final: la línea solo existe si:
+ * - está en cola (landing/takeoff)  Y
+ * - el backend todavía lo tiene asignado (assignedOps)
+ */
+function shouldShowNavForPlane(p: Plane): boolean {
+  return planeIsInQueue(p) && planeHasAssignedOps(p);
 }
 
 
@@ -3662,6 +3742,7 @@ useEffect(() => {
             strokeColor="blue"
             strokeWidth={2}
           />
+          
         )}
 
 

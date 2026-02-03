@@ -1624,6 +1624,46 @@ socket.broadcast.emit('traffic-update', [payload]);
     }
  });
 
+ function hardResetUser(name) {
+  if (!name) return;
+
+  // 1) Sacarlo de colas
+  runwayState.landings = (runwayState.landings || []).filter(x => x.name !== name);
+  runwayState.takeoffs = (runwayState.takeoffs || []).filter(x => x.name !== name);
+
+  // 2) Borrar OPS y flancos
+  try { opsStateByName.delete(name); } catch {}
+  try { lastOpsStateByName.delete(name); } catch {}
+
+  // 3) Borrar latches / leases / fases / sticky
+  try { clearTurnLease(name); } catch {}
+  try { clearFinalEnter(name); } catch {}
+  try { b1LatchByName.delete(name); } catch {}
+
+  try { landingStateByName.delete(name); } catch {}
+  try { approachPhaseByName.delete(name); } catch {}
+
+  // 4) Borrar ubicación (evita “avión fantasma” en mapa)
+  try { delete userLocations[name]; } catch {}
+
+  // 5) Si estaba ocupando la pista
+  if (runwayState.inUse?.name === name) runwayState.inUse = null;
+
+  // 6) Replanificar y publicar
+  try { planRunwaySequence(); } catch {}
+  try { publishRunwayState(); } catch {}
+}
+
+socket.on('leave', (msg) => {
+  try {
+    const name = msg?.name;
+    hardResetUser(name);
+  } catch (e) {
+    console.error('leave error:', e);
+  }
+});
+
+
    // === Estado operativo reportado por el frontend ===
 socket.on('ops/state', (msg) => {
 
