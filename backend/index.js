@@ -149,14 +149,24 @@ const landingStateByName = new Map(); // name -> { state: 'ORD'|..., ts:number }
   // 'RUNWAY_OCCUPIED' | 'RUNWAY_CLEAR' | 'AIRBORNE' |
   // 'LAND_QUEUE' | 'B2' | 'B1' | 'FINAL'
   const opsStateByName = new Map(); // name -> { state: string, ts: number, aux?: object }
+  // Lo que reporta el frontend (B#, RUNWAY_*, TAXI_*, etc.)
+  const opsReportedByName = new Map(); // name -> { state, ts, aux }
+  // Lo que impone el backend (FINAL / A_TO_Bx). Esto es lo que vos querés.
+  const opsBackendByName = new Map();  // name -> { state, ts }
+
 
   // ✅ Para detectar flanco real de estado (prev -> next)
   const lastOpsStateByName = new Map(); // name -> string
 
 
-  function getOpsState(name) {
-    return opsStateByName.get(name)?.state || null;
-  }
+function getOpsState(name) {
+  const b = opsBackendByName.get(name);
+  if (b?.state) return b.state; // FINAL / A_TO_Bx
+
+  const r = opsReportedByName.get(name);
+  return r?.state || null;      // B# / RUNWAY_* / TAXI_*
+}
+
 
 function isB1Latched(name) {
   return !!b1LatchByName.get(name)?.latched;
@@ -1202,12 +1212,10 @@ function publishRunwayState() {
     Array.from(opsStateByName.entries()).map(([k, v]) => [k, v.state])
   );
 
-
   // --- BACKEND NAV ASSIGNMENTS (target de navegación) ---
   const assignedOps = {}; // name -> 'A_TO_Bx' | 'FINAL'
   const opsTargets  = {}; // name -> { fix:'B#'|'FINAL', lat, lon }
   const gNow = activeRunwayGeom();
- 
 
   const landings = runwayState.landings || [];
   const leaderNow = leaderName();
@@ -1240,7 +1248,11 @@ function publishRunwayState() {
     // -------------------------
     if (leaderNow && name === leaderNow) {
       if (leaderWillBeFinal) {
-        assignedOps[name] = 'FINAL';
+      assignedOps[name] = 'FINAL';
+
+        // 🔥 CLAVE: el backend CAMBIA el OPS real
+        lastOpsStateByName.set(name, 'FINAL');
+
         opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
       } else {
         assignedOps[name] = 'A_TO_B1';
@@ -1293,7 +1305,14 @@ function publishRunwayState() {
     }
   }
 
-
+  // ✅ OPS EFECTIVO: lo que reporta el frontend + override del backend (FINAL / A_TO_*)
+  // Esto hace que "OPS" cambie a FINAL cuando el backend manda FINAL.
+  const opsStates = { ...reportedOpsStates };
+  for (const [name, atc] of Object.entries(assignedOps)) {
+    if (typeof atc === 'string' && atc) {
+      opsStates[name] = atc; // FINAL o A_TO_Bx
+    }
+  }
 
   // Emit principal runway-state (lo que Radar necesita)
   io.emit('runway-state', {
@@ -1302,10 +1321,8 @@ function publishRunwayState() {
       // lo que reporta el frontend (B#, RUNWAY_*, etc.)
       reportedOpsStates,
 
-      // ✅ BACKEND OPS (autoridad): A_TO_Bx / FINAL
-
-      // opsStates = espejo de lo reportado por el frontend (para UI/debug consistente)
-      opsStates: reportedOpsStates,
+      // ✅ opsStates = OPS efectivo (se ve FINAL / A_TO_* cuando el backend lo decide)
+      opsStates,
 
       // nuevo: lo que decide el backend para navegación
       assignedOps,
@@ -1375,6 +1392,7 @@ function publishRunwayState() {
     }),
   });
 }
+
 
 
 
