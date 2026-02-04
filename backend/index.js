@@ -160,12 +160,27 @@ const landingStateByName = new Map(); // name -> { state: 'ORD'|..., ts:number }
 
 
 function getOpsState(name) {
-  const b = opsBackendByName.get(name);
-  if (b?.state) return b.state; // FINAL / A_TO_Bx
+  const r = opsReportedByName.get(name)?.state || null; // B#, RUNWAY_*
+  const b = opsBackendByName.get(name)?.state || null;  // FINAL / A_TO_Bx
 
-  const r = opsReportedByName.get(name);
-  return r?.state || null;      // B# / RUNWAY_* / TAXI_*
+  // 1) Estados críticos del frontend
+  if (r === 'RUNWAY_OCCUPIED' || r === 'RUNWAY_CLEAR') return r;
+
+  // 2) FINAL manda siempre
+  if (b === 'FINAL') return 'FINAL';
+
+  // 3) Confirmación de B1 del frontend
+  if (r === 'B1') return 'B1';
+
+  // 4) Otros beacons confirmados
+  if (r && /^B\d+$/.test(r)) return r;
+
+  // 5) Guía ATC si no hay nada mejor
+  if (b && b.startsWith('A_TO_')) return b;
+
+  return null;
 }
+
 
 
 function isB1Latched(name) {
@@ -1758,9 +1773,14 @@ socket.on('ops/state', (msg) => {
     }
 
 
-    // ✅ Detectar flanco real (prev -> next)
+    // ✅ Detectar flanco real (prev -> next) usando la key principal (name)
     const prev = lastOpsStateByName.get(name) || null;
-    lastOpsStateByName.set(name, finalState);
+
+    // ✅ Guardar last state bajo TODAS las keys (igual que opsStateByName)
+    for (const k of new Set(keys)) {
+      lastOpsStateByName.set(k, finalState);
+    }
+
 
     // ✅ Broadcast ÚNICO del OPS reportado
     io.emit('ops/state', {
