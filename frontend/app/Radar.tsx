@@ -424,23 +424,17 @@ const refreshPinnedDistance = () => {
       // ✅ NUEVO (backend truth)
       assignedOps?: Record<string, string>;
       opsTargets?: Record<string, { fix?: string; lat: number; lon: number }>;
-      reportedOpsStates?: Record<string, OpsState>;
-      opsStates?: Record<string, OpsState>;
     };
   }>(null);
 
 function canConfirmRunwayOccupiedNow(): boolean {
   const assigned = getBackendAssignedForMe();   // 'FINAL'|'B1'|'A_TO_Bx'|...
-  const reported = getBackendReportedForMe();   // backend truth
 
   // Si estás en flujo takeoff, no confirmes occupied por touchdown-like
   if (takeoffRequestedRef.current) return false;
 
   // Si vos pediste aterrizar, OK
   if (landingRequestedRef.current) return true;
-
-  // Si el backend te tenía ya en FINAL o B1, OK
-  if (reported === 'FINAL' || reported === 'B1') return true;
 
   // Si el backend te asignó FINAL o B1, OK
   if (assigned === 'FINAL' || assigned === 'B1') return true;
@@ -456,23 +450,17 @@ function getBackendAssignedForMe(): string | null {
   return (st?.assignedOps?.[me] as string) || null;
 }
 
-function getBackendReportedForMe(): OpsState | null {
-  const me = myPlaneRef.current?.id || username;
-  if (!me) return null;
-  const st: any = runwayState?.state;
-  const rep = st?.reportedOpsStates?.[me] || st?.opsStates?.[me];
-  return (typeof rep === 'string' ? (rep as OpsState) : null);
-}
+
+
 
 function canConfirmBeaconNow(fix: string): boolean {
   // fix = 'B2','B17',...
   const assigned = getBackendAssignedForMe(); // 'A_TO_B17' etc
-  const reported = getBackendReportedForMe(); // lo que backend cree ya reportado
 
   if (!/^B\d+$/.test(fix)) return false;
 
-  // si el backend ya te tiene en B1 o FINAL, no confirmes nada de beacons
-  if (reported === 'B1' || reported === 'FINAL') return false;
+    // ✅ si el backend ya te asignó FINAL, no confirmes beacons
+  if (assigned === 'FINAL') return false;
 
   // Debe haber asignación tipo A_TO_Bx
   if (!assigned || !assigned.startsWith('A_TO_')) return false;
@@ -1085,7 +1073,6 @@ if (canConfirmBeaconNow(String(report))) {
   console.log('[OPS] Skip beacon confirm (not assigned by backend):', {
     report,
     assigned: getBackendAssignedForMe(),
-    reported: getBackendReportedForMe(),
   });
 }
 
@@ -1423,20 +1410,7 @@ function keysForPlane(p: Plane): string[] {
 }
 
 // OPS (frontend) que viene dentro de runway-state (reportedOpsStates)
-function getReportedOpsOfPlane(p: Plane): OpsState | null {
-  const st: any = runwayState?.state;
-  const map =
-    (st?.reportedOpsStates as Record<string, OpsState> | undefined) ??
-    (st?.opsStates as Record<string, OpsState> | undefined);
 
-  if (!map) return null;
-
-  for (const k of keysForPlane(p)) {
-    const v = map[k];
-    if (typeof v === 'string' && v) return v as OpsState;
-  }
-  return null;
-}
 
 function planeIsInQueue(p: Plane): boolean {
   const st: any = runwayState?.state;
@@ -3194,7 +3168,6 @@ reportIfDwellInside(
     } else {
       console.log('[OPS] Skip RUNWAY_OCCUPIED (not in landing flow):', {
         assigned: getBackendAssignedForMe(),
-        reported: getBackendReportedForMe(),
         landingRequested: landingRequestedRef.current,
         takeoffRequested: takeoffRequestedRef.current,
       });
@@ -3337,106 +3310,104 @@ reportIfDwellInside(
 }, [myPlane.lat, myPlane.lon, myPlane.alt, myPlane.speed, runwayState, rw]);
 
 
-// ===============================
-// NAV (ÚNICO): backend → ATC → takeoff → apron/ground → landing(OPS)
-// ===============================
-useEffect(() => {
-  const me = myPlane?.id || username;
-  if (!me) return;
+  // ===============================
+  // NAV (ÚNICO): backend → ATC → takeoff → apron/ground → landing(ASSIGNED)
+  // ===============================
+  useEffect(() => {
+    const me = myPlane?.id || username;
+    if (!me) return;
 
-  const st = runwayState?.state;
+    const st = runwayState?.state;
 
-  // 1) PRIORIDAD ABSOLUTA: backend opsTargets
-  const backendTarget = st?.opsTargets?.[me];
-  if (
-    backendTarget &&
-    typeof backendTarget.lat === 'number' &&
-    typeof backendTarget.lon === 'number'
-  ) {
-    setNavTargetSafe({ latitude: backendTarget.lat, longitude: backendTarget.lon });
-    return;
-  }
+    // ✅ verdad local solo para GROUND
+    const myFact = (lastOpsStateRef.current as OpsState | null);
 
-  // 2) Si ATC dirigido está activo, no tocar navTarget (lo maneja atc-instruction)
-  if (serverATCRef.current) return;
+    // ✅ orden backend (ATC) para landing fallback
+    const assigned = (st?.assignedOps?.[me] as string | undefined);
 
-  // 3) TAKEOFF: siempre a cabecera activa
-  if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
-    const end = rw?.active_end === 'B' ? 'B' : 'A';
-    const thr = end === 'B' ? B_runway : A_runway;
-    setNavTargetSafe(thr ?? null);
-    return;
-  }
-
-  // 4) APRON latch / ground ops → apron
-  if (apronLatchRef.current) {
-    setNavTargetSafe(getApronPoint() ?? null);
-    return;
-  }
-
-  const myOpsFromMap = st?.opsStates?.[me] ?? null;
-  const myOps = (myOpsFromMap || (lastOpsStateRef.current as OpsState | null));
-
-  if (myOps && GROUND_OPS.has(myOps)) {
-    setNavTargetSafe(getApronPoint() ?? null);
-    return;
-  }
-
-  // 5) Si no pedí aterrizaje, no guiar
-  if (!landingRequestedRef.current || defaultActionForMe() !== 'land') {
-    setNavTargetSafe(null);
-    return;
-  }
-
-  // 6) LANDING por OPS (fallback si no hay backendTarget)
-  if (myOps === 'FINAL') {
-    setNavTargetSafe(activeThreshold ?? null);
-    return;
-  }
-
-  if (myOps === 'B1') {
-    setNavTargetSafe(beaconB1 ?? null);
-    return;
-  }
-
-  // A_TO_B2 / A_TO_B3 / A_TO_B4...
-  if (typeof myOps === 'string' && myOps.startsWith('A_TO_B')) {
-    const n = Number(myOps.replace('A_TO_B', '')); // 2,3,4...
-    if (n === 2) { setNavTargetSafe(beaconB2 ?? null); return; }
-    if (n >= 3) {
-      const idx = n - 3; // B3 -> 0
-      const b = extraBeacons[idx];
-      setNavTargetSafe(b ?? beaconB2 ?? null);
+    // 1) PRIORIDAD ABSOLUTA: backend opsTargets
+    const backendTarget = st?.opsTargets?.[me];
+    if (
+      backendTarget &&
+      typeof backendTarget.lat === 'number' &&
+      typeof backendTarget.lon === 'number'
+    ) {
+      setNavTargetSafe({ latitude: backendTarget.lat, longitude: backendTarget.lon });
       return;
     }
-  }
 
-  // B2/B3/B4 directos (si alguna vez los usás)
-  if (typeof myOps === 'string' && /^B\d+$/.test(myOps)) {
-    const n = Number(myOps.slice(1));
-    if (n === 1) { setNavTargetSafe(beaconB1 ?? null); return; }
-    if (n === 2) { setNavTargetSafe(beaconB2 ?? null); return; }
-    if (n >= 3) {
-      const idx = n - 3;
-      setNavTargetSafe(extraBeacons[idx] ?? beaconB2 ?? null);
+    // 2) Si ATC dirigido está activo, no tocar navTarget (lo maneja atc-instruction)
+    if (serverATCRef.current) return;
+
+    // 3) TAKEOFF: siempre a cabecera activa
+    if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
+      const end = rw?.active_end === 'B' ? 'B' : 'A';
+      const thr = end === 'B' ? B_runway : A_runway;
+      setNavTargetSafe(thr ?? null);
       return;
     }
-  }
 
-  // fallback: no tocar
-}, [
-  username,
-  runwayState,
-  rw,
-  beaconB1,
-  beaconB2,
-  activeThreshold,
-  extraBeacons,
-  myPlane?.id,
-  myPlane.lat,
-  myPlane.lon,
-  myPlane.speed,
-]);
+    // 4) APRON latch → apron
+    if (apronLatchRef.current) {
+      setNavTargetSafe(getApronPoint() ?? null);
+      return;
+    }
+
+    // 4b) GROUND OPS (solo fact local) → apron
+    if (myFact && GROUND_OPS.has(myFact)) {
+      setNavTargetSafe(getApronPoint() ?? null);
+      return;
+    }
+
+    // 5) Si no pedí aterrizaje, no guiar
+    if (!landingRequestedRef.current || defaultActionForMe() !== 'land') {
+      setNavTargetSafe(null);
+      return;
+    }
+
+    // 6) LANDING fallback por ORDEN BACKEND (assignedOps)
+    //    (Si no hay assigned, no tocamos navTarget)
+    if (!assigned) return;
+
+    // opcional: si backend manda B1 como orden
+    if (assigned === 'B1') {
+      setNavTargetSafe(beaconB1 ?? null);
+      return;
+    }
+
+    // backend-only FINAL (orden) → umbral activo
+    if (assigned === 'FINAL') {
+      setNavTargetSafe(activeThreshold ?? null);
+      return;
+    }
+
+    // A_TO_B2 / A_TO_B3 / A_TO_B4...
+    if (typeof assigned === 'string' && assigned.startsWith('A_TO_B')) {
+      const n = Number(assigned.replace('A_TO_B', '')); // 2,3,4...
+      if (n === 2) { setNavTargetSafe(beaconB2 ?? null); return; }
+      if (n >= 3) {
+        const idx = n - 3; // B3 -> 0
+        const b = extraBeacons[idx];
+        setNavTargetSafe(b ?? beaconB2 ?? null);
+        return;
+      }
+    }
+
+    // fallback: no tocar
+  }, [
+    username,
+    runwayState,
+    rw,
+    beaconB1,
+    beaconB2,
+    activeThreshold,
+    extraBeacons,
+    myPlane?.id,
+    myPlane.lat,
+    myPlane.lon,
+    myPlane.speed,
+  ]);
+
 
 
   useEffect(() => {
@@ -3549,8 +3520,6 @@ useEffect(() => {
 
           ops = ops || inferOpsForDisplay(plane);
 
-          // 2) OPS (frontend / reported) desde runway-state
-          const opsReported = getReportedOpsOfPlane(plane);
 
           // 3) ATC (backend / assigned) A_TO_Bx / FINAL desde runway-state
           const atcAssigned = getAssignedOpsOfPlane(plane);
@@ -3565,7 +3534,6 @@ useEffect(() => {
           setSelected({
             ...plane,
             ops,          // compat con tu UI actual
-            opsReported,  // FRONTEND (reported)
             atcAssigned,  // BACKEND (assignedOps)
             atcTarget,    // BACKEND (opsTargets)
           } as any);
@@ -3576,7 +3544,7 @@ useEffect(() => {
             (plane.alertLevel === 'none' || !plane.alertLevel);
           selectedHoldUntilRef.current = isPureInfo ? Date.now() + 5000 : 0;
           if (warning) {
-            const w = { ...warning, ops, opsReported, atcAssigned, atcTarget } as any;
+            const w = { ...warning, ops, atcAssigned, atcTarget } as any;
             priorizarWarningManual(w);
             maybeEmitWarning(w);
           } else if (
@@ -3599,7 +3567,6 @@ useEffect(() => {
               callsign: plane.callsign,
               aircraftIcon: plane.aircraftIcon,
               ops,
-              opsReported,
               atcAssigned,
               atcTarget,
             } as any);

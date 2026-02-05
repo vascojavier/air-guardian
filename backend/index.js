@@ -159,28 +159,33 @@ const landingStateByName = new Map(); // name -> { state: 'ORD'|..., ts:number }
   const lastOpsStateByName = new Map(); // name -> string
 
 
-function getOpsState(name) {
-  const r = opsReportedByName.get(name)?.state || null; // B#, RUNWAY_*
-  const b = opsBackendByName.get(name)?.state || null;  // FINAL / A_TO_Bx
-
-  // 1) Estados críticos del frontend
-  if (r === 'RUNWAY_OCCUPIED' || r === 'RUNWAY_CLEAR') return r;
-
-  // 2) FINAL manda siempre
-  if (b === 'FINAL') return 'FINAL';
-
-  // 3) Confirmación de B1 del frontend
-  if (r === 'B1') return 'B1';
-
-  // 4) Otros beacons confirmados
-  if (r && /^B\d+$/.test(r)) return r;
-
-  // 5) Guía ATC si no hay nada mejor
-  if (b && b.startsWith('A_TO_')) return b;
-
-  return null;
+function getReportedOpsState(name) {
+  return opsReportedByName.get(name)?.state || null; // SOLO lo que confirmó el frontend
 }
 
+function getEffectiveOpsState(name) {
+  const r = getReportedOpsState(name);                 // B#, RUNWAY_*
+  const b = opsBackendByName.get(name)?.state || null; // FINAL / A_TO_Bx
+
+  // 1) Críticos del frontend ganan siempre
+  if (r === 'RUNWAY_OCCUPIED' || r === 'RUNWAY_CLEAR' || r === 'APRON_STOP') return r;
+
+  // 2) FINAL backend (solo para UI/guía)
+  if (b === 'FINAL') return 'FINAL';
+
+  // 3) Beacons confirmados por frontend
+  if (r && /^B\d+$/.test(r)) return r;
+
+  // 4) Guía ATC si no hay nada mejor
+  if (b && b.startsWith('A_TO_')) return b;
+
+  return r || null;
+}
+
+
+function getOpsState(name) {
+  return getEffectiveOpsState(name);
+}
 
 
 function isB1Latched(name) {
@@ -188,26 +193,11 @@ function isB1Latched(name) {
 }
 
 function updateB1LatchFor(name) {
-  const S = getAtcSettings();   // 👈 ACÁ
-  const g = activeRunwayGeom();
-  const u = userLocations[name];
-  if (!g || !u) return;
-
-  const B1 = g.B1;
-  const d = getDistance(u.latitude, u.longitude, B1.lat, B1.lon);
-  if (!isFinite(d)) return;
-
-  // ✅ SOLO latch si el FRONTEND confirmó B1/FINAL
-  const st = getOpsState(name);
+  const st = getReportedOpsState(name);
   const latched = (st === 'B1' || st === 'FINAL');
-
   b1LatchByName.set(name, { latched, farSince: null });
-  return;
-
-
-  // Si está entre ON y OFF no hacemos nada (histeresis real)
-  b1LatchByName.set(name, cur);
 }
+
 
 function setFinalEnterNow(name) {
   if (!finalEnterByName.has(name)) finalEnterByName.set(name, Date.now());
@@ -425,7 +415,7 @@ function crossedThreshold(name) {
   if (!u || !g) return false;
 
   const S = getAtcSettings();
-  const st = getOpsState(name);
+  const st = getReportedOpsState(name);
 
   // sólo nos interesa si estaba en fase final-like pero NO ocupó pista
   if (st !== 'FINAL' && st !== 'B1') return false;
@@ -626,7 +616,7 @@ function isCommitted(name) {
   const L = getLandingByName(name);
 
   // ✅ Fuente de verdad: SOLO el OPS reportado por el frontend
-  const curOps = getOpsState(name);
+  const curOps = getReportedOpsState(name);
   if (curOps === 'FINAL' || curOps === 'B1') return true;
 
   // ✅ Si ya estaba congelado por lógica interna (p.ej. cuando el front confirmó B1/FINAL),
@@ -684,7 +674,7 @@ function enforceCompliance() {
 
 
         // === AUTO GO-AROUND: drift lejos de B1 sostenido ===
-    const st = getOpsState(L.name);
+    const st = getReportedOpsState(L.name);
     const inFinalLike =
     (st === 'B1' || st === 'FINAL' || isB1Latched(L.name) || getLandingState(L.name) === 'FINAL');
 
@@ -695,7 +685,7 @@ function enforceCompliance() {
     // Sólo aplica al #1 (líder). Si no cumple, pierde turno y sale de la cola.
     const leader = leaderName();
     if (leader && leader === L.name) {
-      const stL = getOpsState(L.name);
+      const stL = getReportedOpsState(L.name);
       const inFinalLikeL = (stL === 'B1' || stL === 'FINAL');
 
       if (inFinalLikeL) {
@@ -1167,7 +1157,7 @@ function computeAssignedOpsStates() {
     const name = L.name;
     if (!name) return;
 
-    const reported = getOpsState(name); // lo que reporta el frontend
+    const reported = getReportedOpsState(name); // lo que reporta el frontend
     const sticky = getLandingState(name); // tu sticky (ORD,B2,B1,FINAL,...)
 
     // Congelados / estados finales
@@ -1224,8 +1214,9 @@ function publishRunwayState() {
 
   // --- FRONT-REPORTED OPS (lo que reporta el frontend) ---
   const reportedOpsStates = Object.fromEntries(
-    Array.from(opsStateByName.entries()).map(([k, v]) => [k, v.state])
+    Array.from(opsReportedByName.entries()).map(([k, v]) => [k, v.state])
   );
+
 
   // --- BACKEND NAV ASSIGNMENTS (target de navegación) ---
   const assignedOps = {}; // name -> 'A_TO_Bx' | 'FINAL'
@@ -1239,7 +1230,7 @@ function publishRunwayState() {
   let leaderWillBeFinal = false;
   if (leaderNow) {
     const b1LatchedLead = isB1Latched(leaderNow);
-    const stLead = getOpsState(leaderNow); // lo que dijo el frontend: B#, RUNWAY_*, etc.
+    const stLead = getReportedOpsState(leaderNow); // lo que dijo el frontend: B#, RUNWAY_*, etc.
     leaderWillBeFinal =
       (stLead === 'B1' || stLead === 'FINAL' || b1LatchedLead) && !!gNow?.thr;
   }
@@ -1254,7 +1245,7 @@ function publishRunwayState() {
     if (!name) continue;
 
     const b1Latched = isB1Latched(name);
-    const stReported = getOpsState(name); // lo que dijo el frontend: B#, RUNWAY_*, etc.
+    const stReported = getReportedOpsState(name); // lo que dijo el frontend: B#, RUNWAY_*, etc.
     const asg = assignBeaconsFor(name);
 
     // -------------------------
@@ -1264,11 +1255,7 @@ function publishRunwayState() {
     if (leaderNow && name === leaderNow) {
       if (leaderWillBeFinal) {
       assignedOps[name] = 'FINAL';
-
-        // 🔥 CLAVE: el backend CAMBIA el OPS real
-        lastOpsStateByName.set(name, 'FINAL');
-
-        opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+      opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
       } else {
         assignedOps[name] = 'A_TO_B1';
 
@@ -1320,14 +1307,32 @@ function publishRunwayState() {
     }
   }
 
-  // ✅ OPS EFECTIVO: lo que reporta el frontend + override del backend (FINAL / A_TO_*)
-  // Esto hace que "OPS" cambie a FINAL cuando el backend manda FINAL.
-  const opsStates = { ...reportedOpsStates };
-  for (const [name, atc] of Object.entries(assignedOps)) {
-    if (typeof atc === 'string' && atc) {
-      opsStates[name] = atc; // FINAL o A_TO_Bx
+        // ✅ Guardar backend assignments en Map (para getEffectiveOpsState)
+        opsBackendByName.clear();
+        for (const [name, atc] of Object.entries(assignedOps)) {
+          opsBackendByName.set(name, { state: atc, ts: now });
+        }
+
+
+        // ✅ opsStates para UI, pero sin pisar estados críticos del frontend
+    const opsStates = { ...reportedOpsStates };
+
+    const CRITICAL_FRONT = new Set([
+      'RUNWAY_OCCUPIED',
+      'RUNWAY_CLEAR',
+      'APRON_STOP',
+      'TAXI_APRON',
+      'TAXI_TO_RWY',
+      'HOLD_SHORT',
+    ]);
+
+    for (const [name, atc] of Object.entries(assignedOps)) {
+      const r = reportedOpsStates[name];
+      if (CRITICAL_FRONT.has(r)) continue;          // no pisar estados tierra/pista
+      if (typeof atc === 'string' && atc) opsStates[name] = atc;  // A_TO_* o FINAL
     }
-  }
+
+
 
   // Emit principal runway-state (lo que Radar necesita)
   io.emit('runway-state', {
@@ -1509,7 +1514,7 @@ const oldTk   = runwayState.lastOrder.takeoffs || [];
 
   newLand.forEach((name, idx) => {
     if (oldLand.indexOf(name) !== idx) {
-      const st = getOpsState(name);
+      const st = getReportedOpsState(name);
             const allowTurnMsg = !(
       st === 'FINAL' ||
       st === 'RUNWAY_OCCUPIED' ||
@@ -1532,7 +1537,7 @@ const oldTk   = runwayState.lastOrder.takeoffs || [];
 
   newTk.forEach((name, idx) => {
     if (oldTk.indexOf(name) !== idx) {
-      const st2 = getOpsState(name);
+      const st2 = getReportedOpsState(name);
       const allowTkMsg = !(st2 === 'RUNWAY_OCCUPIED' || st2 === 'RUNWAY_CLEAR' || st2 === 'APRON_STOP');
       if (allowTkMsg) {
         emitToUser(name, 'runway-msg', { text: `Su turno de despegue ahora es #${idx+1}`, key: 'turn-tk' });
@@ -1561,7 +1566,7 @@ setInterval(() => {
         updateB1LatchFor(L.name);
 
         // si el frontend reporta B1 o FINAL, marcamos “entró a final”
-        const st = getOpsState(L.name);
+        const st = getReportedOpsState(L.name);
         if (st === 'B1' || st === 'FINAL') setFinalEnterNow(L.name);
       }
       enforceCompliance();
@@ -1750,36 +1755,17 @@ socket.on('ops/state', (msg) => {
       'name=', name,
       'state=', finalState,
       'leaderNow=', leader,
-      'getOpsState(leaderNow)=', leader ? getOpsState(leader) : null,
+      'getReportedOpsState(leaderNow)=', leader ? getReportedOpsState(leader) : null,
       'aux=', aux
       );
-    // Guardar ops reportado por el frontend
-   const rec = { state: finalState, ts: Date.now(), aux };
+    // ✅ Fuente de verdad: ops reportado por el frontend (SOLO por name)
+    const rec = { state: finalState, ts: Date.now(), aux: aux || null };
+    opsReportedByName.set(name, rec);
 
-    // armamos todas las keys que podrían usarse para referenciar a ese avión
-    const k1 = name;
-    const k2 = userLocations?.[name]?.id;        // si existe
-    const k3 = userLocations?.[name]?.callsign;  // si existe
-    const k4 = aux?.id;                          // si el frontend lo manda
-    const k5 = aux?.callsign;                    // si el frontend lo manda
-
-    const keys = [k1, k2, k3, k4, k5]
-      .filter(Boolean)
-      .map(String);
-
-    // ✅ guardamos el mismo OPS bajo TODAS las keys (name/id/callsign)
-    for (const k of new Set(keys)) {
-      opsStateByName.set(k, rec);
-    }
-
-
-    // ✅ Detectar flanco real (prev -> next) usando la key principal (name)
+    // ✅ Detectar flanco real (solo por name)
     const prev = lastOpsStateByName.get(name) || null;
+    lastOpsStateByName.set(name, finalState);
 
-    // ✅ Guardar last state bajo TODAS las keys (igual que opsStateByName)
-    for (const k of new Set(keys)) {
-      lastOpsStateByName.set(k, finalState);
-    }
 
 
     // ✅ Broadcast ÚNICO del OPS reportado
@@ -1831,6 +1817,7 @@ socket.on('ops/state', (msg) => {
       try { clearFinalEnter(name); } catch {}
       try { b1LatchByName.delete(name); } catch {}
     }
+
 
     if (runwayState.landings.length || runwayState.takeoffs.length) {
       planRunwaySequence();
@@ -2117,7 +2104,7 @@ else if (action === 'takeoff') {
   try {
     // Si ya tenés una función:
     if (typeof getOpsState === 'function') {
-      st = getOpsState(name);
+      st = getReportedOpsState(name);
     } else {
       // Fallback común: si guardás estados en un Map opsStateByName
       // ejemplo: opsStateByName.set(name, { state:'TAXI_APRON', ts:Date.now() })
