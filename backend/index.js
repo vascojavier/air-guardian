@@ -56,10 +56,20 @@ function dropFromLandings(name, reason) {
   try { landingStateByName.delete(name); } catch {}
   try { approachPhaseByName.delete(name); } catch {}
 
-  emitToUser(name, 'runway-msg', {
-    text: `OUT: perdió el turno (${reason}). Si desea aterrizar, solicite nuevamente.`,
-    key: 'landing-out'
-  });
+  const r = String(reason || '').toLowerCase();
+
+  const isTimeout = r.includes('timeout');
+  const isDrift = r.includes('alejó') || r.includes('alejo') || r.includes('drift');
+  const isLeader = r.includes('#1') || r.includes('líder') || r.includes('lider');
+
+let key = 'landing-out';
+const params = { reason: String(reason || '') };
+
+if (isTimeout) key = 'landing-timeout';
+else if (isDrift) key = 'landing-drift';
+else if (isLeader) key = 'landing-turn-lost';
+
+emitToUser(name, 'runway-msg', { key, params });
 
   // Replanificar inmediatamente
   try { enforceCompliance(); } catch {}
@@ -665,6 +675,9 @@ function enforceCompliance() {
   const now = Date.now();
   const S = getAtcSettings();   // 👈 ACÁ
   for (const L of runwayState.landings) {
+    const assigned = (runwayState.assignedOps?.[L.name]) || null; 
+    // ejemplos: 'FINAL', 'A_TO_B2', 'A_TO_B3', ...
+
     const asg = assignBeaconsFor(L.name);
     const u = userLocations[L.name];
     if (!asg || !u) continue;
@@ -686,7 +699,12 @@ function enforceCompliance() {
     const leader = leaderName();
     if (leader && leader === L.name) {
       const stL = getReportedOpsState(L.name);
-      const inFinalLikeL = (stL === 'B1' || stL === 'FINAL');
+
+      // 🔑 PRIORIDAD: si backend asignó FINAL, tratá como FINAL aunque reported diga B1
+      const inFinalLikeL =
+        (assigned === 'FINAL') ||
+        (stL === 'FINAL') ||
+        (stL === 'B1'); // si querés conservar que B1 cuente como "final-like" cuando NO hay assigned FINAL
 
       if (inFinalLikeL) {
         const S2 = getAtcSettings();
@@ -695,33 +713,29 @@ function enforceCompliance() {
 
         const elapsed = now - lease.startMs;
 
-        // 1) Overshoot: cruzó umbral sin ocupar
-        // if (crossedThreshold(L.name)) {
-        //  dropFromLandings(L.name, 'pasó el umbral sin ocupar pista');
-        //   continue;
-        //  }
-
         // 2) Timeout en FINAL/B1
         if (elapsed >= S2.LEADER_TIMEOUT_MS) {
           dropFromLandings(L.name, 'timeout como #1 en FINAL/B1');
           continue;
         }
 
-        // 3) Se alejó demasiado del umbral activo (desobedeció / abandonó circuito)
-        const g = activeRunwayGeom();
-        const uL = userLocations[L.name];
-        if (g && uL) {
-          const dThr = getDistance(uL.latitude, uL.longitude, g.thr.lat, g.thr.lon);
-          if (isFinite(dThr) && dThr >= S2.LEADER_DRIFT_MAX_M) {
-            dropFromLandings(L.name, 'se alejó demasiado del umbral activo');
-            continue;
+        // 3) Drift: SOLO aplicar drift al umbral si el backend realmente lo mandó a FINAL
+        if (assigned === 'FINAL' || stL === 'FINAL') {
+          const g = activeRunwayGeom();
+          const uL = userLocations[L.name];
+          if (g && uL) {
+            const dThr = getDistance(uL.latitude, uL.longitude, g.thr.lat, g.thr.lon);
+            if (isFinite(dThr) && dThr >= S2.LEADER_DRIFT_MAX_M) {
+              dropFromLandings(L.name, 'se alejó demasiado del umbral activo');
+              continue;
+            }
           }
         }
       } else {
-        // Si el líder no está en final-like, reseteamos lease (aún no "consumió" turno)
         clearTurnLease(L.name);
       }
     }
+
 
 
     // Refrescar committed siempre
@@ -1150,50 +1164,73 @@ function maybeSendInstruction(opId, opsById) {
 
 function computeAssignedOpsStates() {
   const ops = {};
+  const landings = Array.isArray(runwayState?.landings) ? runwayState.landings : [];
 
-  // Solo asignamos a los que están en cola de aterrizaje
-  // (si querés incluir takeoffs también, lo extendemos)
-  runwayState.landings.forEach((L, idx) => {
-    const name = L.name;
+  const leader = leaderName();
+
+  // ¿Hay alguien YA en FINAL (por orden backend o por sticky)?
+  const finalOccupied = landings.some((L) => {
+    const n = L?.name;
+    if (!n) return false;
+    const phase = getApproachPhase(n);
+    const sticky = getLandingState(n);
+    return phase === 'FINAL' || sticky === 'FINAL';
+  });
+
+  landings.forEach((L, idx) => {
+    const name = L?.name;
     if (!name) return;
 
     const reported = getReportedOpsState(name); // lo que reporta el frontend
-    const sticky = getLandingState(name); // tu sticky (ORD,B2,B1,FINAL,...)
+    const sticky = getLandingState(name);       // tu sticky interno
 
-    // Congelados / estados finales
+    // Terminales (si querés mantenerlos)
     if (reported === 'RUNWAY_OCCUPIED') { ops[name] = 'RUNWAY_OCCUPIED'; return; }
     if (reported === 'RUNWAY_CLEAR')    { ops[name] = 'RUNWAY_CLEAR';    return; }
 
-    // FINAL solo para líder (si tu lógica lo puso)
-    const leader = leaderName();
-    if (leader && name === leader) {
-      // Si backend ya lo “mandó a FINAL” por consumeLeaderOnRunwayOccupied o fase
-      const phase = getApproachPhase(name);
-      if (reported === 'FINAL' || phase === 'FINAL' || sticky === 'FINAL') {
-        ops[name] = 'FINAL';
-        return;
-      }
-    }
+    const phase = getApproachPhase(name);
 
-    // B1 fijo si: reportó B1, sticky >= B1, está latcheado, committed, etc.
-    const isB1Sticky =
-      reported === 'B1' ||
-      sticky === 'B1' || sticky === 'FINAL' || sticky === 'RUNWAY_CLEAR' || sticky === 'IN_STANDS' ||
-      isB1Latched(name) ||
-      (getLandingByName(name)?.committed === true);
-
-    if (isB1Sticky) {
-      ops[name] = 'B1';
+    // Si backend ya lo tiene en FINAL, mantenelo
+    if (phase === 'FINAL' || sticky === 'FINAL') {
+      ops[name] = 'FINAL';
       return;
     }
 
-    // Si no está congelado: B2+ dinámico por orden de cola
-    // idx=0 => B2, idx=1 => B3, ...
-    ops[name] = `B${idx + 2}`;
+    // ====== LÓGICA DE LÍDER ======
+    if (leader && name === leader) {
+      // Si el líder YA confirmó B1 en frontend:
+      if (reported === 'B1') {
+        // Si FINAL está libre -> mandar FINAL
+        if (!finalOccupied) {
+          ops[name] = 'FINAL';
+          return;
+        }
+        // Si FINAL está ocupado -> mantenerlo esperando en B1
+        // Podés usar HOLD_B1 o simplemente A_TO_B1 (orden redundante pero consistente)
+        ops[name] = 'HOLD_B1';
+        return;
+      }
+
+      // Si líder aún NO confirmó B1 -> ordenarlo a B1
+      ops[name] = 'A_TO_B1';
+      return;
+    }
+
+    // ====== RESTO DE LA COLA (NO LÍDER) ======
+    // Si alguno NO-líder confirmó B1, el backend NO lo manda a FINAL (porque FINAL es del líder),
+    // y lo mantiene congelado en B1 esperando su turno.
+    if (reported === 'B1') {
+      ops[name] = 'HOLD_B1';
+      return;
+    }
+
+    // Si no está congelado, orden por cola: idx=0 -> B2, idx=1 -> B3, etc.
+    ops[name] = `A_TO_B${idx + 2}`;
   });
 
   return ops;
 }
+
 
 
 // ========= Publicación de estado =========
@@ -1333,6 +1370,7 @@ function publishRunwayState() {
     }
 
 
+runwayState.assignedOps = computeAssignedOpsStates(); // o tu asignador real
 
   // Emit principal runway-state (lo que Radar necesita)
   io.emit('runway-state', {

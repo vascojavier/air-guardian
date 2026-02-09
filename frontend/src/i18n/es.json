@@ -90,7 +90,11 @@
     "goAroundRegistered": "Arremetida registrada. Reingresando en secuencia.",
     "clearedToLandSpoken": "Autorizado a aterrizar {{rwy}}",
     "yourTakeoffTurnIsNumber": "Su turno de despegue es número {{n}}.",
-    "yourLandingTurnIsNumber": "Su turno de aterrizaje es número {{n}}."
+    "yourLandingTurnIsNumber": "Su turno de aterrizaje es número {{n}}.",
+    "landingOut": "OUT: perdió el turno. Si desea aterrizar, solicite nuevamente.",
+    "landingTurnLost": "TURN LOST: perdió el turno ({{reason}}). Si desea aterrizar, solicite nuevamente.",
+    "landingTimeout": "TIMEOUT: perdió el turno por demora ({{reason}}). Si desea aterrizar, solicite nuevamente.",
+    "landingDrift": "DRIFT: perdió el turno por alejarse ({{reason}}). Si desea aterrizar, solicite nuevamente."
   },
   "nav": {
     "proceedTo": "Proceda a {{fix}}",

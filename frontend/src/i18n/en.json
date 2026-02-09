@@ -98,7 +98,11 @@
     "trafficOnFinalWait": "Traffic on final: wait",
     "clearedToLandSpoken": "Cleared to land {{rwy}}",
     "yourTakeoffTurnIsNumber": "Your takeoff turn is number {{n}}.",
-    "yourLandingTurnIsNumber": "Your landing turn is number {{n}}."
+    "yourLandingTurnIsNumber": "Your landing turn is number {{n}}.",
+    "landingOut": "OUT: landing slot lost. Request landing again if desired.",
+    "landingTurnLost": "TURN LOST: landing priority lost ({{reason}}). Request landing again if desired.",
+    "landingTimeout": "TIMEOUT: landing slot lost due to delay ({{reason}}). Request landing again if desired.",
+    "landingDrift": "DRIFT: landing slot lost due to deviation ({{reason}}). Request landing again if desired."
   },
 
   "nav": {
