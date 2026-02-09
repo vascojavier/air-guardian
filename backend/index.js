@@ -419,6 +419,9 @@ function alongTrackToThresholdM(userLat, userLon) {
   return along; // m
 }
 
+
+
+
 function crossedThreshold(name) {
   const u = userLocations[name];
   const g = activeRunwayGeom();
@@ -1643,14 +1646,10 @@ io.on('connection', (socket) => {
     // (4) Defenderse de cambio de nombre en vivo:
     const existing = userLocations[name];
     if (existing && existing.socketId && existing.socketId !== socket.id) {
-      // Limpiar la tabla inversa del socket anterior que estaba usando este "name"
-      for (const [sid, uname] of Object.entries(socketIdToName)) {
-        if (uname === name) {
-          delete socketIdToName[sid];
-          break;
-        }
-      }
+      // 🔥 RECONNECT con mismo "name" (ExpoGo re-scan / reload)
+      hardResetUser(name);
     }
+
 
     userLocations[name] = {
       name,
@@ -1700,44 +1699,59 @@ socket.broadcast.emit('traffic-update', [payload]);
     }
  });
 
- function hardResetUser(name) {
+function hardResetUser(name) {
   if (!name) return;
+
+  // 0) limpiar índices socket<->name
+  try {
+    for (const [sid, uname] of Object.entries(socketIdToName)) {
+      if (uname === name) delete socketIdToName[sid];
+    }
+  } catch {}
 
   // 1) Sacarlo de colas
   runwayState.landings = (runwayState.landings || []).filter(x => x.name !== name);
   runwayState.takeoffs = (runwayState.takeoffs || []).filter(x => x.name !== name);
 
-  // 2) Borrar OPS y flancos
-  try { opsStateByName.delete(name); } catch {}
-  try { lastOpsStateByName.delete(name); } catch {}
+  // 2) Borrar OPS y flancos (si existen)
+  try { opsStateByName?.delete(name); } catch {}
+  try { lastOpsStateByName?.delete(name); } catch {}
 
-  // 3) Borrar latches / leases / fases / sticky
-  try { clearTurnLease(name); } catch {}
-  try { clearFinalEnter(name); } catch {}
-  try { b1LatchByName.delete(name); } catch {}
+  // 3) Borrar latches / drift / leases / fases / sticky (ACÁ estaba el bug)
+  try { clearTurnLease?.(name); } catch {}
+  try { turnLeaseByName?.delete(name); } catch {}       // por si existe como Map directo
+  try { clearFinalEnter?.(name); } catch {}
+  try { finalEnterByName?.delete(name); } catch {}      // si existe
+  try { b1LatchByName?.delete(name); } catch {}
+  try { driftSinceByName?.delete(name); } catch {}      // IMPORTANTE
+  try { landingStateByName?.delete(name); } catch {}
+  try { approachPhaseByName?.delete(name); } catch {}
 
-  try { landingStateByName.delete(name); } catch {}
-  try { approachPhaseByName.delete(name); } catch {}
-
-  // 4) Borrar ubicación (evita “avión fantasma” en mapa)
+  // 4) Borrar ubicación (evita “avión fantasma”)
   try { delete userLocations[name]; } catch {}
 
   // 5) Si estaba ocupando la pista
   if (runwayState.inUse?.name === name) runwayState.inUse = null;
 
   // 6) Replanificar y publicar
-  try { planRunwaySequence(); } catch {}
-  try { publishRunwayState(); } catch {}
+  try { enforceCompliance?.(); } catch {}
+  try { planRunwaySequence?.(); } catch {}
+  try { publishRunwayState?.(); } catch {}
+
+  console.log(`[OPS] hardResetUser(${name})`);
 }
+
 
 socket.on('leave', (msg) => {
   try {
-    const name = msg?.name;
-    hardResetUser(name);
+    const name = msg?.name || socketIdToName[socket.id];
+    if (name) hardResetUser(name);
+    delete socketIdToName[socket.id];
   } catch (e) {
     console.error('leave error:', e);
   }
 });
+
 
 
    // === Estado operativo reportado por el frontend ===
@@ -2049,25 +2063,27 @@ socket.on('air-guardian/leave', () => {
   // 🔌 Cliente se desconecta físicamente (cierra app o pierde conexión)
   socket.on('disconnect', () => {
     console.log('🔌 Cliente desconectado:', socket.id);
+
     const name = socketIdToName[socket.id];
+
+    // limpiar mapping del socket SIEMPRE
+    delete socketIdToName[socket.id];
+
     if (name) {
-      delete userLocations[name];
-      delete socketIdToName[socket.id];
+      // ✅ limpieza TOTAL (colas + OPS + latches + drift + leases + fases + userLocations + inUse + replans)
+      try { hardResetUser(name); } catch (e) { console.error('hardResetUser error:', e); }
+
+      // Evento UI opcional (si querés que el radar saque el marker rápido)
       io.emit('user-removed', name);
-      console.log(`❌ Usuario ${name} eliminado por desconexión`);
-          // 👇 limpiar estado sticky
-    landingStateByName.delete(name);
-    lastOpsStateByName.delete(name);
 
-    clearTurnLease(name);
+      console.log(`❌ Usuario ${name} eliminado por desconexión (hard reset)`);
+    } else {
+      // aunque no haya name, igual replan por seguridad
+      try { planRunwaySequence(); } catch {}
+      try { publishRunwayState(); } catch {}
     }
-
-    // ►► (AGREGADO) limpiar de colas si corresponde
-    runwayState.landings = runwayState.landings.filter(x => x.name !== name);
-    runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
-    planRunwaySequence();
-    publishRunwayState();
   });
+
 
   // 🛑 Cliente pide ser eliminado manualmente (cambio de avión o sale de Radar)
   socket.on('remove-user', (name) => {
