@@ -628,16 +628,28 @@ function markAdvancement(name) {
 function isCommitted(name) {
   const L = getLandingByName(name);
 
-  // ✅ Fuente de verdad: SOLO el OPS reportado por el frontend
+  // 1) Frontend confirmado
   const curOps = getReportedOpsState(name);
   if (curOps === 'FINAL' || curOps === 'B1') return true;
 
-  // ✅ Si ya estaba congelado por lógica interna (p.ej. cuando el front confirmó B1/FINAL),
-  // lo consideramos committed también.
+  // 2) Backend ya lo mandó a FINAL (esto evita que el scheduler lo reordene)
+  const backendAssigned = runwayState?.assignedOps?.[name] || null;
+  if (backendAssigned === 'FINAL') return true;
+
+  const backend = opsBackendByName.get(name)?.state || null;
+  if (backend === 'FINAL') return true;
+
+  // 3) Sticky interno
+  const phase = getApproachPhase(name);
+  const sticky = getLandingState(name);
+  if (phase === 'FINAL' || sticky === 'FINAL') return true;
+
+  // 4) Freeze local
   if (L?.frozenLevel === 1) return true;
 
   return false;
 }
+
 
 
 
@@ -1393,7 +1405,8 @@ function publishRunwayState() {
     }
 
 
-runwayState.assignedOps = computeAssignedOpsStates(); // o tu asignador real
+runwayState.assignedOps = assignedOps;
+
 
   // Emit principal runway-state (lo que Radar necesita)
   io.emit('runway-state', {
