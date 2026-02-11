@@ -16,7 +16,7 @@ const ATC_DEFAULTS = {
     FINAL_TIMEOUT_MS : 6 * 60 * 1000,     // 6 min en B1/FINAL sin ocupar pista => go-around
     GOAROUND_DRIFT_M : 9000,              // si se va >9 km de B1 (sostenido) => go-around
     GOAROUND_DRIFT_SUSTAIN_MS : 20000,    // 20 s sostenido
-    LEADER_TIMEOUT_MS : 90 * 1000,     // 90s líder en FINAL/B1 sin RUNWAY_OCCUPIED => OUT
+    LEADER_TIMEOUT_MS : 240 * 1000, // 4 min líder en FINAL sin RUNWAY_OCCUPIED => OUT
     LEADER_DRIFT_MAX_M : 9000,         // si se aleja >9 km del umbral activo => OUT
 
 };
@@ -703,40 +703,61 @@ function enforceCompliance() {
     if (leader && leader === L.name) {
       const stL = getReportedOpsState(L.name);
 
-      // 🔑 PRIORIDAD: si backend asignó FINAL, tratá como FINAL aunque reported diga B1
-      const inFinalLikeL =
-        (assigned === 'FINAL') ||
-        (stL === 'FINAL') ||
-        (stL === 'B1'); // si querés conservar que B1 cuente como "final-like" cuando NO hay assigned FINAL
+      // ✅ SOLO timeout cuando realmente está en FINAL (o backend lo fijó como FINAL)
+      const assignedFinal = assigned === 'FINAL';
 
-      if (inFinalLikeL) {
+      const inFinalStrict =
+        assignedFinal ||
+        (stL === 'FINAL') ||
+        (getApproachPhase(L.name) === 'FINAL') ||
+        (getLandingState(L.name) === 'FINAL');
+
+      if (inFinalStrict) {
         const S2 = getAtcSettings();
-        const lease = turnLeaseByName.get(L.name) || { startMs: now, lastAlongM: null, lastSeenMs: now };
+
+        const lease = turnLeaseByName.get(L.name) || { startMs: now, lastThrDistM: null, lastSeenMs: now };
         if (!turnLeaseByName.has(L.name)) turnLeaseByName.set(L.name, lease);
+
+        // (Opcional pero MUY útil): si se está acercando al umbral, no lo timeoutees
+        const g = activeRunwayGeom();
+        const uL = userLocations[L.name];
+        if (g && uL) {
+          const dThr = getDistance(uL.latitude, uL.longitude, g.thr.lat, g.thr.lon);
+
+          if (isFinite(dThr)) {
+          // ✅ reset del reloj si progresa o si ya está realmente "en final"
+          const improved = (lease.lastThrDistM == null) || (dThr <= lease.lastThrDistM - 50); // 50m
+          const inCloseFinal = isFinite(dThr) && dThr <= S2.FINAL_LOCK_RADIUS_M; // ej 2000m
+
+          if (improved || inCloseFinal) {
+            lease.startMs = now;
+          }
+          lease.lastThrDistM = dThr;
+
+          }
+        }
 
         const elapsed = now - lease.startMs;
 
-        // 2) Timeout en FINAL/B1
+        // ✅ Timeout SOLO en FINAL
         if (elapsed >= S2.LEADER_TIMEOUT_MS) {
-          dropFromLandings(L.name, 'timeout como #1 en FINAL/B1');
+          dropFromLandings(L.name, 'timeout como #1 en FINAL');
           continue;
         }
 
-        // 3) Drift: SOLO aplicar drift al umbral si el backend realmente lo mandó a FINAL
-        if (assigned === 'FINAL' || stL === 'FINAL') {
-          const g = activeRunwayGeom();
-          const uL = userLocations[L.name];
-          if (g && uL) {
-            const dThr = getDistance(uL.latitude, uL.longitude, g.thr.lat, g.thr.lon);
-            if (isFinite(dThr) && dThr >= S2.LEADER_DRIFT_MAX_M) {
-              dropFromLandings(L.name, 'se alejó demasiado del umbral activo');
-              continue;
-            }
+        // ✅ Drift lejos del umbral activo (mantener)
+        if (g && uL) {
+          const dThr = getDistance(uL.latitude, uL.longitude, g.thr.lat, g.thr.lon);
+          if (isFinite(dThr) && dThr >= S2.LEADER_DRIFT_MAX_M) {
+            dropFromLandings(L.name, 'se alejó demasiado del umbral activo');
+            continue;
           }
         }
       } else {
+        // ✅ Si todavía no está en FINAL, no corras timeout (B1 tiene que ser generoso)
         clearTurnLease(L.name);
       }
+
     }
 
 
