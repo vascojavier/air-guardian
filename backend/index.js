@@ -705,7 +705,6 @@ function enforceCompliance() {
 
       // ✅ SOLO timeout cuando realmente está en FINAL (o backend lo fijó como FINAL)
       const assignedFinal = assigned === 'FINAL';
-
       const inFinalStrict =
         assignedFinal ||
         (stL === 'FINAL') ||
