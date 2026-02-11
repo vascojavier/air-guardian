@@ -471,12 +471,30 @@ function canConfirmBeaconNow(fix: string): boolean {
   return true;
 }
 
+
+
 const isBeaconOps = (s: any): s is OpsState =>
 typeof s === 'string' && /^B\d+$/.test(s);
 
 
 function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<string, any>) {
   const now = Date.now();
+
+    // =========================
+  // 🔒 FINAL lock (backend manda)
+  // =========================
+  const meKey = myPlaneRef.current?.id || username;   // 👈 usar id real, no username pelado
+  const stAny: any = runwayState?.state;
+  const assigned2 = stAny?.assignedOps?.[meKey];       // 'FINAL' | 'B1' | 'A_TO_Bx' | ...
+
+  // ✅ Si backend asignó FINAL, frontend NO puede cambiar OPS
+  //    ÚNICA excepción: RUNWAY_OCCUPIED (touchdown)
+  if (assigned2 === 'FINAL' && next !== 'RUNWAY_OCCUPIED') {
+    console.log('[OPS] BLOCKED by FINAL lock (backend).', { next, source, assigned2, meKey });
+    return;
+  }
+
+  // ...tu lógica existente abajo
 
   // ❌ Nunca confirmar FINAL desde frontend
   if (FRONTEND_FORBIDDEN_OPS.has(next)) {
@@ -2571,6 +2589,7 @@ s.on('atc-instruction', (instr: any) => {
   });
 
 
+  
 
 
 s.on('ops/state', (msg: any) => {

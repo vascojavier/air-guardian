@@ -1328,6 +1328,13 @@ function publishRunwayState() {
       if (leaderWillBeFinal) {
       assignedOps[name] = 'FINAL';
       opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+
+            // Si lo mando a FINAL, también fuerzo OPS reportado a FINAL para lockear el front
+            opsReportedByName.set(name, { state: 'FINAL', ts: now, aux: { forcedBy: 'backend' } });
+            lastOpsStateByName.set(name, 'FINAL');
+            io.emit('ops/state', { name, state: 'FINAL', ts: now, aux: { forcedBy: 'backend' } });
+
+
       } else {
         assignedOps[name] = 'A_TO_B1';
 
@@ -1851,6 +1858,27 @@ socket.on('ops/state', (msg) => {
     const prev = lastOpsStateByName.get(name) || null;
     lastOpsStateByName.set(name, finalState);
 
+            // --- FINAL LOCK: si el backend lo tiene en FINAL, no aceptamos regresión a B1/Bx ---
+            const assignedNow = runwayState.assignedOps?.[name] || null;
+            const alreadyFinal = (getReportedOpsState(name) === 'FINAL');
+
+            const backendFinal =
+              assignedNow === 'FINAL' ||
+              getApproachPhase(name) === 'FINAL' ||
+              getLandingState(name) === 'FINAL';
+
+            // Si backendFinal: forzamos FINAL como OPS (salvo estados críticos de pista/tierra)
+            const CRITICAL = new Set(['RUNWAY_OCCUPIED','RUNWAY_CLEAR','APRON_STOP','TAXI_APRON','TAXI_TO_RWY','HOLD_SHORT']);
+
+            if (backendFinal && !CRITICAL.has(state)) {
+              // si llega B1/B2/etc, lo convertimos a FINAL
+              state = 'FINAL';
+            }
+
+            // Si ya estaba FINAL reportado, ignorar cualquier intento de bajarlo (por seguridad extra)
+            if (alreadyFinal && state !== 'FINAL' && !CRITICAL.has(state)) {
+              return;
+            }
 
 
     // ✅ Broadcast ÚNICO del OPS reportado
