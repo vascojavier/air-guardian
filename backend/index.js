@@ -1329,12 +1329,6 @@ function publishRunwayState() {
       assignedOps[name] = 'FINAL';
       opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
 
-            // Si lo mando a FINAL, también fuerzo OPS reportado a FINAL para lockear el front
-            opsReportedByName.set(name, { state: 'FINAL', ts: now, aux: { forcedBy: 'backend' } });
-            lastOpsStateByName.set(name, 'FINAL');
-            io.emit('ops/state', { name, state: 'FINAL', ts: now, aux: { forcedBy: 'backend' } });
-
-
       } else {
         assignedOps[name] = 'A_TO_B1';
 
@@ -1832,104 +1826,114 @@ socket.on('ops/state', (msg) => {
 
     if (!name || !state) return;
 
-    // --- normalizamos FINAL sólo si NO es el líder ---
-    const leader = leaderName();
-    let finalState = state;
-
-    if (state === 'FINAL' && leader && name !== leader) {
-      // si no es líder, ignoramos FINAL (no lo degradamos a B1)
-      return;
-    }
-
-        // ✅ Diagnóstico: YA tenemos name/finalState/leader
-    console.log(
-      '[ops/state]',
-      'name=', name,
-      'state=', finalState,
-      'leaderNow=', leader,
-      'getReportedOpsState(leaderNow)=', leader ? getReportedOpsState(leader) : null,
-      'aux=', aux
-      );
-    // ✅ Fuente de verdad: ops reportado por el frontend (SOLO por name)
-    const rec = { state: finalState, ts: Date.now(), aux: aux || null };
-    opsReportedByName.set(name, rec);
-
-    // ✅ Detectar flanco real (solo por name)
-    const prev = lastOpsStateByName.get(name) || null;
-    lastOpsStateByName.set(name, finalState);
-
-            // --- FINAL LOCK: si el backend lo tiene en FINAL, no aceptamos regresión a B1/Bx ---
-            const assignedNow = runwayState.assignedOps?.[name] || null;
-            const alreadyFinal = (getReportedOpsState(name) === 'FINAL');
-
-            const backendFinal =
-              assignedNow === 'FINAL' ||
-              getApproachPhase(name) === 'FINAL' ||
-              getLandingState(name) === 'FINAL';
-
-            // Si backendFinal: forzamos FINAL como OPS (salvo estados críticos de pista/tierra)
-            const CRITICAL = new Set(['RUNWAY_OCCUPIED','RUNWAY_CLEAR','APRON_STOP','TAXI_APRON','TAXI_TO_RWY','HOLD_SHORT']);
-
-            if (backendFinal && !CRITICAL.has(state)) {
-              // si llega B1/B2/etc, lo convertimos a FINAL
-              state = 'FINAL';
-            }
-
-            // Si ya estaba FINAL reportado, ignorar cualquier intento de bajarlo (por seguridad extra)
-            if (alreadyFinal && state !== 'FINAL' && !CRITICAL.has(state)) {
-              return;
-            }
 
 
-    // ✅ Broadcast ÚNICO del OPS reportado
-    io.emit('ops/state', {
-      name,
-      state: finalState,
-      ts: Date.now(),
-      aux: aux || null,
-    });
+        // --- normalizamos FINAL sólo si NO es el líder ---
+        const leader = leaderName();
+        let acceptedState = state;
 
-    // ✅ Trigger: SOLO si hubo flanco hacia RUNWAY_OCCUPIED y SOLO si es el líder actual
-    if (prev !== 'RUNWAY_OCCUPIED' && finalState === 'RUNWAY_OCCUPIED') {
-      const didConsume = consumeLeaderOnRunwayOccupied(name);
-      if (didConsume) {
-        return;
-      }
-    }
+        // si no es líder, ignoramos FINAL (no lo degradamos a B1)
+        if (acceptedState === 'FINAL' && leader && name !== leader) {
+          return;
+        }
+
+        const CRITICAL = new Set([
+          'RUNWAY_OCCUPIED','RUNWAY_CLEAR','APRON_STOP','TAXI_APRON','TAXI_TO_RWY','HOLD_SHORT'
+        ]);
+
+        // ✅ Diagnóstico temprano
+        console.log(
+          '[ops/state]',
+          'name=', name,
+          'state=', acceptedState,
+          'leaderNow=', leader,
+          'getReportedOpsState(leaderNow)=', leader ? getReportedOpsState(leader) : null,
+          'aux=', aux
+        );
+
+        // 1) Si ya estaba FINAL reportado, no aceptes regresión (salvo críticos)
+        const alreadyFinal = (getReportedOpsState(name) === 'FINAL');
+        if (alreadyFinal && acceptedState !== 'FINAL' && !CRITICAL.has(acceptedState)) {
+          return;
+        }
+
+        // 2) Si el backend lo tiene asignado a FINAL, tampoco aceptes regresión (salvo críticos)
+        const assignedNow = runwayState.assignedOps?.[name] || null;
+        const backendFinal =
+          assignedNow === 'FINAL' ||
+          getApproachPhase(name) === 'FINAL' ||
+          getLandingState(name) === 'FINAL';
+
+        if (backendFinal && acceptedState !== 'FINAL' && !CRITICAL.has(acceptedState)) {
+          return;
+        }
+
+        // 3) Guardar y emitir el estado aceptado (SOLO frontend -> backend aquí)
+        opsReportedByName.set(name, { state: acceptedState, ts: Date.now(), aux: aux || null });
+
+        const prev = lastOpsStateByName.get(name) || null;
+        lastOpsStateByName.set(name, acceptedState);
+
+        // Broadcast ÚNICO del OPS reportado
+        io.emit('ops/state', {
+          name,
+          state: acceptedState,
+          ts: Date.now(),
+          aux: aux || null,
+        });
+
+        // ✅ Trigger: SOLO si hubo flanco hacia RUNWAY_OCCUPIED y SOLO si es el líder actual
+        if (prev !== 'RUNWAY_OCCUPIED' && acceptedState === 'RUNWAY_OCCUPIED') {
+          const didConsume = consumeLeaderOnRunwayOccupied(name);
+          if (didConsume) return;
+        }
 
     // Ajustes suaves al scheduler
-    if (finalState === 'RUNWAY_OCCUPIED' && !runwayState.inUse) {
-      runwayState.inUse = {
-        action: 'landing',
-        name,
-        callsign: userLocations[name]?.callsign || '',
-        startedAt: Date.now(),
-        slotMin: MIN_LDG_SEP_MIN
-      };
-    }
+// Ajustes suaves al scheduler (NO duplicar consumo de líder)
+const leaderNow = leaderName();
+const isLeaderNow = !!leaderNow && leaderNow === name;
 
-    if (finalState === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
-      runwayState.inUse = null;
-    }
+if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
+  runwayState.inUse = {
+    action: 'landing',
+    name,
+    callsign: userLocations[name]?.callsign || '',
+    startedAt: Date.now(),
+    slotMin: MIN_LDG_SEP_MIN
+  };
+}
 
-    if (finalState === 'RUNWAY_OCCUPIED' || finalState === 'RUNWAY_CLEAR') {
-      runwayState.landings = runwayState.landings.filter(l => l.name !== name);
-      clearTurnLease(name);
-      try { clearFinalEnter(name); } catch {}
-      try { b1LatchByName.delete(name); } catch {}
-    }
 
-    if (finalState === 'B1' || finalState === 'FINAL') {
-      const L = runwayState.landings.find(l => l.name === name);
-      if (L) L.frozenLevel = 1;
-    }
+if (acceptedState === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
+  runwayState.inUse = null;
+}
 
-    if (finalState === 'TAXI_APRON' || finalState === 'APRON_STOP') {
-      runwayState.landings = runwayState.landings.filter(l => l.name !== name);
-      setLandingStateForward(name, 'IN_STANDS');
-      try { clearFinalEnter(name); } catch {}
-      try { b1LatchByName.delete(name); } catch {}
-    }
+if (acceptedState === 'RUNWAY_OCCUPIED' || acceptedState === 'RUNWAY_CLEAR') {
+  const leaderNow2 = leaderName();
+  const isLeaderNow2 = !!leaderNow2 && leaderNow2 === name;
+
+  // ✅ SOLO remover de la cola si es el líder actual
+  if (isLeaderNow2) {
+    runwayState.landings = runwayState.landings.filter(l => l.name !== name);
+    clearTurnLease(name);
+    try { clearFinalEnter(name); } catch {}
+    try { b1LatchByName.delete(name); } catch {}
+  }
+}
+
+
+if (acceptedState === 'B1' || acceptedState === 'FINAL') {
+  const L = runwayState.landings.find(l => l.name === name);
+  if (L) L.frozenLevel = 1;
+}
+
+if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
+  runwayState.landings = runwayState.landings.filter(l => l.name !== name);
+  setLandingStateForward(name, 'IN_STANDS');
+  try { clearFinalEnter(name); } catch {}
+  try { b1LatchByName.delete(name); } catch {}
+}
+
 
 
     if (runwayState.landings.length || runwayState.takeoffs.length) {
