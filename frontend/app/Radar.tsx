@@ -329,6 +329,8 @@ const Radar = () => {
   const lastPlanesSigRef = useRef<string>(""); // para setPlanes
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const socketRef = useRef<ReturnType<typeof io> | null>(null);
+  const freezeBeaconEngineRef = useRef<boolean>(false);
+
 
 
   // (opcional) si querés permitir update SOLO de distancia sin re-render grande
@@ -478,12 +480,13 @@ typeof s === 'string' && /^B\d+$/.test(s);
 function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<string, any>) {
   const now = Date.now();
 
-    // =========================
-  // 🔒 FINAL lock (backend manda)
-  // =========================
-  const meKey = myPlaneRef.current?.id || username;   // 👈 usar id real, no username pelado
+  
+
+  // ✅ UNA sola identidad consistente (la misma que usa el backend en assignedOps)
+  const meKey = (myPlaneRef.current?.id || myPlane?.id || username) as string;
+
   const stAny: any = runwayState?.state;
-  const assigned2 = stAny?.assignedOps?.[meKey];       // 'FINAL' | 'B1' | 'A_TO_Bx' | ...
+  const assigned2 = stAny?.assignedOps?.[meKey]; // 'FINAL' | 'A_TO_Bx' | ...
 
   // ✅ Si backend asignó FINAL, frontend NO puede cambiar OPS
   //    ÚNICA excepción: RUNWAY_OCCUPIED (touchdown)
@@ -492,23 +495,17 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
     return;
   }
 
-  // ...tu lógica existente abajo
-
-  // ❌ Nunca confirmar FINAL desde frontend
+  // ❌ Nunca confirmar FINAL desde frontend (backend-only)
   if (FRONTEND_FORBIDDEN_OPS.has(next)) {
     console.log('[OPS] Ignored FINAL (backend-only).', { next, source });
     return;
   }
 
- 
-  // ✅ Sólo confirmamos los estados permitidos (o beacons B#)
   if (!FRONTEND_ALLOWED_OPS.has(next) && !isBeaconOps(next)) {
     console.log('[OPS] Ignored (not allowed):', { next, source });
     return;
   }
 
-
-  // ✅ anti-spam: mismo estado en <2s (y también evita repetir exacto)
   if (
     lastOpsStateRef.current === next &&
     (now - (lastOpsStateTsRef.current || 0)) < 2000
@@ -519,59 +516,38 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
   lastOpsStateRef.current = next;
   lastOpsStateTsRef.current = now;
 
-  // ---- contexto útil para debug ----
-  const me = username;
   const st = runwayState?.state as any;
-
-  const assigned = st?.assignedOps?.[me];
-  const reported = st?.reportedOpsStates?.[me];
-  const backendOps = st?.opsStates?.[me];
+  const assigned = st?.assignedOps?.[meKey];
+  const reported = st?.reportedOpsStates?.[meKey];
+  const backendOps = st?.opsStates?.[meKey];
 
   const ctx = {
     t: new Date(now).toISOString(),
     next,
     source,
-
-    // fase / flags
-    landingRequested: !!landingRequestedRef.current,
-    takeoffRequested: !!takeoffRequestedRef.current,
-    finalLocked: !!finalLockedRef.current,
-
-    // backend
+    meKey,
     assigned,
     reported,
     backendOps,
-
-    // kin
-    aglM: Number.isFinite(getAGLmeters()) ? Math.round(getAGLmeters()) : getAGLmeters(),
-    speedKmh: Math.round(myPlane?.speed ?? 0),
-    onRunway: !!isOnRunwayStrip(),
-
-    // runway
-    activeRwy: (rw?.active_end === 'B' ? (rw?.identB ?? 'B') : (rw?.identA ?? 'A')),
-
     ...(extra || {}),
   };
 
   console.log('[OPS] emit →', ctx);
 
   socketRef.current?.emit('ops/state', {
-    name: username,
+    // ✅ IMPORTANTÍSIMO: emitir con la misma key
+    name: meKey,
     state: next,
     aux: {
-      airportId: (airfield as any)?.icao || (airfield as any)?.id || (airfield as any)?.name || '',
-      rwyIdent: (rw?.active_end === 'B' ? (rw?.identB ?? '') : (rw?.identA ?? '')) || '',
-      aglM: getAGLmeters(),
-      onRunway: isOnRunwayStrip(),
-      nearHoldShort: isNearThreshold((rw?.active_end === 'B' ? 'B' : 'A') as any, 100),
       source,
       ...(extra || {}),
-        id: myPlane?.id,
+      id: myPlane?.id,
       callsign: myPlane?.callsign,
       planeName: myPlane?.name,
     },
   });
 }
+
 
 
   function emitOpsBeacon(label: `B${number}`, phase: 'TO' | 'AT') {
@@ -1029,6 +1005,8 @@ useEffect(() => {
 
   const st = (runwayState as any)?.state;
   if (!st) return;
+
+  if (freezeBeaconEngineRef.current) return;
 
   const assigned = getBackendAssignedForMe2() || undefined;   // 'A_TO_B2'|'A_TO_B3'|'B1'|'FINAL'
   const target = getBackendTargetForMe() || undefined;                        // {fix, lat, lon}
@@ -2794,13 +2772,45 @@ s.on('traffic-update', (data: any) => {
   });
 });
 
+const lastSentOpsRef = useRef<string | null>(null);
+const freezeBeaconEngineRef = useRef(false);
 
 
-  // ✅ runway-state
-  s.on('runway-state', (payload: any) => {
-    try { console.log('[RUNWAY] state ←', JSON.stringify(payload)); } catch {}
-    setRunwayState(payload);
-  });
+
+// ✅ runway-state
+s.on('runway-state', (payload: any) => {
+  try { console.log('[RUNWAY] state ←', JSON.stringify(payload)); } catch {}
+
+  setRunwayState(payload);
+
+  try {
+
+    const me = myPlane?.id || username;
+
+    const assigned =
+      payload?.state?.assignedOps?.[me];
+
+    // ✅ Si backend manda FINAL, consumimos B1 y congelamos lógica de beacons
+    if (assigned === 'FINAL') {
+
+      if (lastSentOpsRef.current !== 'FINAL') {
+
+        console.log('[OPS] backend assigned FINAL → emitting FINAL');
+
+        emitOpsNow('FINAL');   // 👈 ya existe en tu código
+
+        lastSentOpsRef.current = 'FINAL';
+      }
+
+      // 🔒 evita que el detector de beacons vuelva a mandar B1/B2
+      freezeBeaconEngineRef.current = true;
+    }
+
+  } catch(e) {
+    console.log('[RUNWAY FINAL guard error]', e);
+  }
+});
+
 
   // ✅ runway-msg
  s.on('runway-msg', (m: any) => {
