@@ -1711,7 +1711,6 @@ socket.on('ops/state', (msg) => {
       'RUNWAY_CLEAR',
       'AIRBORNE',
       'LAND_QUEUE',
-       'FINAL',            // ✅ AGREGAR
       ...B_STATES,
     ]);
 
@@ -1726,14 +1725,6 @@ socket.on('ops/state', (msg) => {
     }
 
     if (!name || !state) return;
-
-    // ✅ permitir FINAL sólo si backend ya asignó FINAL
-    if (state === 'FINAL') {
-      const assignedNow = runwayState.assignedOps?.[name] || null;
-      const isFinalAllowed = assignedNow === 'FINAL';
-      if (!isFinalAllowed) return;
-    }
-
 
     const acceptedState = state;
     const leader = leaderName(); // solo si lo usás en el log
