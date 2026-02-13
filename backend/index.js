@@ -1173,76 +1173,6 @@ function maybeSendInstruction(opId, opsById) {
 }
 
 
-function computeAssignedOpsStates() {
-  const ops = {};
-  const landings = Array.isArray(runwayState?.landings) ? runwayState.landings : [];
-
-  const leader = leaderName();
-
-  // ¿Hay alguien YA en FINAL (por orden backend o por sticky)?
-  const finalOccupied = landings.some((L) => {
-    const n = L?.name;
-    if (!n) return false;
-    const phase = getApproachPhase(n);
-    const sticky = getLandingState(n);
-    return phase === 'FINAL' || sticky === 'FINAL';
-  });
-
-  landings.forEach((L, idx) => {
-    const name = L?.name;
-    if (!name) return;
-
-    const reported = getReportedOpsState(name); // lo que reporta el frontend
-    const sticky = getLandingState(name);       // tu sticky interno
-
-    // Terminales (si querés mantenerlos)
-    if (reported === 'RUNWAY_OCCUPIED') { ops[name] = 'RUNWAY_OCCUPIED'; return; }
-    if (reported === 'RUNWAY_CLEAR')    { ops[name] = 'RUNWAY_CLEAR';    return; }
-
-    const phase = getApproachPhase(name);
-
-    // Si backend ya lo tiene en FINAL, mantenelo
-    if (phase === 'FINAL' || sticky === 'FINAL') {
-      ops[name] = 'FINAL';
-      return;
-    }
-
-    // ====== LÓGICA DE LÍDER ======
-    if (leader && name === leader) {
-      // Si el líder YA confirmó B1 en frontend:
-      if (reported === 'B1') {
-        // Si FINAL está libre -> mandar FINAL
-        if (!finalOccupied) {
-          ops[name] = 'FINAL';
-          return;
-        }
-        // Si FINAL está ocupado -> mantenerlo esperando en B1
-        // Podés usar HOLD_B1 o simplemente A_TO_B1 (orden redundante pero consistente)
-        ops[name] = 'HOLD_B1';
-        return;
-      }
-
-      // Si líder aún NO confirmó B1 -> ordenarlo a B1
-      ops[name] = 'A_TO_B1';
-      return;
-    }
-
-    // ====== RESTO DE LA COLA (NO LÍDER) ======
-    // Si alguno NO-líder confirmó B1, el backend NO lo manda a FINAL (porque FINAL es del líder),
-    // y lo mantiene congelado en B1 esperando su turno.
-    if (reported === 'B1') {
-      ops[name] = 'HOLD_B1';
-      return;
-    }
-
-    // Si no está congelado, orden por cola: idx=0 -> B2, idx=1 -> B3, etc.
-    ops[name] = `A_TO_B${idx + 2}`;
-  });
-
-  return ops;
-}
-
-
 
 // ========= Publicación de estado =========
 function publishRunwayState() {
@@ -1796,6 +1726,8 @@ socket.on('ops/state', (msg) => {
 
     if (!name || !state) return;
 
+    const acceptedState = state;
+    const leader = leaderName(); // solo si lo usás en el log
 
 
         const CRITICAL = new Set([
