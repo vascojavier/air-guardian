@@ -331,6 +331,8 @@ const Radar = () => {
   const socketRef = useRef<ReturnType<typeof io> | null>(null);
   const freezeBeaconEngineRef = useRef<boolean>(false);
   const lastSentOpsRef = useRef<string | null>(null);
+  const assignedRef = useRef<string | null>(null);
+
 
 
 
@@ -2779,33 +2781,42 @@ s.on('traffic-update', (data: any) => {
 
 
 // ✅ runway-state
-  s.on('runway-state', (payload: any) => {
-    try { console.log('[RUNWAY] state ←', JSON.stringify(payload)); } catch {}
+// ✅ runway-state
+s.on('runway-state', (payload: any) => {
+  try { console.log('[RUNWAY] state ←', JSON.stringify(payload)); } catch {}
 
-    setRunwayState(payload);
+  setRunwayState(payload);
 
-    try {
-      const meKey = (myPlaneRef.current?.id || username) as string;
-      const assigned = payload?.state?.assignedOps?.[meKey];
+  try {
+    const map = payload?.state?.assignedOps as Record<string,string> | undefined;
+    let assigned: string | null = null;
 
-      if (assigned === 'FINAL') {
-        if (lastSentOpsRef.current !== 'FINAL') {
-          console.log('[OPS] backend assigned FINAL → freezing beacon engine');
-          lastSentOpsRef.current = 'FINAL';
-        }
-        freezeBeaconEngineRef.current = true;
-      } else {
-        // ✅ si ya no estoy en FINAL, liberar el motor de beacons
-        if (freezeBeaconEngineRef.current) {
-          console.log('[OPS] left FINAL → unfreezing beacon engine');
-        }
-        freezeBeaconEngineRef.current = false;
-        lastSentOpsRef.current = null;
+    if (map) {
+      // mismas keys que ya usás (id/name/callsign/username)
+      for (const k of keysForMe()) {
+        const v = map[k];
+        if (typeof v === 'string' && v) { assigned = v; break; }
       }
-    } catch (e) {
-      console.log('[RUNWAY FINAL guard error]', e);
     }
-  });
+
+    assignedRef.current = assigned; // ✅ verdad instantánea (no depende de setState)
+
+    if (assigned === 'FINAL') {
+      if (lastSentOpsRef.current !== 'FINAL') {
+        console.log('[OPS] backend assigned FINAL → freezing beacon engine');
+        lastSentOpsRef.current = 'FINAL';
+      }
+      freezeBeaconEngineRef.current = true;
+    } else {
+      freezeBeaconEngineRef.current = false;
+      lastSentOpsRef.current = null;
+    }
+  } catch (e) {
+    console.log('[RUNWAY FINAL guard error]', e);
+  }
+});
+
+
 
 
 
