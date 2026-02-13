@@ -330,6 +330,7 @@ const Radar = () => {
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const socketRef = useRef<ReturnType<typeof io> | null>(null);
   const freezeBeaconEngineRef = useRef<boolean>(false);
+  const lastSentOpsRef = useRef<string | null>(null);
 
 
 
@@ -2772,44 +2773,40 @@ s.on('traffic-update', (data: any) => {
   });
 });
 
-const lastSentOpsRef = useRef<string | null>(null);
-const freezeBeaconEngineRef = useRef(false);
+
+
 
 
 
 // ✅ runway-state
-s.on('runway-state', (payload: any) => {
-  try { console.log('[RUNWAY] state ←', JSON.stringify(payload)); } catch {}
+  s.on('runway-state', (payload: any) => {
+    try { console.log('[RUNWAY] state ←', JSON.stringify(payload)); } catch {}
 
-  setRunwayState(payload);
+    setRunwayState(payload);
 
-  try {
+    try {
+      const meKey = (myPlaneRef.current?.id || username) as string;
+      const assigned = payload?.state?.assignedOps?.[meKey];
 
-    const me = myPlane?.id || username;
-
-    const assigned =
-      payload?.state?.assignedOps?.[me];
-
-    // ✅ Si backend manda FINAL, consumimos B1 y congelamos lógica de beacons
-    if (assigned === 'FINAL') {
-
-      if (lastSentOpsRef.current !== 'FINAL') {
-
-        console.log('[OPS] backend assigned FINAL → emitting FINAL');
-
-        emitOpsNow('FINAL');   // 👈 ya existe en tu código
-
-        lastSentOpsRef.current = 'FINAL';
+      if (assigned === 'FINAL') {
+        if (lastSentOpsRef.current !== 'FINAL') {
+          console.log('[OPS] backend assigned FINAL → freezing beacon engine');
+          lastSentOpsRef.current = 'FINAL';
+        }
+        freezeBeaconEngineRef.current = true;
+      } else {
+        // ✅ si ya no estoy en FINAL, liberar el motor de beacons
+        if (freezeBeaconEngineRef.current) {
+          console.log('[OPS] left FINAL → unfreezing beacon engine');
+        }
+        freezeBeaconEngineRef.current = false;
+        lastSentOpsRef.current = null;
       }
-
-      // 🔒 evita que el detector de beacons vuelva a mandar B1/B2
-      freezeBeaconEngineRef.current = true;
+    } catch (e) {
+      console.log('[RUNWAY FINAL guard error]', e);
     }
+  });
 
-  } catch(e) {
-    console.log('[RUNWAY FINAL guard error]', e);
-  }
-});
 
 
   // ✅ runway-msg
