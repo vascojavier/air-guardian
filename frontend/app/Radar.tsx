@@ -308,7 +308,7 @@ const Radar = () => {
   const [opsStates, setOpsStates] = useState<Record<string, OpsState>>({});
   const arrivedSinceRef = useRef<Record<string, number>>({});
   const ARRIVE_DWELL_MS = 1500; // 1.5s estable dentro del radio
-  const ARRIVE_R_M = 120;       // radio para "llegué" (ajustable)
+  const ARRIVE_R_M = 500;       // radio para "llegué" (ajustable)
   
   const { t, i18n } = useTranslation();
   const lang = (i18n.language || "en").toLowerCase();
@@ -1030,8 +1030,8 @@ useEffect(() => {
   const st = (runwayState as any)?.state;
   if (!st) return;
 
-  const assigned: string | undefined = st?.assignedOps?.[me];   // 'A_TO_B2'|'A_TO_B3'|'B1'|'FINAL'
-  const target = st?.opsTargets?.[me];                          // {fix, lat, lon}
+  const assigned = getBackendAssignedForMe2() || undefined;   // 'A_TO_B2'|'A_TO_B3'|'B1'|'FINAL'
+  const target = getBackendTargetForMe() || undefined;                        // {fix, lat, lon}
 
   if (!assigned) return;
 
@@ -1080,31 +1080,31 @@ useEffect(() => {
 
   if (now - since < ARRIVE_DWELL_MS) return;
 
-// ✅ Llegué: reportar OPS como 'B#' SOLO si el backend me asignó A_TO_B#
-const report = fix as OpsState; // 'B1'|'B2'|'B3'...
+  // ✅ Llegué: reportar OPS como 'B#' SOLO si el backend me asignó A_TO_B#
+  const report = fix as OpsState; // 'B1'|'B2'|'B3'...
 
-if (canConfirmBeaconNow(String(report))) {
-  emitOpsNow(report, 'ARRIVE_DWELL', { fix });
-} else {
-  console.log('[OPS] Skip beacon confirm (not assigned by backend):', {
-    report,
-    assigned: getBackendAssignedForMe(),
-  });
-}
+  if (canConfirmBeaconNow(String(report))) {
+    emitOpsNow(report, 'ARRIVE_DWELL', { fix });
+  } else {
+    console.log('[OPS] Skip beacon confirm (not assigned by backend):', {
+      report,
+      assigned: getBackendAssignedForMe(),
+    });
+  }
 
-// Limpieza para no re-disparar
-delete arrivedSinceRef.current[key];
+  // Limpieza para no re-disparar
+  delete arrivedSinceRef.current[key];
 
-}, [
-  runwayState,
-  username,
-  myPlane?.id,
-  myPlane.lat,
-  myPlane.lon,
-  beaconB1,
-  beaconB2,
-  extraBeacons,
-]);
+  }, [
+    runwayState,
+    username,
+    myPlane?.id,
+    myPlane.lat,
+    myPlane.lon,
+    beaconB1,
+    beaconB2,
+    extraBeacons,
+  ]);
 
 
   // --- NAV: anti-histeresis ---

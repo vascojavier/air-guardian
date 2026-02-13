@@ -654,35 +654,11 @@ function isCommitted(name) {
 
 
 function updateApproachPhase(name) {
-  const L = getLandingByName(name);
-  if (!L) return;
-
-  const asg = assignBeaconsFor(name);
-  const u = userLocations[name];
-  if (!asg || !u) return;
-
-  const dB2 = getDistance(u.latitude, u.longitude, asg.b2.lat, asg.b2.lon);
-  const dB1 = getDistance(u.latitude, u.longitude, asg.b1.lat, asg.b1.lon);
-
-  // Llegó a B2 (B2+ NO es fijo; no cambia fase del backend)
-  if (isFinite(dB2) && dB2 <= BEACON_REACHED_M) {
-    setLandingStateForward(name, 'B2'); // opcional
-  }
-
-  // Llegó a B1
-  if (isFinite(dB1) && dB1 <= BEACON_REACHED_M) {
-    markAdvancement(name);
-    L.frozenLevel = 1;
-
-    setLandingStateForward(name, 'B1');
-
-    // FSM de aproximación (la que usa maybeSendInstruction)
-    try { setApproachPhase(name, 'FINAL'); } catch {}
-  }
-
-  // Commit dinámico
-  L.committed = isCommitted(name);
+  // ✅ Opción A: el backend NO confirma llegada a B1/B2 por proximidad.
+  // El frontend es la única fuente de verdad para B# / FINAL / RUNWAY_*.
+  return;
 }
+
 
 
 
@@ -1698,9 +1674,6 @@ io.on('connection', (socket) => {
       timestamp: Date.now(),
       socketId: socket.id
     };
-    // ► FSM: actualizar fase con distancias reales
-    updateApproachPhase(name);
-
 
     socketIdToName[socket.id] = name;
 
@@ -1808,9 +1781,6 @@ socket.on('ops/state', (msg) => {
       'RUNWAY_CLEAR',
       'AIRBORNE',
       'LAND_QUEUE',
-      // el frontend puede reportar FINAL si lo querés permitir para el líder,
-      // pero igual lo normalizamos abajo
-      'FINAL',
       ...B_STATES,
     ]);
 
@@ -1827,15 +1797,6 @@ socket.on('ops/state', (msg) => {
     if (!name || !state) return;
 
 
-
-        // --- normalizamos FINAL sólo si NO es el líder ---
-        const leader = leaderName();
-        let acceptedState = state;
-
-        // si no es líder, ignoramos FINAL (no lo degradamos a B1)
-        if (acceptedState === 'FINAL' && leader && name !== leader) {
-          return;
-        }
 
         const CRITICAL = new Set([
           'RUNWAY_OCCUPIED','RUNWAY_CLEAR','APRON_STOP','TAXI_APRON','TAXI_TO_RWY','HOLD_SHORT'
