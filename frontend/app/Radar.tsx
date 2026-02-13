@@ -444,11 +444,9 @@ function canConfirmRunwayOccupiedNow(): boolean {
 
 
 function getBackendAssignedForMe(): string | null {
-  const me = myPlaneRef.current?.id || username;
-  if (!me) return null;
-  const st: any = runwayState?.state;
-  return (st?.assignedOps?.[me] as string) || null;
+  return getBackendAssignedForMe2();
 }
+
 
 
 
@@ -1420,6 +1418,51 @@ function getOpsOf(name: string): OpsState | null {
 
 type AtcAssigned = string | null; // 'A_TO_Bx' | 'FINAL' | null
 type AtcTarget = { fix?: string; lat: number; lon: number } | null;
+
+function keysForMe(): string[] {
+  const p = myPlaneRef.current;
+  const keys = [
+    p?.id,
+    p?.name,
+    p?.callsign,
+    username,
+    callsign,
+  ].filter(Boolean) as string[];
+  return Array.from(new Set(keys.map(String)));
+}
+
+function getBackendTargetForMe(): { fix?: string; lat: number; lon: number } | null {
+  const st: any = runwayState?.state;
+  const map = st?.opsTargets as Record<string, any> | undefined;
+  if (!map) return null;
+
+  for (const k of keysForMe()) {
+    const v = map[k];
+    const lon =
+      typeof v?.lon === 'number' ? v.lon :
+      typeof v?.lng === 'number' ? v.lng :
+      typeof v?.longitude === 'number' ? v.longitude :
+      null;
+
+    if (v && typeof v.lat === 'number' && typeof lon === 'number') {
+      return { fix: v.fix, lat: v.lat, lon };
+    }
+  }
+  return null;
+}
+
+function getBackendAssignedForMe2(): string | null {
+  const st: any = runwayState?.state;
+  const map = st?.assignedOps as Record<string, string> | undefined;
+  if (!map) return null;
+
+  for (const k of keysForMe()) {
+    const v = map[k];
+    if (typeof v === 'string' && v) return v;
+  }
+  return null;
+}
+
 
 function keysForPlane(p: Plane): string[] {
   const keys = [p.id, p.name, p.callsign].filter(Boolean) as string[];
@@ -3342,15 +3385,12 @@ reportIfDwellInside(
     const myFact = (lastOpsStateRef.current as OpsState | null);
 
     // ✅ orden backend (ATC) para landing fallback
-    const assigned = (st?.assignedOps?.[me] as string | undefined);
+    const assigned = getBackendAssignedForMe2() || undefined;
+
 
     // 1) PRIORIDAD ABSOLUTA: backend opsTargets
-    const backendTarget = st?.opsTargets?.[me];
-    if (
-      backendTarget &&
-      typeof backendTarget.lat === 'number' &&
-      typeof backendTarget.lon === 'number'
-    ) {
+    const backendTarget = getBackendTargetForMe();
+    if (backendTarget) {
       setNavTargetSafe({ latitude: backendTarget.lat, longitude: backendTarget.lon });
       return;
     }
