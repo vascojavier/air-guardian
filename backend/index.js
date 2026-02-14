@@ -1054,6 +1054,12 @@ function maybeSendInstruction(opId, opsById) {
 
   const mem = lastInstr.get(op.name) || { phase: null, ts: 0 };
 
+  const r = getReportedOpsState(op.name);
+  if (r === 'B1' || r === 'FINAL' || r === 'RUNWAY_OCCUPIED' || r === 'RUNWAY_CLEAR' || r === 'APRON_STOP' || r === 'TAXI_APRON' || r === 'TAXI_TO_RWY' || r === 'HOLD_SHORT') {
+    return;
+  }
+
+
   // 🚦 Guardas por estado operativo reportado (front es la fuente de verdad)
   const curOps = getOpsState(op.name);
 
@@ -1231,6 +1237,35 @@ function publishRunwayState() {
   for (const L of landings) {
     const name = L?.name;
 
+    // lo que dijo el frontend: B#, RUNWAY_*, etc.
+
+      const stReported = getReportedOpsState(name);
+
+    const CRITICAL = new Set([
+      'RUNWAY_OCCUPIED',
+      'RUNWAY_CLEAR',
+      'APRON_STOP',
+      'TAXI_APRON',
+      'TAXI_TO_RWY',
+      'HOLD_SHORT',
+    ]);
+
+    // 1) Si está en estados críticos de tierra/pista: NO targets, NO assignedOps
+    if (CRITICAL.has(stReported)) {
+      // importante: no mandes assignedOps ni opsTargets para que el front no dibuje línea ni hable
+      delete assignedOps[name];
+      delete opsTargets[name];
+      continue;
+    }
+
+    // 2) Si el frontend ya confirmó B1 o FINAL: NO lo vuelvas a mandar a B2/B3 jamás
+    if (stReported === 'B1' || stReported === 'FINAL') {
+      assignedOps[name] = 'FINAL';
+      if (gNow?.thr) opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+      continue;
+    }
+
+
   // ✅ FINAL LATCH: si el backend ya lo comprometió a FINAL, no mirar OPS para degradarlo
   if (isFinalLatched(name) && gNow?.thr) {
     assignedOps[name] = 'FINAL';
@@ -1242,7 +1277,7 @@ function publishRunwayState() {
     if (!name) continue;
 
     const b1Latched = isB1Latched(name);
-    const stReported = getReportedOpsState(name); // lo que dijo el frontend: B#, RUNWAY_*, etc.
+    
     const asg = assignBeaconsFor(name);
 
     // -------------------------
@@ -1517,24 +1552,30 @@ const oldTk   = runwayState.lastOrder.takeoffs || [];
 
   newLand.forEach((name, idx) => {
     if (oldLand.indexOf(name) !== idx) {
-      const st = getReportedOpsState(name);
-            const allowTurnMsg = !(
+    const st = getReportedOpsState(name);
+    const assignedNow = runwayState.assignedOps?.[name] || null;
+
+    const allowTurnMsg = !(
+      st === 'B1' ||
       st === 'FINAL' ||
       st === 'RUNWAY_OCCUPIED' ||
       st === 'RUNWAY_CLEAR' ||
       st === 'APRON_STOP' ||
-      st === 'TAXI_APRON'
+      st === 'TAXI_APRON' ||
+      st === 'TAXI_TO_RWY' ||
+      st === 'HOLD_SHORT' ||
+      assignedNow === 'FINAL'
     );
 
-      if (allowTurnMsg) {
-        emitToUser(name, 'runway-msg', {
+    if (allowTurnMsg) {
+      emitToUser(name, 'runway-msg', {
         key: 'runway.yourLandingTurnIsNumber',
         params: { n: idx + 1 },
         spokenKey: 'runway.yourLandingTurnIsNumber',
         spokenParams: { n: idx + 1 }
-        });
+      });
+    }
 
-      }
     }
   });
 
