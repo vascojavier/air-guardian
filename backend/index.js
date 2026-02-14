@@ -24,6 +24,16 @@ const ATC_DEFAULTS = {
 const  b1LatchByName = new Map();     // name -> { latched:boolean, farSince:number|null }
 const  finalEnterByName = new Map();  // name -> timestamp cuando entró a B1/FINAL
 const  driftSinceByName = new Map();  // name -> timestamp cuando empezó a “drift” lejos de B1
+const finalLatchByName = new Map(); // name -> { latched:boolean, since:number }
+function isFinalLatched(name) {
+  return !!finalLatchByName.get(name)?.latched;
+}
+function setFinalLatched(name, on=true) {
+  if (!name) return;
+  if (on) finalLatchByName.set(name, { latched: true, since: Date.now() });
+  else finalLatchByName.delete(name);
+}
+
 
 // ======================= TURN LEASE (líder de aterrizaje) =======================
 const turnLeaseByName = new Map(); 
@@ -1220,6 +1230,15 @@ function publishRunwayState() {
   // 3) UN SOLO LOOP: construir assignedOps / opsTargets
   for (const L of landings) {
     const name = L?.name;
+
+  // ✅ FINAL LATCH: si el backend ya lo comprometió a FINAL, no mirar OPS para degradarlo
+  if (isFinalLatched(name) && gNow?.thr) {
+    assignedOps[name] = 'FINAL';
+    opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+    continue;
+  }
+
+
     if (!name) continue;
 
     const b1Latched = isB1Latched(name);
@@ -1234,6 +1253,7 @@ function publishRunwayState() {
       if (leaderWillBeFinal) {
       assignedOps[name] = 'FINAL';
       opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+      setFinalLatched(name, true); // ✅ latch definitivo
 
       } else {
         assignedOps[name] = 'A_TO_B1';
@@ -1454,6 +1474,8 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
         spokenParams: { beacon: 'FINAL' },
       });
 
+    setFinalLatched(newLead, true);
+
       // Server-side: lo ponemos en FINAL para que tu FSM no lo degrade
       const ph = getApproachPhase(newLead);
       if (ph !== 'CLRD') setApproachPhase(newLead, 'FINAL');
@@ -1663,6 +1685,8 @@ function hardResetUser(name) {
   try { driftSinceByName?.delete(name); } catch {}      // IMPORTANTE
   try { landingStateByName?.delete(name); } catch {}
   try { approachPhaseByName?.delete(name); } catch {}
+  try { setFinalLatched(name, false); } catch {}
+
 
   // 4) Borrar ubicación (evita “avión fantasma”)
   try { delete userLocations[name]; } catch {}
@@ -1794,11 +1818,14 @@ if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
     startedAt: Date.now(),
     slotMin: MIN_LDG_SEP_MIN
   };
+  try { setFinalLatched(name, false); } catch {}
 }
+
 
 
 if (acceptedState === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
   runwayState.inUse = null;
+  try { setFinalLatched(name, false); } catch {}
 }
 
 if (acceptedState === 'RUNWAY_OCCUPIED' || acceptedState === 'RUNWAY_CLEAR') {
@@ -1812,6 +1839,12 @@ if (acceptedState === 'RUNWAY_OCCUPIED' || acceptedState === 'RUNWAY_CLEAR') {
     try { clearFinalEnter(name); } catch {}
     try { b1LatchByName.delete(name); } catch {}
   }
+  try { setFinalLatched(name, false); } catch {}
+}
+
+// ✅ Si frontend vuelve a AIRBORNE => salir completamente de FINAL
+if (acceptedState === 'AIRBORNE') {
+  try { setFinalLatched(name, false); } catch {}
 }
 
 
@@ -1825,18 +1858,19 @@ if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
   setLandingStateForward(name, 'IN_STANDS');
   try { clearFinalEnter(name); } catch {}
   try { b1LatchByName.delete(name); } catch {}
+  try { setFinalLatched(name, false); } catch {}
+  
 }
 
 
+if (runwayState.landings.length || runwayState.takeoffs.length) {
+  planRunwaySequence();
+}
 
-    if (runwayState.landings.length || runwayState.takeoffs.length) {
-      planRunwaySequence();
-    }
-
-    publishRunwayState();
-  } catch (e) {
-    console.error('ops/state error:', e);
-  }
+  publishRunwayState();
+} catch (e) {
+  console.error('ops/state error:', e);
+}
 });
 
 
@@ -2005,9 +2039,12 @@ socket.on('air-guardian/leave', () => {
     lastOpsStateByName.delete(name);
     clearTurnLease(name);
 
+
     // ✅ limpiar timers/latch (auto-go-around / B1 latch)
     try { clearFinalEnter(name); } catch {}
     try { b1LatchByName.delete(name); } catch {}
+    try { setFinalLatched(name, false); } catch {}
+
   }
 
   // ►► (AGREGADO) limpiar de colas si corresponde
@@ -2051,6 +2088,7 @@ socket.on('air-guardian/leave', () => {
           // 👇 limpiar estado sticky
     landingStateByName.delete(name);
     lastOpsStateByName.delete(name);
+    try { setFinalLatched(name, false); } catch {}
 
     clearTurnLease(name);
     }
@@ -2164,6 +2202,7 @@ else if (action === 'takeoff') {
       if (!name) return;
       runwayState.landings = runwayState.landings.filter(x => x.name !== name);
       runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
+      try { setFinalLatched(name, false); } catch {}
       planRunwaySequence();
       publishRunwayState();
     } catch (e) {
@@ -2267,6 +2306,7 @@ socket.on('go-around', (msg = {}) => {
     emitToUser(name, 'runway-msg', { key: 'runway.goAroundRegistered', params: {} });
     // Reinicia a estado post-arremetida (vuelve a ordenar y luego a B1 cuando corresponda)
     resetLandingState(name, 'ORD');
+    try { setFinalLatched(name, false); } catch {}
     planRunwaySequence();
     publishRunwayState();
     // 🔁 Volver a fase de aproximación (no tan agresivo como TO_B2)
@@ -2315,8 +2355,12 @@ app.delete('/api/location/:name', (req, res) => {
         break;
       }
     }
+
+    try { setFinalLatched(name, false); } catch {}
+
     io.emit('user-removed', name);
     return res.json({ status: 'deleted' });
+    
   }
   res.status(404).json({ error: 'Usuario no encontrado' });
 });
@@ -2335,6 +2379,7 @@ setInterval(() => {
           break;
         }
       }
+      try { setFinalLatched(name, false); } catch {}
       // avisar a todos
       io.emit('user-removed', name);
       console.log(`⏱️ Purga inactivo: ${name}`);

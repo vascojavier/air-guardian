@@ -309,7 +309,7 @@ const Radar = () => {
   const arrivedSinceRef = useRef<Record<string, number>>({});
   const ARRIVE_DWELL_MS = 1500; // 1.5s estable dentro del radio
   const ARRIVE_R_M = 500;       // radio para "llegué" (ajustable)
-  
+  const B_STATES = Array.from({ length: 30 }, (_, i) => `B${i + 1}` as OpsState);
   const { t, i18n } = useTranslation();
   const lang = (i18n.language || "en").toLowerCase();
   const ttsLang =
@@ -789,13 +789,15 @@ const emitUpdate = (p: PosUpdate) => {
   // ✅ Estados que el FRONTEND tiene permitido CONFIRMAR al backend
 // ✅ Estados que el FRONTEND tiene permitido CONFIRMAR al backend (sin beacons hardcodeados)
 const FRONTEND_ALLOWED_OPS = new Set<OpsState>([
-  'RUNWAY_OCCUPIED',
-  'RUNWAY_CLEAR',
-  'TAXI_APRON',
-  'APRON_STOP',
-  'TAXI_TO_RWY',
-  'HOLD_SHORT',
-  'AIRBORNE',
+      'APRON_STOP',
+      'TAXI_APRON',
+      'TAXI_TO_RWY',
+      'HOLD_SHORT',
+      'RUNWAY_OCCUPIED',
+      'RUNWAY_CLEAR',
+      'AIRBORNE',
+      'LAND_QUEUE',
+      ...B_STATES,
 ]);
 
 
