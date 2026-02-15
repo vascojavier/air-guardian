@@ -1257,14 +1257,14 @@ function publishRunwayState() {
 
       const stReported = getReportedOpsState(name);
 
-    const CRITICAL = new Set([
-      'RUNWAY_OCCUPIED',
-      'RUNWAY_CLEAR',
-      'APRON_STOP',
-      'TAXI_APRON',
-      'TAXI_TO_RWY',
-      'HOLD_SHORT',
-    ]);
+      const CRITICAL = new Set([
+        'RUNWAY_OCCUPIED',
+        'RUNWAY_CLEAR',
+        'APRON_STOP',
+        'TAXI_TO_RWY',
+        'HOLD_SHORT',
+      ]);
+
 
     // 1) Si está en estados críticos de tierra/pista: NO targets, NO assignedOps
     if (CRITICAL.has(stReported)) {
@@ -1357,11 +1357,62 @@ function publishRunwayState() {
     }
   }
 
-        // ✅ Guardar backend assignments en Map (para getEffectiveOpsState)
-        opsBackendByName.clear();
-        for (const [name, atc] of Object.entries(assignedOps)) {
-          opsBackendByName.set(name, { state: atc, ts: now });
-        }
+
+// === Ground guidance: TAXI_APRON ===
+function getApronPointFromAirfield() {
+  const a = lastAirfield;
+
+  // Buscá en varios nombres típicos (sin inventar estructura)
+  const candidates = [
+    a?.apron,
+    a?.parking,
+    a?.stands,
+    a?.stand,
+    a?.ramp,
+    a?.runways?.[0]?.apron,
+    a?.runways?.[0]?.parking,
+  ];
+
+  for (const p of candidates) {
+    if (p && typeof p.lat === 'number' && typeof p.lon === 'number') {
+      return { lat: p.lat, lon: p.lon };
+    }
+    // si viene como {lng:...}
+    if (p && typeof p.lat === 'number' && typeof p.lng === 'number') {
+      return { lat: p.lat, lon: p.lng };
+    }
+  }
+
+  // Fallback geométrico (si no hay apron explícito):
+  // punto cercano al umbral activo pero “fuera” de la pista (muy simple)
+  const g = activeRunwayGeom();
+  if (g?.thr) {
+    // 250 m hacia afuera por la dirección de aproximación (no es ideal, pero evita null)
+    const pt = destinationPoint(g.thr.lat, g.thr.lon, g.app_brg, 250);
+    return { lat: pt.lat, lon: pt.lon };
+  }
+
+  return null;
+}
+
+const apronPt = getApronPointFromAirfield();
+if (apronPt) {
+  for (const [name, v] of opsReportedByName.entries()) {
+    if (v?.state === 'TAXI_APRON') {
+      // target de navegación para el taxi
+      assignedOps[name] = 'TAXI_APRON';
+      opsTargets[name] = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
+    }
+  }
+}
+
+
+
+    // ✅ Guardar backend assignments en Map (para getEffectiveOpsState)
+    opsBackendByName.clear();
+    for (const [name, atc] of Object.entries(assignedOps)) {
+      opsBackendByName.set(name, { state: atc, ts: now });
+    }
 
 
         // ✅ opsStates para UI, pero sin pisar estados críticos del frontend
@@ -1384,6 +1435,7 @@ function publishRunwayState() {
 
 
 runwayState.assignedOps = assignedOps;
+runwayState.opsTargets  = opsTargets;   // ✅ IMPORTANTE
 
 
   // Emit principal runway-state (lo que Radar necesita)
@@ -1497,17 +1549,11 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
 
   // (2) Sacar al líder de la cola (consume turno)
   runwayState.landings = runwayState.landings.filter(l => l.name !== leaderNameNow);
-  delete runwayState.assignedOps?.[leaderNameNow];
-  delete runwayState.opsTargets?.[leaderNameNow];
+runwayState.landings = runwayState.landings.filter(l => l.name !== leaderNameNow);
 
-   // ✅ cortar ATC del que ya aterrizó
-  clearATC(leaderNameNow);
+clearATC(leaderNameNow);
+try { setFinalLatched(leaderNameNow, false); } catch {}
 
-
-  // ✅ NUEVO: al consumir el turno, cortamos ATC/targets del líder
-  if (runwayState.assignedOps) delete runwayState.assignedOps[leaderNameNow];
-  if (runwayState.opsTargets)  delete runwayState.opsTargets[leaderNameNow];
-  try { setFinalLatched(leaderNameNow, false); } catch {}
 
 
   // Limpiezas coherentes con tu lógica actual
@@ -1905,16 +1951,8 @@ if (acceptedState === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
 }
 
 if (acceptedState === 'RUNWAY_OCCUPIED' || acceptedState === 'RUNWAY_CLEAR') {
-  const leaderNow2 = leaderName();
-  const isLeaderNow2 = !!leaderNow2 && leaderNow2 === name;
 
   // ✅ SOLO remover de la cola si es el líder actual
-  if (isLeaderNow2) {
-    runwayState.landings = runwayState.landings.filter(l => l.name !== name);
-    clearTurnLease(name);
-    try { clearFinalEnter(name); } catch {}
-    try { b1LatchByName.delete(name); } catch {}
-  }
   try { setFinalLatched(name, false); } catch {}
 }
 
