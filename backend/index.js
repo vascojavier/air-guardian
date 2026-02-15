@@ -48,6 +48,22 @@ function clearTurnLease(name) {
   turnLeaseByName.delete(name);
 }
 
+function clearATC(name) {
+  if (!name) return;
+
+  // borrar directo por key
+  if (runwayState.assignedOps) delete runwayState.assignedOps[name];
+  if (runwayState.opsTargets)  delete runwayState.opsTargets[name];
+
+  // 🔒 opcional pero recomendado: borrar por callsign si existiera como key
+  const cs = String(userLocations?.[name]?.callsign || '').trim();
+  if (cs) {
+    if (runwayState.assignedOps) delete runwayState.assignedOps[cs];
+    if (runwayState.opsTargets)  delete runwayState.opsTargets[cs];
+  }
+}
+
+
 // OUT definitivo: se lo saca de la cola y debe pedir de nuevo
 function dropFromLandings(name, reason) {
   // Si no está en cola, no hacer nada
@@ -1213,8 +1229,8 @@ function publishRunwayState() {
 
 
   // --- BACKEND NAV ASSIGNMENTS (target de navegación) ---
-  const assignedOps = {}; // name -> 'A_TO_Bx' | 'FINAL'
-  const opsTargets  = {}; // name -> { fix:'B#'|'FINAL', lat, lon }
+ // const assignedOps = {}; // name -> 'A_TO_Bx' | 'FINAL'
+  //const opsTargets  = {}; // name -> { fix:'B#'|'FINAL', lat, lon }
   const gNow = activeRunwayGeom();
 
   const landings = runwayState.landings || [];
@@ -1368,6 +1384,8 @@ function publishRunwayState() {
 
 
 runwayState.assignedOps = assignedOps;
+runwayState.opsTargets = opsTargets;
+
 
 
   // Emit principal runway-state (lo que Radar necesita)
@@ -1461,14 +1479,12 @@ function cleanupInUseIfDone() {
 
 // ✅ Consumir #1 cuando entra a RUNWAY_OCCUPIED y empujar nuevo líder a FINAL
 function consumeLeaderOnRunwayOccupied(leaderNameNow) {
-  const leader = leaderName(); // usa runwayState.landings[0]
+  const leader = leaderName();
   if (!leader || leader !== leaderNameNow) return false;
 
   const leadInfo = userLocations[leaderNameNow] || {};
   const leadCallsign = leadInfo.callsign || '';
 
-  // (1) Marcar pista ocupada un rato (lease)
-  //     (si ya existe, no la pisamos)
   if (!runwayState.inUse) {
     runwayState.inUse = {
       action: 'landing',
@@ -1482,13 +1498,18 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
   // (2) Sacar al líder de la cola (consume turno)
   runwayState.landings = runwayState.landings.filter(l => l.name !== leaderNameNow);
 
+  // ✅ cortar ATC/targets del que ya aterrizó
+  clearATC(leaderNameNow);
+
+  // ✅ soltar latch FINAL del líder consumido
+  try { setFinalLatched(leaderNameNow, false); } catch {}
+
   // Limpiezas coherentes con tu lógica actual
-  clearTurnLease(leaderNameNow);
+  try { clearTurnLease(leaderNameNow); } catch {}
   try { clearFinalEnter(leaderNameNow); } catch {}
   try { b1LatchByName.delete(leaderNameNow); } catch {}
 
   // (3) Corrimiento + replanificación
-  //     (esto reordena y recalcula slots)
   try { enforceCompliance(); } catch {}
   try { planRunwaySequence(); } catch {}
 
@@ -1497,7 +1518,6 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
   if (newLead) {
     const g = activeRunwayGeom();
     if (g?.thr) {
-      // 🔥 instrucción explícita "ir a FINAL" (umbral activo)
       emitToUser(newLead, 'atc-instruction', {
         type: 'goto-beacon',
         beacon: 'FINAL',
@@ -1509,19 +1529,17 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
         spokenParams: { beacon: 'FINAL' },
       });
 
-    setFinalLatched(newLead, true);
-
-      // Server-side: lo ponemos en FINAL para que tu FSM no lo degrade
-      const ph = getApproachPhase(newLead);
-      if (ph !== 'CLRD') setApproachPhase(newLead, 'FINAL');
+      // ✅ lo único que hace falta para que publish NO lo degrade:
+      try { setFinalLatched(newLead, true); } catch {}
+      try { setApproachPhase(newLead, 'FINAL'); } catch {}
       try { setLandingStateForward(newLead, 'FINAL'); } catch {}
     }
   }
 
-  // (5) Publicar estado actualizado
   try { publishRunwayState(); } catch {}
   return true;
 }
+
 
 
 
@@ -1713,6 +1731,9 @@ function hardResetUser(name) {
   runwayState.landings = (runwayState.landings || []).filter(x => x.name !== name);
   runwayState.takeoffs = (runwayState.takeoffs || []).filter(x => x.name !== name);
 
+    // ✅ cortar ATC del que canceló
+    clearATC(name);
+
   // 2) Borrar OPS y flancos (si existen)
   try { opsStateByName?.delete(name); } catch {}
   try { lastOpsStateByName?.delete(name); } catch {}
@@ -1869,19 +1890,15 @@ if (acceptedState === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
   try { setFinalLatched(name, false); } catch {}
 }
 
-if (acceptedState === 'RUNWAY_OCCUPIED' || acceptedState === 'RUNWAY_CLEAR') {
-  const leaderNow2 = leaderName();
-  const isLeaderNow2 = !!leaderNow2 && leaderNow2 === name;
-
-  // ✅ SOLO remover de la cola si es el líder actual
-  if (isLeaderNow2) {
-    runwayState.landings = runwayState.landings.filter(l => l.name !== name);
-    clearTurnLease(name);
-    try { clearFinalEnter(name); } catch {}
-    try { b1LatchByName.delete(name); } catch {}
-  }
+// ⚠️ No consumir/remover cola acá.
+// El consumo real del líder se hace SOLO en consumeLeaderOnRunwayOccupied()
+// disparado por el flanco a RUNWAY_OCCUPIED.
+if (acceptedState === 'RUNWAY_CLEAR') {
+  // acá sí podés limpiar inUse si coincide, porque no consume turno
+  if (runwayState.inUse?.name === name) runwayState.inUse = null;
   try { setFinalLatched(name, false); } catch {}
 }
+
 
 // ✅ Si frontend vuelve a AIRBORNE => salir completamente de FINAL
 if (acceptedState === 'AIRBORNE') {
@@ -2071,16 +2088,22 @@ socket.on('air-guardian/leave', () => {
   const name = socketIdToName[socket.id];
   console.log('👋 air-guardian/leave desde', socket.id, '->', name);
   if (name) {
+    clearATC(name); // ✅ cortar ATC
+    // limpiar stores de OPS
+    try { opsReportedByName.delete(name); } catch {}
+    try { opsStateByName?.delete(name); } catch {}
+    try { lastOpsStateByName.delete(name); } catch {}
     delete userLocations[name];
     delete socketIdToName[socket.id];
     io.emit('user-removed', name);
     console.log(`❌ Usuario ${name} eliminado por leave`);
+
     // 👇 limpiar estado sticky
     landingStateByName.delete(name);
     lastOpsStateByName.delete(name);
+     try { landingStateByName.delete(name); } catch {}
+
     clearTurnLease(name);
-
-
     // ✅ limpiar timers/latch (auto-go-around / B1 latch)
     try { clearFinalEnter(name); } catch {}
     try { b1LatchByName.delete(name); } catch {}
@@ -2122,34 +2145,41 @@ socket.on('air-guardian/leave', () => {
 
 
   // 🛑 Cliente pide ser eliminado manualmente (cambio de avión o sale de Radar)
-  socket.on('remove-user', (name) => {
-    console.log(`🛑 Remove-user recibido para: ${name}`);
-    if (userLocations[name]) {
-      delete userLocations[name];
-          // 👇 limpiar estado sticky
-    landingStateByName.delete(name);
-    lastOpsStateByName.delete(name);
+socket.on('remove-user', (nameRaw) => {
+  const name = String(nameRaw || '').trim();
+  console.log(`🛑 Remove-user recibido para: ${name}`);
+  if (!name) return;
+
+  clearATC(name); // ✅
+
+  try { opsReportedByName.delete(name); } catch {}
+  try { opsStateByName?.delete(name); } catch {}
+  try { lastOpsStateByName.delete(name); } catch {}
+
+  if (userLocations[name]) {
+    delete userLocations[name];
+    try { landingStateByName.delete(name); } catch {}
     try { setFinalLatched(name, false); } catch {}
+    try { clearTurnLease(name); } catch {}
+    try { clearFinalEnter(name); } catch {}
+    try { b1LatchByName.delete(name); } catch {}
+  }
 
-    clearTurnLease(name);
-    }
-    // Buscar socketId y eliminar de la tabla inversa
-    for (const [sid, uname] of Object.entries(socketIdToName)) {
-      if (uname === name) {
-        delete socketIdToName[sid];
-        break;
-      }
-    }
-    io.emit('user-removed', name);
-    console.log(`❌ Usuario ${name} eliminado manualmente`);
-    
+  for (const [sid, uname] of Object.entries(socketIdToName)) {
+    if (uname === name) { delete socketIdToName[sid]; break; }
+  }
 
-    // ►► (AGREGADO) limpiar de colas si corresponde
-    runwayState.landings = runwayState.landings.filter(x => x.name !== name);
-    runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
-    planRunwaySequence();
-    publishRunwayState();
-  });
+  io.emit('user-removed', name);
+
+  runwayState.landings = (runwayState.landings || []).filter(x => x.name !== name);
+  runwayState.takeoffs = (runwayState.takeoffs || []).filter(x => x.name !== name);
+
+  if (runwayState.inUse?.name === name) runwayState.inUse = null;
+
+  planRunwaySequence();
+  publishRunwayState();
+});
+
 
   /* =====================  LISTENERS NUEVOS: RUNWAY  ===================== */
 
@@ -2237,19 +2267,29 @@ else if (action === 'takeoff') {
 
 
   // Cancelar solicitud
-  socket.on('runway-cancel', (msg) => {
-    try {
-      const { name } = msg || {};
-      if (!name) return;
-      runwayState.landings = runwayState.landings.filter(x => x.name !== name);
-      runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
-      try { setFinalLatched(name, false); } catch {}
-      planRunwaySequence();
-      publishRunwayState();
-    } catch (e) {
-      console.error('runway-cancel error:', e);
-    }
-  });
+socket.on('runway-cancel', (msg) => {
+  try {
+    const name = String(msg?.name || '').trim();
+    if (!name) return;
+
+    runwayState.landings = (runwayState.landings || []).filter(x => x.name !== name);
+    runwayState.takeoffs = (runwayState.takeoffs || []).filter(x => x.name !== name);
+
+    clearATC(name);
+
+    try { clearTurnLease(name); } catch {}
+    try { clearFinalEnter(name); } catch {}
+    try { b1LatchByName.delete(name); } catch {}
+    try { setFinalLatched(name, false); } catch {}
+
+    try { enforceCompliance(); } catch {}
+    planRunwaySequence();
+    publishRunwayState();
+  } catch (e) {
+    console.error('runway-cancel error:', e);
+  }
+});
+
 
   // Marcar pista ocupada (cuando inicia final corta o rueda para despegar)
 socket.on('runway-occupy', (msg) => {
