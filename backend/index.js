@@ -1998,6 +1998,7 @@ socket.on('ops/state', (msg) => {
       'RUNWAY_CLEAR',
       'AIRBORNE',
       'LAND_QUEUE',
+      'FINAL',              // ✅ ADD
       ...B_STATES,
     ]);
 
