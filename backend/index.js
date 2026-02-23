@@ -1357,56 +1357,168 @@ function publishRunwayState() {
     }
   }
 
+    function getHoldShortPointFromAirfield() {
+    const g = activeRunwayGeom();
+    if (!g?.thr || !g?.opp) return null;
 
-// === Ground guidance: TAXI_APRON ===
-function getApronPointFromAirfield() {
-  const a = lastAirfield;
+    // Eje de pista thr->opp
+    const rwyBrg = bearingDeg(g.thr.lat, g.thr.lon, g.opp.lat, g.opp.lon);
 
-  // Buscá en varios nombres típicos (sin inventar estructura)
-  const candidates = [
-    a?.apron,
-    a?.parking,
-    a?.stands,
-    a?.stand,
-    a?.ramp,
-    a?.runways?.[0]?.apron,
-    a?.runways?.[0]?.parking,
-  ];
+    // Punto "antes" del umbral, sobre el eje (80 m hacia afuera en la aproximación)
+    // app_brg es "hacia afuera" del umbral (tu definición), así que esto lo deja "antes" de entrar a pista
+    const preThr = destinationPoint(g.thr.lat, g.thr.lon, g.app_brg, 80);
 
-  for (const p of candidates) {
-    if (p && typeof p.lat === 'number' && typeof p.lon === 'number') {
-      return { lat: p.lat, lon: p.lon };
-    }
-    // si viene como {lng:...}
-    if (p && typeof p.lat === 'number' && typeof p.lng === 'number') {
-      return { lat: p.lat, lon: p.lng };
-    }
+    // Lateral 90° a la derecha de la pista, 80 m (quedás al costado, no sobre pista)
+    const lateral = (rwyBrg + 90) % 360;
+    const hs = destinationPoint(preThr.lat, preThr.lon, lateral, 80);
+
+    return { lat: hs.lat, lon: hs.lon };
+  } 
+
+  function hasAnyArrivalInFinalLike() {
+    const leader = leaderName();
+    if (!leader) return false;
+
+    const st = getReportedOpsState(leader);
+    if (st === 'FINAL') return true;
+
+    // si el backend ya lo latcheó a FINAL, cuenta como FINAL
+    if (isFinalLatched(leader)) return true;
+
+    // si por runway-state lo estabas asignando a FINAL
+    const asg = runwayState.assignedOps?.[leader] || null;
+    if (asg === 'FINAL') return true;
+
+    return false;
   }
 
-  // Fallback geométrico (si no hay apron explícito):
-  // punto cercano al umbral activo pero “fuera” de la pista (muy simple)
+  
+
+  // === Ground guidance: TAXI_APRON ===
+  function getApronPointFromAirfield() {
+    const a = lastAirfield;
+
+    // Buscá en varios nombres típicos (sin inventar estructura)
+    const candidates = [
+      a?.apron,
+      a?.parking,
+      a?.stands,
+      a?.stand,
+      a?.ramp,
+      a?.runways?.[0]?.apron,
+      a?.runways?.[0]?.parking,
+    ];
+
+    for (const p of candidates) {
+      if (p && typeof p.lat === 'number' && typeof p.lon === 'number') {
+        return { lat: p.lat, lon: p.lon };
+      }
+      // si viene como {lng:...}
+      if (p && typeof p.lat === 'number' && typeof p.lng === 'number') {
+        return { lat: p.lat, lon: p.lng };
+      }
+    }
+
+    // Fallback geométrico (si no hay apron explícito):
+    // punto cercano al umbral activo pero “fuera” de la pista (muy simple)
   const g = activeRunwayGeom();
   if (g?.thr) {
-    // 250 m hacia afuera por la dirección de aproximación (no es ideal, pero evita null)
-    const pt = destinationPoint(g.thr.lat, g.thr.lon, g.app_brg, 250);
+    // lateral 90° respecto al eje de pista
+    const lateral = (bearingDeg(g.thr.lat, g.thr.lon, g.opp.lat, g.opp.lon) + 90) % 360;
+    const pt = destinationPoint(g.thr.lat, g.thr.lon, lateral, 180); // 180m al costado
     return { lat: pt.lat, lon: pt.lon };
   }
 
-  return null;
-}
+    return null;
+  }
 
-const apronPt = getApronPointFromAirfield();
-if (apronPt) {
-  for (const [name, v] of opsReportedByName.entries()) {
-    if (v?.state === 'TAXI_APRON') {
-      // target de navegación para el taxi
-      assignedOps[name] = 'TAXI_APRON';
-      opsTargets[name] = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
+  // ======================
+  // GROUND GUIDANCE (APRON)
+  // Backend manda targets; frontend confirma OPS.
+  // ======================
+  const apronPt = getApronPointFromAirfield();
+  if (apronPt) {
+    for (const [name, v] of opsReportedByName.entries()) {
+      const st = v?.state;
+
+      // 1) Si está en pista o saliendo de pista => mandarlo al APRON
+      if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
+        assignedOps[name] = 'A_TO_APRON';
+        opsTargets[name]  = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
+        continue;
+      }
+
+      // 2) Si ya está en APRON => cortar ATC (sin línea azul)
+      if (st === 'APRON_STOP') {
+        // no incluir assignedOps/opsTargets
+        delete assignedOps[name];
+        delete opsTargets[name];
+        continue;
+      }
+    }
+  }
+
+  // ======================
+  // TAKEOFF GUIDANCE (HOLD_SHORT -> RWY)
+  // Backend manda targets; frontend confirma OPS.
+  // ======================
+  const holdShortPt = getHoldShortPointFromAirfield();
+  const gTk = activeRunwayGeom();
+
+if (holdShortPt && gTk?.thr) {
+  const depLeader = runwayState.takeoffs?.[0]?.name || null;
+  const arrivalFinal = hasAnyArrivalInFinalLike();
+
+  for (const t of (runwayState.takeoffs || [])) {
+    const name = t?.name;
+    if (!name) continue;
+
+    const st = getReportedOpsState(name);
+
+    // Solo guiamos al #1 de despegue (para que no se amontonen todos en hold short)
+    if (depLeader && name !== depLeader) continue;
+
+    // Si ya está airborne, no tiene sentido tenerlo en DEP
+    if (st === 'AIRBORNE') continue;
+
+    // Si está en runway occupied, ya "consumió" el slot: sacar guía
+    if (st === 'RUNWAY_OCCUPIED') {
+      delete assignedOps[name];
+      delete opsTargets[name];
+      continue;
+    }
+
+    // 1) Mientras esté en apron/taxi apron: mandarlo a HOLD_SHORT
+    if (st === 'APRON_STOP' || st === 'TAXI_APRON' || st === 'RUNWAY_CLEAR') {
+      assignedOps[name] = 'A_TO_HOLD_SHORT';
+      opsTargets[name] = { fix: 'HOLD_SHORT', lat: holdShortPt.lat, lon: holdShortPt.lon };
+      continue;
+    }
+
+    // 2) Si ya llegó a HOLD_SHORT: decidir clearance o mantener hold
+    if (st === 'HOLD_SHORT') {
+      const runwayFree = !runwayState.inUse;
+
+      if (runwayFree && !arrivalFinal) {
+        // ✅ clearance: ir a cabecera/umbral
+        assignedOps[name] = 'A_TO_RWY';
+        opsTargets[name] = { fix: 'RWY', lat: gTk.thr.lat, lon: gTk.thr.lon };
+      } else {
+        // ⛔️ mantener hold short (NO clearance)
+        assignedOps[name] = 'A_TO_HOLD_SHORT';
+        opsTargets[name] = { fix: 'HOLD_SHORT', lat: holdShortPt.lat, lon: holdShortPt.lon };
+      }
+      continue;
+    }
+
+    // 3) Si empezó a taxear a pista, mantener target RWY
+    if (st === 'TAXI_TO_RWY') {
+      assignedOps[name] = 'A_TO_RWY';
+      opsTargets[name] = { fix: 'RWY', lat: gTk.thr.lat, lon: gTk.thr.lon };
+      continue;
     }
   }
 }
-
-
 
     // ✅ Guardar backend assignments en Map (para getEffectiveOpsState)
     opsBackendByName.clear();
@@ -1604,7 +1716,36 @@ try { setFinalLatched(leaderNameNow, false); } catch {}
   return true;
 }
 
+function consumeTakeoffOnRunwayOccupied(name) {
+  const depLeader = runwayState.takeoffs?.[0]?.name || null;
+  if (!depLeader || depLeader !== name) return false;
 
+  // Si hay arrivals en FINAL, no debería haber entrado; pero por robustez:
+  if (hasAnyArrivalInFinalLike()) return false;
+
+  // Si la pista ya estaba en uso, no consumir
+  if (runwayState.inUse) return false;
+
+  const cs = userLocations[name]?.callsign || '';
+
+  runwayState.inUse = {
+    action: 'takeoff',
+    name,
+    callsign: cs,
+    startedAt: Date.now(),
+    slotMin: TKOF_OCCUPY_MIN
+  };
+
+  // consumir de cola DEP
+  runwayState.takeoffs = runwayState.takeoffs.filter(t => t.name !== name);
+
+  // cortar ATC (línea azul)
+  clearATC(name);
+
+  try { planRunwaySequence(); } catch {}
+  try { publishRunwayState(); } catch {}
+  return true;
+}
 
 function planRunwaySequence() {
   cleanupInUseIfDone();
@@ -1923,9 +2064,14 @@ socket.on('ops/state', (msg) => {
 
         // ✅ Trigger: SOLO si hubo flanco hacia RUNWAY_OCCUPIED y SOLO si es el líder actual
         if (prev !== 'RUNWAY_OCCUPIED' && acceptedState === 'RUNWAY_OCCUPIED') {
-          const didConsume = consumeLeaderOnRunwayOccupied(name);
-          if (didConsume) return;
+          const didConsumeLdg = consumeLeaderOnRunwayOccupied(name);
+          if (didConsumeLdg) return;
+
+          const didConsumeDep = consumeTakeoffOnRunwayOccupied(name);
+          if (didConsumeDep) return;
         }
+
+
 
     // Ajustes suaves al scheduler
 // Ajustes suaves al scheduler (NO duplicar consumo de líder)
@@ -1959,6 +2105,10 @@ if (acceptedState === 'RUNWAY_OCCUPIED' || acceptedState === 'RUNWAY_CLEAR') {
 // ✅ Si frontend vuelve a AIRBORNE => salir completamente de FINAL
 if (acceptedState === 'AIRBORNE') {
   try { setFinalLatched(name, false); } catch {}
+
+  // si estaba en cola de despegue, ya terminó
+  runwayState.takeoffs = (runwayState.takeoffs || []).filter(t => t.name !== name);
+  clearATC(name);
 }
 
 
