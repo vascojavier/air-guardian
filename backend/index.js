@@ -1242,7 +1242,7 @@ function publishRunwayState() {
     const b1LatchedLead = isB1Latched(leaderNow);
     const stLead = getReportedOpsState(leaderNow); // lo que dijo el frontend: B#, RUNWAY_*, etc.
     leaderWillBeFinal =
-      (stLead === 'B1' || stLead === 'FINAL' || b1LatchedLead) && !!gNow?.thr;
+      (stLead === 'B1' || stLead === 'FINAL') && !!gNow?.thr;
   }
 
   // 2) ¿Quién es #2 ahora mismo?
