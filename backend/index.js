@@ -1436,24 +1436,23 @@ function publishRunwayState() {
   // GROUND GUIDANCE (APRON)
   // Backend manda targets; frontend confirma OPS.
   // ======================
+// === Ground guidance (destinos ATC) ===
   const apronPt = getApronPointFromAirfield();
+
   if (apronPt) {
     for (const [name, v] of opsReportedByName.entries()) {
       const st = v?.state;
 
-      // 1) Si está en pista o saliendo de pista => mandarlo al APRON
-      if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
+      // Si ya está en taxi a apron o runway clear (salió de pista), seguir guiándolo al APRON
+      if (st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
         assignedOps[name] = 'A_TO_APRON';
         opsTargets[name]  = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
-        continue;
       }
 
-      // 2) Si ya está en APRON => cortar ATC (sin línea azul)
+      // Si confirmó que llegó y se detuvo, cancelar guía
       if (st === 'APRON_STOP') {
-        // no incluir assignedOps/opsTargets
         delete assignedOps[name];
         delete opsTargets[name];
-        continue;
       }
     }
   }
