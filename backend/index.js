@@ -2384,6 +2384,20 @@ socket.on('runway-request', (msg) => {
     if (!name || !action) return;
 
     if (action === 'land') {
+
+            // ✅ RESET completo de aproximación/OPS al pedir aterrizaje (evita "FINAL fantasma")
+      try { opsReportedByName.delete(name); } catch {}
+      try { lastOpsStateByName.delete(name); } catch {}
+
+      try { b1LatchByName.delete(name); } catch {}
+      try { clearFinalEnter(name); } catch {}
+      try { driftSinceByName.delete(name); } catch {}
+      try { clearTurnLease(name); } catch {}
+      try { setFinalLatched(name, false); } catch {}
+
+      // opcional: si querés que el backend vea un estado inicial explícito:
+      opsReportedByName.set(name, { state: 'LAND_QUEUE', ts: Date.now(), aux: null });
+      lastOpsStateByName.set(name, 'LAND_QUEUE');
       if (!runwayState.landings.some(x => x.name === name)) {
         runwayState.landings.push({
           name, callsign, aircraft, type,
