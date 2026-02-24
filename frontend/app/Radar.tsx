@@ -332,6 +332,8 @@ const Radar = () => {
   const freezeBeaconEngineRef = useRef<boolean>(false);
   const lastSentOpsRef = useRef<string | null>(null);
   const assignedRef = useRef<string | null>(null);
+  const opsTargetsRef = useRef<Record<string, any> | null>(null);
+  const lastApronStopSentRef = useRef(0);
   
 
 
@@ -454,7 +456,49 @@ function getBackendAssignedForMe(): string | null {
 }
 
 
+function distanceMeters(lat1:number, lon1:number, lat2:number, lon2:number) {
+  // Haversine rápido (o usá el tuyo si ya existe)
+  const R = 6371000;
+  const toRad = (d:number) => d * Math.PI / 180;
+  const dLat = toRad(lat2-lat1);
+  const dLon = toRad(lon2-lon1);
+  const a =
+    Math.sin(dLat/2)**2 +
+    Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return 2*R*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
 
+function myNameKeysFirstMatch<T>(obj: Record<string,T> | null | undefined): T | null {
+  if (!obj) return null;
+  for (const k of keysForMe()) {
+    const v = obj[k];
+    if (v) return v;
+  }
+  return null;
+}
+
+function maybeConfirmApronStop(socket:any) {
+  const me = myPlaneRef.current;
+  if (!me) return;
+
+  const targets = opsTargetsRef.current;
+  const t = myNameKeysFirstMatch(targets);
+  if (!t || t.fix !== 'APRON') return;
+
+  const d = distanceMeters(me.lat, me.lon, t.lat, t.lon);
+  const speed = me.speed ?? 0;
+
+  const ARRIVE_APRON_M = 60;   // ✅ GPS realista
+  const STOP_SPEED_KMH = 5;    // ✅ “casi detenido”
+  const now = Date.now();
+  if (now - lastApronStopSentRef.current < 5000) return;
+
+  if (d <= ARRIVE_APRON_M && speed <= STOP_SPEED_KMH) {
+    console.log('[OPS] arrived APRON → sending APRON_STOP', { d, speed });
+    socket.emit('ops/state', { name: me.name, state: 'APRON_STOP' });
+    lastApronStopSentRef.current = now;
+  }
+}
 
 
 function canConfirmBeaconNow(fix: string): boolean {
@@ -775,6 +819,7 @@ const emitUpdate = (p: PosUpdate) => {
     aircraftIcon: aircraftIcon || '2.png',
     isMotorized,
   });
+  maybeConfirmApronStop(s);
 };
 
   //const isFocusedRef = useRef(false);
@@ -2785,6 +2830,9 @@ s.on('traffic-update', (data: any) => {
 
 // ✅ runway-state
 // ✅ runway-state
+// arriba del archivo
+const opsTargetsRef = useRef<Record<string, { fix:string; lat:number; lon:number }> | null>(null);
+
 s.on('runway-state', (payload: any) => {
   try { console.log('[RUNWAY] state ←', JSON.stringify(payload)); } catch {}
 
@@ -2792,17 +2840,20 @@ s.on('runway-state', (payload: any) => {
 
   try {
     const map = payload?.state?.assignedOps as Record<string,string> | undefined;
+    const targets = payload?.state?.opsTargets as Record<string, {fix:string; lat:number; lon:number}> | undefined;
+
+    opsTargetsRef.current = targets || null;
+
     let assigned: string | null = null;
 
     if (map) {
-      // mismas keys que ya usás (id/name/callsign/username)
       for (const k of keysForMe()) {
         const v = map[k];
         if (typeof v === 'string' && v) { assigned = v; break; }
       }
     }
 
-    assignedRef.current = assigned; // ✅ verdad instantánea (no depende de setState)
+    assignedRef.current = assigned;
 
     if (assigned === 'FINAL') {
       if (lastSentOpsRef.current !== 'FINAL') {
