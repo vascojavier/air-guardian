@@ -1257,13 +1257,11 @@ function publishRunwayState() {
 
       const stReported = getReportedOpsState(name);
 
-      const CRITICAL = new Set([
-        'RUNWAY_OCCUPIED',
-        'RUNWAY_CLEAR',
-        'APRON_STOP',
-        'TAXI_TO_RWY',
-        'HOLD_SHORT',
-      ]);
+    const CRITICAL = new Set([
+      'APRON_STOP',
+      'TAXI_TO_RWY',
+      'HOLD_SHORT',
+    ]);
 
 
     // 1) Si está en estados críticos de tierra/pista: NO targets, NO assignedOps
@@ -1275,11 +1273,34 @@ function publishRunwayState() {
     }
 
     // 2) Si el frontend ya confirmó B1 o FINAL: NO lo vuelvas a mandar a B2/B3 jamás
-    if (stReported === 'B1' || stReported === 'FINAL') {
-      assignedOps[name] = 'FINAL';
-      if (gNow?.thr) opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
-      continue;
-    }
+// 2) Si el frontend confirmó B1:
+//    - leader => FINAL
+//    - no-leader => HOLD en B1 (A_TO_B1) (NO FINAL)
+if (stReported === 'B1') {
+  if (leaderNow && name === leaderNow && gNow?.thr) {
+    assignedOps[name] = 'FINAL';
+    opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+    setFinalLatched(name, true);
+  } else {
+    assignedOps[name] = 'A_TO_B1';
+    if (asg?.b1) opsTargets[name] = { fix: 'B1', lat: asg.b1.lat, lon: asg.b1.lon };
+  }
+  continue;
+}
+
+// 3) Si por algún motivo el frontend reportó FINAL (no debería):
+//    solo respetarlo si es líder; si no, degradarlo a B1
+if (stReported === 'FINAL') {
+  if (leaderNow && name === leaderNow && gNow?.thr) {
+    assignedOps[name] = 'FINAL';
+    opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+    setFinalLatched(name, true);
+  } else {
+    assignedOps[name] = 'A_TO_B1';
+    if (asg?.b1) opsTargets[name] = { fix: 'B1', lat: asg.b1.lat, lon: asg.b1.lon };
+  }
+  continue;
+}
 
 
   // ✅ FINAL LATCH: si el backend ya lo comprometió a FINAL, no mirar OPS para degradarlo
@@ -1459,7 +1480,7 @@ function publishRunwayState() {
   }
 
   // ======================
-  // TAKEOFF GUIDANCE (HOLD_SHORT -> RWY)
+  // TAKEOFF GUIDANCE (HOLD_SHORT -> RWY)opsBackendByName.clear();
   // Backend manda targets; frontend confirma OPS.
   // ======================
   const holdShortPt = getHoldShortPointFromAirfield();

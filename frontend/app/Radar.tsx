@@ -332,7 +332,7 @@ const Radar = () => {
   const freezeBeaconEngineRef = useRef<boolean>(false);
   const lastSentOpsRef = useRef<string | null>(null);
   const assignedRef = useRef<string | null>(null);
-  const opsTargetsRef = useRef<Record<string, any> | null>(null);
+  const opsTargetsRef = useRef<Record<string, { fix:string; lat:number; lon:number }> | null>(null);
   const lastApronStopSentRef = useRef(0);
   
 
@@ -2831,7 +2831,7 @@ s.on('traffic-update', (data: any) => {
 // ✅ runway-state
 // ✅ runway-state
 // arriba del archivo
-const opsTargetsRef = useRef<Record<string, { fix:string; lat:number; lon:number }> | null>(null);
+
 
 s.on('runway-state', (payload: any) => {
   try { console.log('[RUNWAY] state ←', JSON.stringify(payload)); } catch {}
