@@ -334,6 +334,7 @@ const Radar = () => {
   const assignedRef = useRef<string | null>(null);
   const opsTargetsRef = useRef<Record<string, { fix:string; lat:number; lon:number }> | null>(null);
   const lastApronStopSentRef = useRef(0);
+  const runwayOccupiedSentRef = useRef(false);
   
 
 
@@ -500,6 +501,25 @@ function maybeConfirmApronStop(socket:any) {
   }
 }
 
+
+function maybeConfirmHoldShort(socket: any) {
+  const me = myPlaneRef.current;
+  if (!me) return;
+
+  const targets = opsTargetsRef.current;
+  const t = myNameKeysFirstMatch(targets);
+  if (!t || t.fix !== 'HOLD_SHORT') return;
+
+  const d = distanceMeters(me.lat, me.lon, t.lat, t.lon);
+  const speed = me.speed ?? 0;
+
+  const ARRIVE_HS_M = 40;     // 30–60m
+  const SLOW_KMH = 10;        // “llegando / frenando”
+  if (d <= ARRIVE_HS_M && speed <= SLOW_KMH) {
+    // IMPORTANTE: misma key que update
+    socket.emit('ops/state', { name: username, state: 'HOLD_SHORT' });
+  }
+}
 
 function canConfirmBeaconNow(fix: string): boolean {
   // fix = 'B2','B17',...
@@ -672,45 +692,95 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
   };
 
 
-  useFocusEffect(
+useFocusEffect(
   useCallback(() => {
     isFocusedRef.current = true;
 
     return () => {
       isFocusedRef.current = false;
 
-      // 1) Frenar timers / intervalos
+      // 0) cortar GPS watch (clave: si queda vivo, te mata ExpoGo)
+      try { gpsWatchRef.current?.remove?.(); } catch {}
+      gpsWatchRef.current = null;
+      gpsBusyRef.current = false;
+
+      // 1) Frenar intervalos / timers
       try { if (sendIntervalRef.current) clearInterval(sendIntervalRef.current as any); } catch {}
       sendIntervalRef.current = null;
 
-      // 2) Limpiar timeouts
+      try { if (intervalRef.current) clearInterval(intervalRef.current as any); } catch {}
+      intervalRef.current = null;
+
+      try { if (holdTimerRef.current) clearTimeout(holdTimerRef.current as any); } catch {}
+      holdTimerRef.current = null;
+
+      try { if (taDebounceRef.current) clearTimeout(taDebounceRef.current as any); } catch {}
+      taDebounceRef.current = null;
+
       try { if (hideSelectedTimeout.current) clearTimeout(hideSelectedTimeout.current as any); } catch {}
       hideSelectedTimeout.current = null;
 
-      // 3) Reset TOTAL de refs “pegadas”
+      // 2) RESET TOTAL de LATCHES / REFS (tierra + runway + apron)
       landingRequestedRef.current = false;
       takeoffRequestedRef.current = false;
       finalLockedRef.current = false;
 
+      apronLatchRef.current = false;
+      runwayOccupiedSentRef.current = false;     // 👈 IMPORTANTÍSIMO
+      lastApronStopSentRef.current = 0;
+
+      iAmOccupyingRef.current = null;
+      landClearShownRef.current = false;
+
       lastOpsStateRef.current = null;
       lastOpsStateTsRef.current = 0;
 
-      selectedHoldUntilRef.current = 0;
+      assignedRef.current = null;
+      opsTargetsRef.current = null;
+      freezeBeaconEngineRef.current = false;
+      lastSentOpsRef.current = null;
 
-      // 4) Reset TOTAL de UI local
+      arrivedSinceRef.current = {};
+      lastDistanceRef.current = {};
+      backendDistanceRef.current = {};
+      lastWarningTimeRef.current = {};
+      raHoldUntilRef.current = {};
+      activeRAIdRef.current = null;
+      lastRAIdRef.current = null;
+
+      snoozeUntilRef.current = 0;
+      snoozeIdRef.current = null;
+
+      // 3) Reset de UI local
       try { setSelected(null); } catch {}
+      try { setConflict(null); } catch {}
       try { setBackendWarning(null); } catch {}
+      try { setLocalWarning(null); } catch {}
+      try { setPrioritizedWarning(null); } catch {}
       try { setWarnings({}); } catch {}
+      try { setTraffic([]); } catch {}
+      try { setSlots([]); } catch {}
+      try { setRunwayState(null as any); } catch {}
+      try { setNavTargetSafe(null); } catch {}
       try { setBanner(null); } catch {}
 
-      // 5) Reset runway-state local (clave para que NO redibuje línea al re-entrar)
-      try { setRunwayState(null as any); } catch {}
-      try { setSlots([]); } catch {}
+      // 4) Avisar al backend + limpiar listeners del socket
+      const s = socketRef.current;
+      if (s) {
+        try { s.emit('leave', { name: username }); } catch {}
 
-      // 6) Avisar al backend: hard reset del usuario
-      try {
-        socketRef.current?.emit('leave', { name: username });
-      } catch {}
+        // 👇 esto evita “duplicar listeners” al re-entrar
+        try { s.off('runway-state'); } catch {}
+        try { s.off('traffic-update'); } catch {}
+        try { s.off('conflicto'); } catch {}
+        try { s.off('initial-traffic'); } catch {}
+        try { s.off('sequence-update'); } catch {}
+
+        // opcional pero recomendable si ExpoGo se cuelga al volver:
+        // cortar del todo y reconectar al entrar
+        try { s.disconnect(); } catch {}
+      }
+      socketRef.current = null;
     };
   }, [username])
 );
@@ -3283,74 +3353,72 @@ useEffect(() => {
 
   // ✅ antes era: isOnRunwayStrip() && speed < 50
   // ahora: sólo si realmente parece touchdown + rollout lento
-  if (touchdownLike && speedKmh < 50) {
-    flashBanner(t("runway.vacateRunway"), 'free-runway');
+// reset del latch cuando ya estás en RUNWAY_CLEAR (confirmado por ops)
+if (lastOpsStateRef.current === 'RUNWAY_CLEAR') {
+  runwayOccupiedSentRef.current = false;
+}
+
+if (touchdownLike && speedKmh < 50) {
+  flashBanner(t("runway.vacateRunway"), 'free-runway');
+
+  // ✅ NO setNavTarget acá (lo hace el NAV único vía apronLatchRef)
+  apronLatchRef.current = true;
+
+  // --- LATCH: emitir RUNWAY_OCCUPIED solo una vez por aterrizaje ---
+  const me = myPlane?.id || username;
+
+  // debug rápido (opcional, borralo luego)
+  console.log('[TD DEBUG]', { touchdownLike, agl, speedKmh, assigned: getBackendAssignedForMe() });
+
+  if (!runwayOccupiedSentRef.current) {
+    // bypass de gates: el frontend debe confirmar RUNWAY_OCCUPIED en touchdown
+    console.log('[OPS] touchdown → RUNWAY_OCCUPIED (latch)');
+    emitOpsNow('RUNWAY_OCCUPIED', 'TOUCHDOWN_LATCH', { touchdownLike, agl, speedKmh });
+    runwayOccupiedSentRef.current = true;
+    // marca el latch para la navegación a apron cuando backend lo mande
+    apronLatchRef.current = true;
+  }
+
+  // Si estoy aterrizando y aún no marqué occupy en la lógica local, marcar
+  if (
+    landingRequestedRef.current &&
+    iAmOccupyingRef.current !== 'landing' &&
+    defaultActionForMe() === 'land'
+  ) {
+    markRunwayOccupy('landing');
+    iAmOccupyingRef.current = 'landing';
+
+    // ✅ ya aterrizaste, podés cancelar la “request”
+    try { cancelMyRequest(); } catch {}
+    landingRequestedRef.current = false;
+    finalLockedRef.current = false;
+    socketRef.current?.emit('runway-get'); // refresco estado del server
+  }
+
+} else {
+  // Versión conservadora: hacer "clear" solo si venías ocupando
+  // o si estás en un estado de tierra real cerca de la cabecera activa
+  let activeEnd: 'A' | 'B' | null = null;
+  if ((rw as any).active_end === 'B') activeEnd = 'B';
+  else activeEnd = 'A';
+
+  const nearActiveThreshold =
+    activeEnd ? isNearThreshold(activeEnd, 200) : false;
+
+  if (iAmOccupyingRef.current || (iAmGroundish() && nearActiveThreshold)) {
+    markRunwayClear();
+
+    // Reset de aproximación y OPS visible
+    finalLockedRef.current = false;
+    emitOpsNow('RUNWAY_CLEAR', 'AUTOCLEAR');
 
     // ✅ NO setNavTarget acá (lo hace el NAV único vía apronLatchRef)
     apronLatchRef.current = true;
 
-    // Forzar OPS a RUNWAY_OCCUPIED si aún estaba en FINAL
-    // ✅ Reportar RUNWAY_OCCUPIED solo con dwell real (anti-flicker GPS)
-    const me = myPlane?.id || username;
-reportIfDwellInside(
-  `${me}:RUNWAY_OCCUPIED`,
-  touchdownLike,           // misma condición que ya calculaste
-  ARRIVE_DWELL_MS,         // o 1500 fijo si querés
-  () => {
-    if (canConfirmRunwayOccupiedNow()) {
-     emitOpsNow('RUNWAY_OCCUPIED', 'TOUCHDOWN_DWELL', { touchdownLike })
-    } else {
-      console.log('[OPS] Skip RUNWAY_OCCUPIED (not in landing flow):', {
-        assigned: getBackendAssignedForMe(),
-        landingRequested: landingRequestedRef.current,
-        takeoffRequested: takeoffRequestedRef.current,
-      });
-    }
+    iAmOccupyingRef.current = null;
   }
-);
-
-
-
-    // Si estoy aterrizando y aún no marqué occupy, marcar
-    if (
-      landingRequestedRef.current &&
-      iAmOccupyingRef.current !== 'landing' &&
-      defaultActionForMe() === 'land'
-    ) {
-      markRunwayOccupy('landing');
-      iAmOccupyingRef.current = 'landing';
-
-      // ✅ ya aterrizaste, podés cancelar la “request”
-      try { cancelMyRequest(); } catch {}
-      landingRequestedRef.current = false;
-      finalLockedRef.current = false;
-      socketRef.current?.emit('runway-get'); // refresco estado del server
-    }
-
-  } else {
-    // Versión conservadora: hacer "clear" solo si venías ocupando
-    // o si estás en un estado de tierra real cerca de la cabecera activa
-    let activeEnd: 'A' | 'B' | null = null;
-    if ((rw as any).active_end === 'B') activeEnd = 'B';
-    else activeEnd = 'A';
-
-    const nearActiveThreshold =
-      activeEnd ? isNearThreshold(activeEnd, 200) : false;
-
-    if (iAmOccupyingRef.current || (iAmGroundish() && nearActiveThreshold)) {
-      markRunwayClear();
-
-      // Reset de aproximación y OPS visible
-      finalLockedRef.current = false;
-      emitOpsNow('RUNWAY_CLEAR', 'AUTOCLEAR');
-
-      // ✅ NO setNavTarget acá (lo hace el NAV único vía apronLatchRef)
-      apronLatchRef.current = true;
-
-      iAmOccupyingRef.current = null;
-    }
-    // Si no se cumple la condición conservadora, NO limpies nada.
-  }
+  // Si no se cumple la condición conservadora, NO limpies nada.
+}
 
   // 2) Permisos según turno y huecos
   const me = myPlane?.id || username;
