@@ -699,12 +699,12 @@ useFocusEffect(
     return () => {
       isFocusedRef.current = false;
 
-      // 0) cortar GPS watch (clave: si queda vivo, te mata ExpoGo)
+      // 0) GPS watch (MUY importante)
       try { gpsWatchRef.current?.remove?.(); } catch {}
       gpsWatchRef.current = null;
       gpsBusyRef.current = false;
 
-      // 1) Frenar intervalos / timers
+      // 1) Frenar timers / intervalos
       try { if (sendIntervalRef.current) clearInterval(sendIntervalRef.current as any); } catch {}
       sendIntervalRef.current = null;
 
@@ -717,16 +717,17 @@ useFocusEffect(
       try { if (taDebounceRef.current) clearTimeout(taDebounceRef.current as any); } catch {}
       taDebounceRef.current = null;
 
+      // 2) Limpiar timeouts
       try { if (hideSelectedTimeout.current) clearTimeout(hideSelectedTimeout.current as any); } catch {}
       hideSelectedTimeout.current = null;
 
-      // 2) RESET TOTAL de LATCHES / REFS (tierra + runway + apron)
+      // 3) Reset TOTAL de refs “pegadas” (incluye TIERRA)
       landingRequestedRef.current = false;
       takeoffRequestedRef.current = false;
       finalLockedRef.current = false;
 
       apronLatchRef.current = false;
-      runwayOccupiedSentRef.current = false;     // 👈 IMPORTANTÍSIMO
+      runwayOccupiedSentRef.current = false;   // 👈 clave para que no quede “latcheado”
       lastApronStopSentRef.current = 0;
 
       iAmOccupyingRef.current = null;
@@ -734,6 +735,8 @@ useFocusEffect(
 
       lastOpsStateRef.current = null;
       lastOpsStateTsRef.current = 0;
+
+      selectedHoldUntilRef.current = 0;
 
       assignedRef.current = null;
       opsTargetsRef.current = null;
@@ -746,12 +749,8 @@ useFocusEffect(
       lastWarningTimeRef.current = {};
       raHoldUntilRef.current = {};
       activeRAIdRef.current = null;
-      lastRAIdRef.current = null;
 
-      snoozeUntilRef.current = 0;
-      snoozeIdRef.current = null;
-
-      // 3) Reset de UI local
+      // 4) Reset TOTAL de UI local
       try { setSelected(null); } catch {}
       try { setConflict(null); } catch {}
       try { setBackendWarning(null); } catch {}
@@ -759,25 +758,26 @@ useFocusEffect(
       try { setPrioritizedWarning(null); } catch {}
       try { setWarnings({}); } catch {}
       try { setTraffic([]); } catch {}
-      try { setSlots([]); } catch {}
-      try { setRunwayState(null as any); } catch {}
-      try { setNavTargetSafe(null); } catch {}
       try { setBanner(null); } catch {}
 
-      // 4) Avisar al backend + limpiar listeners del socket
+      // 5) Reset runway-state local (clave para que NO redibuje línea al re-entrar)
+      try { setRunwayState(null as any); } catch {}
+      try { setSlots([]); } catch {}
+      try { setNavTargetSafe(null); } catch {}
+
+      // 6) Avisar al backend + limpiar socket para NO duplicar handlers al volver
       const s = socketRef.current;
       if (s) {
         try { s.emit('leave', { name: username }); } catch {}
 
-        // 👇 esto evita “duplicar listeners” al re-entrar
+        // evita “handlers duplicados” al reentrar
         try { s.off('runway-state'); } catch {}
         try { s.off('traffic-update'); } catch {}
         try { s.off('conflicto'); } catch {}
         try { s.off('initial-traffic'); } catch {}
         try { s.off('sequence-update'); } catch {}
 
-        // opcional pero recomendable si ExpoGo se cuelga al volver:
-        // cortar del todo y reconectar al entrar
+        // recomendado si ExpoGo se cuelga: desconectar y reconectar al entrar
         try { s.disconnect(); } catch {}
       }
       socketRef.current = null;

@@ -1942,6 +1942,8 @@ socket.broadcast.emit('traffic-update', [payload]);
     }
  });
 
+ 
+
 function hardResetUser(name) {
   if (!name) return;
 
@@ -1970,6 +1972,8 @@ function hardResetUser(name) {
   try { landingStateByName?.delete(name); } catch {}
   try { approachPhaseByName?.delete(name); } catch {}
   try { setFinalLatched(name, false); } catch {}
+    // ✅ ESTA ERA LA QUE FALTABA (es la que dispara A_TO_APRON)
+  try { opsReportedByName?.delete(name); } catch {}
 
 
   // 4) Borrar ubicación (evita “avión fantasma”)
