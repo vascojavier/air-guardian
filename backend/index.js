@@ -1222,8 +1222,8 @@ function publishRunwayState() {
       slotMin: Math.round((s.endMs - s.startMs) / 60000),
     }));
 
-  // --- FRONT-REPORTED OPS (lo que reporta el frontend) ---
-  const reportedOpsStates = Object.fromEntries(
+    // --- FRONT-REPORTED OPS (lo que reporta el frontend) ---
+   const reportedOpsStates = Object.fromEntries(
     Array.from(opsReportedByName.entries()).map(([k, v]) => [k, v.state])
   );
 
@@ -1264,6 +1264,39 @@ function publishRunwayState() {
     ]);
 
 
+      function decideRunwayClearance() {
+    // si pista ocupada -> nadie recibe clearance
+    if (runwayState.inUse) return { winner: null };
+
+    // si hay FINAL (latched o asignado) -> nadie recibe clearance de despegue
+    const finalName = findAnyoneInFinalLike(); // líder en FINAL o isFinalLatched(...)
+    if (finalName) return { winner: 'ARR', arr: finalName, dep: null };
+
+    const arrLeader = runwayState.landings?.[0]?.name || null;
+    const depLeader = runwayState.takeoffs?.[0]?.name || null;
+
+    const arrState = arrLeader ? getReportedOpsState(arrLeader) : null;
+    const depState = depLeader ? getReportedOpsState(depLeader) : null;
+
+    const arrReady = arrLeader && arrState === 'B1';
+    const depReady = depLeader && depState === 'HOLD_SHORT';
+
+    if (arrReady && !depReady) return { winner: 'ARR', arr: arrLeader, dep: null };
+    if (!arrReady && depReady) return { winner: 'DEP', arr: null, dep: depLeader };
+    if (!arrReady && !depReady) return { winner: null };
+
+    // ambos listos: gana el que llegó primero al punto listo
+    const tArr = opsReportedByName.get(arrLeader)?.ts ?? Infinity;
+    const tDep = opsReportedByName.get(depLeader)?.ts ?? Infinity;
+
+    if (tArr < tDep) return { winner: 'ARR', arr: arrLeader, dep: depLeader };
+    if (tDep < tArr) return { winner: 'DEP', arr: arrLeader, dep: depLeader };
+
+    // empate: ARR gana (o tu regla preferida)
+    return { winner: 'ARR', arr: arrLeader, dep: depLeader };
+  }
+
+
     // 1) Si está en estados críticos de tierra/pista: NO targets, NO assignedOps
     if (CRITICAL.has(stReported)) {
       // importante: no mandes assignedOps ni opsTargets para que el front no dibuje línea ni hable
@@ -1276,8 +1309,9 @@ function publishRunwayState() {
 // 2) Si el frontend confirmó B1:
 //    - leader => FINAL
 //    - no-leader => HOLD en B1 (A_TO_B1) (NO FINAL)
+const clearance = decideRunwayClearance();
 if (stReported === 'B1') {
-  if (leaderNow && name === leaderNow && gNow?.thr) {
+  if (leaderNow && name === leaderNow && gNow?.thr && clearance.winner === 'ARR') {
     assignedOps[name] = 'FINAL';
     opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
     setFinalLatched(name, true);
@@ -1396,22 +1430,33 @@ if (stReported === 'FINAL') {
     return { lat: hs.lat, lon: hs.lon };
   } 
 
-  function hasAnyArrivalInFinalLike() {
-    const leader = leaderName();
-    if (!leader) return false;
-
-    const st = getReportedOpsState(leader);
-    if (st === 'FINAL') return true;
-
-    // si el backend ya lo latcheó a FINAL, cuenta como FINAL
-    if (isFinalLatched(leader)) return true;
-
-    // si por runway-state lo estabas asignando a FINAL
-    const asg = runwayState.assignedOps?.[leader] || null;
-    if (asg === 'FINAL') return true;
-
-    return false;
+function hasAnyArrivalInFinalLike() {
+  // 1) cualquiera latcheado a FINAL
+  for (const L of (runwayState.landings || [])) {
+    const n = L?.name;
+    if (!n) continue;
+    if (isFinalLatched(n)) return true;
   }
+
+  // 2) cualquiera reportando FINAL (si existiera)
+  for (const L of (runwayState.landings || [])) {
+    const n = L?.name;
+    if (!n) continue;
+    if (getReportedOpsState(n) === 'FINAL') return true;
+  }
+
+  // 3) cualquiera asignado a FINAL por runwayState (si lo guardás)
+  const asgMap = runwayState.assignedOps || null;
+  if (asgMap) {
+    for (const L of (runwayState.landings || [])) {
+      const n = L?.name;
+      if (!n) continue;
+      if (asgMap[n] === 'FINAL') return true;
+    }
+  }
+
+  return false;
+}
 
   
 
@@ -1479,6 +1524,41 @@ if (stReported === 'FINAL') {
     }
   }
 
+  function getReportedTs(name) {
+  return opsReportedByName.get(name)?.ts ?? Infinity;
+}
+
+function decideRunwayClearance() {
+  // si pista ocupada -> nadie recibe clearance
+  if (runwayState.inUse) return { winner: null };
+
+  // si hay alguien en FINAL-like -> winner ARR (y DEP bloqueado)
+  if (hasAnyArrivalInFinalLike()) return { winner: 'ARR' };
+
+  const arrLeader = runwayState.landings?.[0]?.name || null;
+  const depLeader = runwayState.takeoffs?.[0]?.name || null;
+
+  const arrReady = !!arrLeader && getReportedOpsState(arrLeader) === 'B1';
+  const depReady = !!depLeader && getReportedOpsState(depLeader) === 'HOLD_SHORT';
+
+  // ninguno listo
+  if (!arrReady && !depReady) return { winner: null };
+
+  // uno listo
+  if (arrReady && !depReady) return { winner: 'ARR' };
+  if (!arrReady && depReady) return { winner: 'DEP' };
+
+  // ambos listos: gana el que llegó primero a su punto "ready"
+  const tArr = getReportedTs(arrLeader);
+  const tDep = getReportedTs(depLeader);
+
+  if (tArr < tDep) return { winner: 'ARR' };
+  if (tDep < tArr) return { winner: 'DEP' };
+
+  // empate: ARR gana (seguridad)
+  return { winner: 'ARR' };
+}
+
   // ======================
   // TAKEOFF GUIDANCE (HOLD_SHORT -> RWY)opsBackendByName.clear();
   // Backend manda targets; frontend confirma OPS.
@@ -1486,9 +1566,12 @@ if (stReported === 'FINAL') {
   const holdShortPt = getHoldShortPointFromAirfield();
   const gTk = activeRunwayGeom();
 
+
 if (holdShortPt && gTk?.thr) {
   const depLeader = runwayState.takeoffs?.[0]?.name || null;
   const arrivalFinal = hasAnyArrivalInFinalLike();
+  const clearance = decideRunwayClearance();
+  const canClearTakeoff = clearance.winner === 'DEP';
 
   for (const t of (runwayState.takeoffs || [])) {
     const name = t?.name;
@@ -1520,7 +1603,7 @@ if (holdShortPt && gTk?.thr) {
     if (st === 'HOLD_SHORT') {
       const runwayFree = !runwayState.inUse;
 
-      if (runwayFree && !arrivalFinal) {
+      if (runwayFree && canClearTakeoff) {
         // ✅ clearance: ir a cabecera/umbral
         assignedOps[name] = 'A_TO_RWY';
         opsTargets[name] = { fix: 'RWY', lat: gTk.thr.lat, lon: gTk.thr.lon };
