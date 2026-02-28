@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const OPS_TTL_MS = 15_000; // 15s (ajustable)
 const ATC_DEFAULTS = {
     // === FSM / sticky & compliance ===
     FINAL_LOCK_RADIUS_M : 2000,   // dentro de 2 km de B1 no reordenar más (comprometido)
@@ -41,6 +42,32 @@ const turnLeaseByName = new Map();
 
 function leaderName() {
   return runwayState.landings?.[0]?.name || null;
+}
+
+function pruneStaleOps() {
+  const now = Date.now();
+
+  for (const [name, v] of opsReportedByName.entries()) {
+    const alive = userLocations[name];
+    const ts = v?.ts ?? 0;
+
+    // Si el usuario ya no existe, o su update es viejo, o el OPS es viejo => borrar
+    const staleUser = !alive || (now - (alive.timestamp ?? 0) > OPS_TTL_MS);
+    const staleOps  = (now - ts > OPS_TTL_MS);
+
+    if (staleUser || staleOps) {
+      opsReportedByName.delete(name);
+      lastOpsStateByName.delete(name);
+      try { b1LatchByName?.delete(name); } catch {}
+      try { driftSinceByName?.delete(name); } catch {}
+      try { landingStateByName?.delete(name); } catch {}
+      try { approachPhaseByName?.delete(name); } catch {}
+      try { clearTurnLease?.(name); } catch {}
+      try { clearFinalEnter?.(name); } catch {}
+      try { setFinalLatched?.(name, false); } catch {}
+      if (runwayState.inUse?.name === name) runwayState.inUse = null;
+    }
+  }
 }
 
 // Limpieza estándar cuando alguien pierde turno o completa
@@ -1208,6 +1235,7 @@ function maybeSendInstruction(opId, opsById) {
 
 // ========= Publicación de estado =========
 function publishRunwayState() {
+  pruneStaleOps();   // ✅ PRIMERO
   const now = Date.now();
   const slots = runwayState.timelineSlots || [];
   const airfield = lastAirfield || null;
@@ -1223,9 +1251,13 @@ function publishRunwayState() {
     }));
 
     // --- FRONT-REPORTED OPS (lo que reporta el frontend) ---
-   const reportedOpsStates = Object.fromEntries(
-    Array.from(opsReportedByName.entries()).map(([k, v]) => [k, v.state])
-  );
+    const reportedOpsStates = {};
+    for (const [k, v] of opsReportedByName.entries()) {
+      // ✅ solo si el usuario está “alive”
+      if (userLocations[k] && (Date.now() - userLocations[k].timestamp) <= OPS_TTL_MS) {
+        reportedOpsStates[k] = v.state;
+      }
+    }
 
 
   // --- BACKEND NAV ASSIGNMENTS (target de navegación) ---
@@ -1958,6 +1990,15 @@ io.on('connection', (socket) => {
   socket.on('update', (data) => {
     console.log('✈️ UPDATE recibido:', data);
 
+    function pruneStaleUsers() {
+    const now = Date.now();
+    for (const [name, info] of Object.entries(userLocations)) {
+      if (now - (info.timestamp ?? 0) > OPS_TTL_MS) {
+        hardResetUser(name);
+        }
+      }
+    }
+
     const {
       name,
       latitude,
@@ -2055,8 +2096,23 @@ function hardResetUser(name) {
   try { landingStateByName?.delete(name); } catch {}
   try { approachPhaseByName?.delete(name); } catch {}
   try { setFinalLatched(name, false); } catch {}
+  
     // ✅ ESTA ERA LA QUE FALTABA (es la que dispara A_TO_APRON)
   try { opsReportedByName?.delete(name); } catch {}
+
+
+  try { opsReportedByName.delete(name); } catch {}
+  try { lastOpsStateByName.delete(name); } catch {}
+  try { opsStateByName?.delete(name); } catch {}          // si existe
+  try { opsBackendByName?.delete(name); } catch {}        // si existe
+  try { clearATC?.(name); } catch {}                      // si tenés algo así
+  try { setFinalLatched?.(name, false); } catch {}
+  try { b1LatchByName?.delete(name); } catch {}
+  try { clearFinalEnter?.(name); } catch {}
+  try { driftSinceByName?.delete(name); } catch {}
+  try { landingStateByName?.delete(name); } catch {}
+  try { approachPhaseByName?.delete(name); } catch {}
+  try { clearTurnLease?.(name); } catch {}
 
 
   // 4) Borrar ubicación (evita “avión fantasma”)
@@ -2089,7 +2145,12 @@ socket.on('leave', (msg) => {
    // === Estado operativo reportado por el frontend ===
 socket.on('ops/state', (msg) => {
 
-  
+const currentName = socketIdToName[socket.id];
+if (currentName && currentName !== name) {
+  // alguien intenta reportar para otro nombre o hay desincronización
+  return;
+}
+
   try {
     const { name, state, aux } = msg || {};
 
