@@ -1237,6 +1237,27 @@ function maybeSendInstruction(opId, opsById) {
 function publishRunwayState() {
   pruneStaleOps();   // ✅ PRIMERO
   const now = Date.now();
+
+  const APPROACH_BLOCK = new Set([
+    'APRON_STOP',
+    'TAXI_APRON',
+    'TAXI_TO_RWY',
+    'HOLD_SHORT',
+    'RUNWAY_CLEAR',
+    'RUNWAY_OCCUPIED',
+    'AIRBORNE',
+  ]);
+
+  const GROUND_ONLY = new Set([
+    'APRON_STOP',
+    'TAXI_APRON',
+    'TAXI_TO_RWY',
+    'HOLD_SHORT',
+    'RUNWAY_CLEAR',
+    'RUNWAY_OCCUPIED',
+  ]);
+
+
   const slots = runwayState.timelineSlots || [];
   const airfield = lastAirfield || null;
 
@@ -1281,56 +1302,19 @@ function publishRunwayState() {
   const secondNow =
     landings?.[0]?.name === leaderNow ? landings?.[1]?.name : null;
 
+
+
   // 3) UN SOLO LOOP: construir assignedOps / opsTargets
   for (const L of landings) {
     const name = L?.name;
 
     // lo que dijo el frontend: B#, RUNWAY_*, etc.
 
-      const stReported = getReportedOpsState(name);
+    const stReported = getReportedOpsState(name);
+    const asg = assignBeaconsFor(name);     // ✅ MOVER ACÁ (antes de usarlo)
 
-    const CRITICAL = new Set([
-      'APRON_STOP',
-      'TAXI_TO_RWY',
-      'HOLD_SHORT',
-    ]);
-
-
-      function decideRunwayClearance() {
-    // si pista ocupada -> nadie recibe clearance
-    if (runwayState.inUse) return { winner: null };
-
-    // si hay FINAL (latched o asignado) -> nadie recibe clearance de despegue
-    const finalName = findAnyoneInFinalLike(); // líder en FINAL o isFinalLatched(...)
-    if (finalName) return { winner: 'ARR', arr: finalName, dep: null };
-
-    const arrLeader = runwayState.landings?.[0]?.name || null;
-    const depLeader = runwayState.takeoffs?.[0]?.name || null;
-
-    const arrState = arrLeader ? getReportedOpsState(arrLeader) : null;
-    const depState = depLeader ? getReportedOpsState(depLeader) : null;
-
-    const arrReady = arrLeader && arrState === 'B1';
-    const depReady = depLeader && depState === 'HOLD_SHORT';
-
-    if (arrReady && !depReady) return { winner: 'ARR', arr: arrLeader, dep: null };
-    if (!arrReady && depReady) return { winner: 'DEP', arr: null, dep: depLeader };
-    if (!arrReady && !depReady) return { winner: null };
-
-    // ambos listos: gana el que llegó primero al punto listo
-    const tArr = opsReportedByName.get(arrLeader)?.ts ?? Infinity;
-    const tDep = opsReportedByName.get(depLeader)?.ts ?? Infinity;
-
-    if (tArr < tDep) return { winner: 'ARR', arr: arrLeader, dep: depLeader };
-    if (tDep < tArr) return { winner: 'DEP', arr: arrLeader, dep: depLeader };
-
-    // empate: ARR gana (o tu regla preferida)
-    return { winner: 'ARR', arr: arrLeader, dep: depLeader };
-  }
-
-
-    // 1) Si está en estados críticos de tierra/pista: NO targets, NO assignedOps
-    if (CRITICAL.has(stReported)) {
+      // 1) Si está en estados críticos de tierra/pista: NO targets, NO assignedOps
+    if (APPROACH_BLOCK.has(stReported)) {
       // importante: no mandes assignedOps ni opsTargets para que el front no dibuje línea ni hable
       delete assignedOps[name];
       delete opsTargets[name];
@@ -1342,6 +1326,7 @@ function publishRunwayState() {
 //    - leader => FINAL
 //    - no-leader => HOLD en B1 (A_TO_B1) (NO FINAL)
 const clearance = decideRunwayClearance();
+
 if (stReported === 'B1') {
   if (leaderNow && name === leaderNow && gNow?.thr && clearance.winner === 'ARR') {
     assignedOps[name] = 'FINAL';
@@ -1349,13 +1334,12 @@ if (stReported === 'B1') {
     setFinalLatched(name, true);
   } else {
     assignedOps[name] = 'A_TO_B1';
-    if (asg?.b1) opsTargets[name] = { fix: 'B1', lat: asg.b1.lat, lon: asg.b1.lon };
+    const b1 = asg?.b1 || gNow?.B1;
+    if (b1) opsTargets[name] = { fix: 'B1', lat: b1.lat, lon: b1.lon };
   }
   continue;
 }
 
-// 3) Si por algún motivo el frontend reportó FINAL (no debería):
-//    solo respetarlo si es líder; si no, degradarlo a B1
 if (stReported === 'FINAL') {
   if (leaderNow && name === leaderNow && gNow?.thr) {
     assignedOps[name] = 'FINAL';
@@ -1363,7 +1347,8 @@ if (stReported === 'FINAL') {
     setFinalLatched(name, true);
   } else {
     assignedOps[name] = 'A_TO_B1';
-    if (asg?.b1) opsTargets[name] = { fix: 'B1', lat: asg.b1.lat, lon: asg.b1.lon };
+    const b1 = asg?.b1 || gNow?.B1;
+    if (b1) opsTargets[name] = { fix: 'B1', lat: b1.lat, lon: b1.lon };
   }
   continue;
 }
@@ -1381,7 +1366,7 @@ if (stReported === 'FINAL') {
 
     const b1Latched = isB1Latched(name);
     
-    const asg = assignBeaconsFor(name);
+   
 
     // -------------------------
     // 1) LÍDER: si ya confirmó B1 (o está latcheado), backend lo guía a FINAL
@@ -1536,11 +1521,31 @@ function hasAnyArrivalInFinalLike() {
   // ======================
   const apronPt = getApronPointFromAirfield();
   if (apronPt) {
+    const ALLOW_GROUND_GUIDE = new Set([
+      'RUNWAY_OCCUPIED',
+      'RUNWAY_CLEAR',
+      'TAXI_APRON',
+      'TAXI_TO_RWY',
+      'HOLD_SHORT',
+      'APRON_STOP',
+    ]);
+
     for (const [name, v] of opsReportedByName.entries()) {
       const st = v?.state;
+      if (!GROUND_ONLY.has(st)) continue;
+      if (!ALLOW_GROUND_GUIDE.has(st)) continue;
 
       // 1) Si está en pista o saliendo de pista => mandarlo al APRON
       if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
+
+        // ✅ NUEVO GUARD: si está en RUNWAY_CLEAR pero pidió despegue,
+        // no lo mandes a APRON (lo va a guiar TAKEOFF a HOLD_SHORT)
+        const wantsTakeoff = runwayState.takeoffs?.some(t => t.name === name);
+
+        if (st === 'RUNWAY_CLEAR' && wantsTakeoff) {
+          continue; // 🔒 dejar que el bloque TAKEOFF lo maneje
+        }
+
         assignedOps[name] = 'A_TO_APRON';
         opsTargets[name]  = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
         continue;
@@ -1719,7 +1724,8 @@ runwayState.opsTargets  = opsTargets;   // ✅ IMPORTANTE
     const arrSlots = slots.filter(s => s.type === 'ARR');
     stackedBeacons = arrSlots.map((s, idx) => {
       const name = (s.opId || '').split('#')[1];
-      const asg = assignBeaconsFor(name);
+      const asg = assignBeaconsFor(name);   // ✅ agregar esto
+
       const beaconName = asg?.beaconName || `B${idx + 2}`;
       return {
         name,
@@ -1797,7 +1803,6 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
 
   // (2) Sacar al líder de la cola (consume turno)
   runwayState.landings = runwayState.landings.filter(l => l.name !== leaderNameNow);
-runwayState.landings = runwayState.landings.filter(l => l.name !== leaderNameNow);
 
 clearATC(leaderNameNow);
 try { setFinalLatched(leaderNameNow, false); } catch {}
@@ -2144,18 +2149,14 @@ socket.on('leave', (msg) => {
 
    // === Estado operativo reportado por el frontend ===
 socket.on('ops/state', (msg) => {
-
-const currentName = socketIdToName[socket.id];
-if (currentName && currentName !== name) {
-  // alguien intenta reportar para otro nombre o hay desincronización
-  return;
-}
-
   try {
     const { name, state, aux } = msg || {};
 
+    // ✅ Anti-spoof / desync: este socket solo puede reportar su propio "name"
+    const currentName = socketIdToName[socket.id];
+    if (currentName && name && currentName !== name) return;
 
-        // ✅ VALID dinámico: B1..B30 + estados tierra/pista
+    // ✅ VALID dinámico: B1..B30 + estados tierra/pista
     const B_STATES = new Set(Array.from({ length: 30 }, (_, i) => `B${i + 1}`));
 
     const FRONTEND_ALLOWED_OPS = new Set([
@@ -2167,144 +2168,120 @@ if (currentName && currentName !== name) {
       'RUNWAY_CLEAR',
       'AIRBORNE',
       'LAND_QUEUE',
-      'FINAL',              // ✅ ADD
+      'FINAL',
       ...B_STATES,
     ]);
 
-
     // ⛔️ El frontend NUNCA puede mandar A_TO_*
-    if (typeof state === 'string' && state.startsWith('A_TO_')) {
-      return;
-    }
-
-    if (!FRONTEND_ALLOWED_OPS.has(state)) {
-      return;
-    }
-
+    if (typeof state === 'string' && state.startsWith('A_TO_')) return;
+    if (!FRONTEND_ALLOWED_OPS.has(state)) return;
     if (!name || !state) return;
 
     const acceptedState = state;
-    const leader = leaderName(); // solo si lo usás en el log
 
+    const CRITICAL = new Set([
+      'RUNWAY_OCCUPIED',
+      'RUNWAY_CLEAR',
+      'APRON_STOP',
+      'TAXI_APRON',
+      'TAXI_TO_RWY',
+      'HOLD_SHORT',
+    ]);
 
-        const CRITICAL = new Set([
-          'RUNWAY_OCCUPIED','RUNWAY_CLEAR','APRON_STOP','TAXI_APRON','TAXI_TO_RWY','HOLD_SHORT'
-        ]);
+    // ✅ Diagnóstico temprano
+    const leader = leaderName();
+    console.log(
+      '[ops/state]',
+      'name=', name,
+      'state=', acceptedState,
+      'leaderNow=', leader,
+      'getReportedOpsState(leaderNow)=', leader ? getReportedOpsState(leader) : null,
+      'aux=', aux
+    );
 
-        // ✅ Diagnóstico temprano
-        console.log(
-          '[ops/state]',
-          'name=', name,
-          'state=', acceptedState,
-          'leaderNow=', leader,
-          'getReportedOpsState(leaderNow)=', leader ? getReportedOpsState(leader) : null,
-          'aux=', aux
-        );
+    // 1) Si ya estaba FINAL reportado, no aceptes regresión (salvo críticos)
+    const alreadyFinal = (getReportedOpsState(name) === 'FINAL');
+    if (alreadyFinal && acceptedState !== 'FINAL' && !CRITICAL.has(acceptedState)) return;
 
-        // 1) Si ya estaba FINAL reportado, no aceptes regresión (salvo críticos)
-        const alreadyFinal = (getReportedOpsState(name) === 'FINAL');
-        if (alreadyFinal && acceptedState !== 'FINAL' && !CRITICAL.has(acceptedState)) {
-          return;
-        }
+    // 2) Si el backend lo tiene asignado a FINAL, tampoco aceptes regresión (salvo críticos)
+    const assignedNow = runwayState.assignedOps?.[name] || null;
+    const backendFinal =
+      assignedNow === 'FINAL' ||
+      getApproachPhase(name) === 'FINAL' ||
+      getLandingState(name) === 'FINAL';
 
-        // 2) Si el backend lo tiene asignado a FINAL, tampoco aceptes regresión (salvo críticos)
-        const assignedNow = runwayState.assignedOps?.[name] || null;
-        const backendFinal =
-          assignedNow === 'FINAL' ||
-          getApproachPhase(name) === 'FINAL' ||
-          getLandingState(name) === 'FINAL';
+    if (backendFinal && acceptedState !== 'FINAL' && !CRITICAL.has(acceptedState)) return;
 
-        if (backendFinal && acceptedState !== 'FINAL' && !CRITICAL.has(acceptedState)) {
-          return;
-        }
+    // 3) Guardar y emitir el estado aceptado
+    opsReportedByName.set(name, { state: acceptedState, ts: Date.now(), aux: aux || null });
 
-        // 3) Guardar y emitir el estado aceptado (SOLO frontend -> backend aquí)
-        opsReportedByName.set(name, { state: acceptedState, ts: Date.now(), aux: aux || null });
+    const prev = lastOpsStateByName.get(name) || null;
+    lastOpsStateByName.set(name, acceptedState);
 
-        const prev = lastOpsStateByName.get(name) || null;
-        lastOpsStateByName.set(name, acceptedState);
+    io.emit('ops/state', {
+      name,
+      state: acceptedState,
+      ts: Date.now(),
+      aux: aux || null,
+    });
 
-        // Broadcast ÚNICO del OPS reportado
-        io.emit('ops/state', {
-          name,
-          state: acceptedState,
-          ts: Date.now(),
-          aux: aux || null,
-        });
+    // ✅ Trigger: flanco hacia RUNWAY_OCCUPIED
+    if (prev !== 'RUNWAY_OCCUPIED' && acceptedState === 'RUNWAY_OCCUPIED') {
+      const didConsumeLdg = consumeLeaderOnRunwayOccupied(name);
+      if (didConsumeLdg) return;
 
-        // ✅ Trigger: SOLO si hubo flanco hacia RUNWAY_OCCUPIED y SOLO si es el líder actual
-        if (prev !== 'RUNWAY_OCCUPIED' && acceptedState === 'RUNWAY_OCCUPIED') {
-          const didConsumeLdg = consumeLeaderOnRunwayOccupied(name);
-          if (didConsumeLdg) return;
-
-          const didConsumeDep = consumeTakeoffOnRunwayOccupied(name);
-          if (didConsumeDep) return;
-        }
-
-
+      const didConsumeDep = consumeTakeoffOnRunwayOccupied(name);
+      if (didConsumeDep) return;
+    }
 
     // Ajustes suaves al scheduler
-// Ajustes suaves al scheduler (NO duplicar consumo de líder)
-const leaderNow = leaderName();
-const isLeaderNow = !!leaderNow && leaderNow === name;
+    const leaderNow2 = leaderName();
+    const isLeaderNow = !!leaderNow2 && leaderNow2 === name;
 
-if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
-  runwayState.inUse = {
-    action: 'landing',
-    name,
-    callsign: userLocations[name]?.callsign || '',
-    startedAt: Date.now(),
-    slotMin: MIN_LDG_SEP_MIN
-  };
-  try { setFinalLatched(name, false); } catch {}
-}
+    if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
+      runwayState.inUse = {
+        action: 'landing',
+        name,
+        callsign: userLocations[name]?.callsign || '',
+        startedAt: Date.now(),
+        slotMin: MIN_LDG_SEP_MIN
+      };
+      try { setFinalLatched(name, false); } catch {}
+    }
 
+    if (acceptedState === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
+      runwayState.inUse = null;
+      try { setFinalLatched(name, false); } catch {}
+    }
 
+    if (acceptedState === 'AIRBORNE') {
+      try { setFinalLatched(name, false); } catch {}
+      runwayState.takeoffs = (runwayState.takeoffs || []).filter(t => t.name !== name);
+      clearATC(name);
+    }
 
-if (acceptedState === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
-  runwayState.inUse = null;
-  try { setFinalLatched(name, false); } catch {}
-}
+    if (acceptedState === 'B1' || acceptedState === 'FINAL') {
+      const L = runwayState.landings.find(l => l.name === name);
+      if (L) L.frozenLevel = 1;
+    }
 
-if (acceptedState === 'RUNWAY_OCCUPIED' || acceptedState === 'RUNWAY_CLEAR') {
+    if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
+      runwayState.landings = runwayState.landings.filter(l => l.name !== name);
+      setLandingStateForward(name, 'IN_STANDS');
+      try { clearFinalEnter(name); } catch {}
+      try { b1LatchByName.delete(name); } catch {}
+      try { setFinalLatched(name, false); } catch {}
+    }
 
-  // ✅ SOLO remover de la cola si es el líder actual
-  try { setFinalLatched(name, false); } catch {}
-}
+    if (runwayState.landings.length || runwayState.takeoffs.length) {
+      planRunwaySequence();
+    }
 
-// ✅ Si frontend vuelve a AIRBORNE => salir completamente de FINAL
-if (acceptedState === 'AIRBORNE') {
-  try { setFinalLatched(name, false); } catch {}
+    publishRunwayState();
 
-  // si estaba en cola de despegue, ya terminó
-  runwayState.takeoffs = (runwayState.takeoffs || []).filter(t => t.name !== name);
-  clearATC(name);
-}
-
-
-if (acceptedState === 'B1' || acceptedState === 'FINAL') {
-  const L = runwayState.landings.find(l => l.name === name);
-  if (L) L.frozenLevel = 1;
-}
-
-if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
-  runwayState.landings = runwayState.landings.filter(l => l.name !== name);
-  setLandingStateForward(name, 'IN_STANDS');
-  try { clearFinalEnter(name); } catch {}
-  try { b1LatchByName.delete(name); } catch {}
-  try { setFinalLatched(name, false); } catch {}
-  
-}
-
-
-if (runwayState.landings.length || runwayState.takeoffs.length) {
-  planRunwaySequence();
-}
-
-  publishRunwayState();
-} catch (e) {
-  console.error('ops/state error:', e);
-}
+  } catch (e) {
+    console.error('ops/state error:', e);
+  }
 });
 
 
