@@ -231,7 +231,11 @@ function getEffectiveOpsState(name) {
   const b = opsBackendByName.get(name)?.state || null; // FINAL / A_TO_Bx
 
   // 1) Críticos del frontend ganan siempre
-  if (r === 'RUNWAY_OCCUPIED' || r === 'RUNWAY_CLEAR' || r === 'APRON_STOP') return r;
+  if (r === 'RUNWAY_OCCUPIED' || r === 'RUNWAY_CLEAR' || r === 'APRON_STOP') 
+      r === 'FINAL' ||   // ✅ nuevo: FINAL fuerte
+      r === 'B1'         // ✅ opcional recomendado: B1 fuerte
+      return r; 
+  
 
   // 2) FINAL backend (solo para UI/guía)
   if (b === 'FINAL') return 'FINAL';
@@ -1340,15 +1344,12 @@ if (stReported === 'B1') {
   continue;
 }
 
+// ✅ FINAL sticky: si el frontend reporta FINAL, JAMÁS degradar.
 if (stReported === 'FINAL') {
-  if (leaderNow && name === leaderNow && gNow?.thr) {
+  if (gNow?.thr) {
     assignedOps[name] = 'FINAL';
-    opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+    opsTargets[name]  = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
     setFinalLatched(name, true);
-  } else {
-    assignedOps[name] = 'A_TO_B1';
-    const b1 = asg?.b1 || gNow?.B1;
-    if (b1) opsTargets[name] = { fix: 'B1', lat: b1.lat, lon: b1.lon };
   }
   continue;
 }
@@ -1678,6 +1679,8 @@ if (holdShortPt && gTk?.thr) {
       'TAXI_APRON',
       'TAXI_TO_RWY',
       'HOLD_SHORT',
+      'FINAL', // ✅ nuevo
+      'B1',    // ✅ nuevo
     ]);
 
     for (const [name, atc] of Object.entries(assignedOps)) {
