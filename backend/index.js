@@ -2182,15 +2182,25 @@ socket.on('ops/state', (msg) => {
 
     const acceptedState = state;
 
-    const CRITICAL = new Set([
+    // ✅ FINAL sticky server-side
+    // Si ya estamos latcheados a FINAL, NO aceptar que vuelva a B1 (histeresis del front).
+    // Permitimos sólo estados "críticos" que realmente sacan del final.
+    const FINAL_BREAKERS = new Set([
       'RUNWAY_OCCUPIED',
       'RUNWAY_CLEAR',
-      'APRON_STOP',
+      'AIRBORNE',
       'TAXI_APRON',
       'TAXI_TO_RWY',
       'HOLD_SHORT',
+      'APRON_STOP',
     ]);
 
+    if (isFinalLatched(name)) {
+      if (!FINAL_BREAKERS.has(acceptedState) && acceptedState !== 'FINAL') {
+        // 🔒 Ignorar cualquier intento de degradar FINAL (incluye B1, B2..)
+        return;
+      }
+}
     // ✅ Diagnóstico temprano
     const leader = leaderName();
     console.log(
@@ -2266,6 +2276,11 @@ socket.on('ops/state', (msg) => {
     if (acceptedState === 'B1' || acceptedState === 'FINAL') {
       const L = runwayState.landings.find(l => l.name === name);
       if (L) L.frozenLevel = 1;
+    }
+
+    if (acceptedState === 'FINAL') {
+      // ✅ Entra a FINAL => latch definitivo hasta breakers
+      setFinalLatched(name, true);
     }
 
     if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
