@@ -1576,13 +1576,12 @@ function hasAnyArrivalInFinalLike() {
 
       // 1) Si está en pista o saliendo de pista => mandarlo al APRON
       if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
-
-        // ✅ NUEVO GUARD: si está en RUNWAY_CLEAR pero pidió despegue,
-        // no lo mandes a APRON (lo va a guiar TAKEOFF a HOLD_SHORT)
         const wantsTakeoff = runwayState.takeoffs?.some(t => t.name === name);
 
-        if (st === 'RUNWAY_CLEAR' && wantsTakeoff) {
-          continue; // 🔒 dejar que el bloque TAKEOFF lo maneje
+        // Si está en flujo de despegue, Ground guidance NO lo manda a APRON.
+        // Lo maneja el bloque TAKEOFF (HOLD_SHORT / RWY).
+        if (wantsTakeoff) {
+          continue;
         }
 
         assignedOps[name] = 'A_TO_APRON';
