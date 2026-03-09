@@ -50,12 +50,13 @@ function pruneStaleOps() {
   for (const [name, v] of opsReportedByName.entries()) {
     const alive = userLocations[name];
     const ts = v?.ts ?? 0;
+    const st = v?.state ?? null;
 
-    // Si el usuario ya no existe, o su update es viejo, o el OPS es viejo => borrar
     const staleUser = !alive || (now - (alive.timestamp ?? 0) > OPS_TTL_MS);
     const staleOps  = (now - ts > OPS_TTL_MS);
 
-    if (staleUser || staleOps) {
+    // ✅ Si el usuario ya no está vivo, limpiar todo
+    if (staleUser) {
       opsReportedByName.delete(name);
       lastOpsStateByName.delete(name);
       try { b1LatchByName?.delete(name); } catch {}
@@ -66,6 +67,35 @@ function pruneStaleOps() {
       try { clearFinalEnter?.(name); } catch {}
       try { setFinalLatched?.(name, false); } catch {}
       if (runwayState.inUse?.name === name) runwayState.inUse = null;
+      continue;
+    }
+
+    // ✅ Si el usuario sigue vivo pero el ops está viejo:
+    // mantener FINAL/B1 y estados críticos; no degradarlos por TTL
+    if (staleOps) {
+      const keepStrongState =
+        st === 'FINAL' ||
+        st === 'B1' ||
+        st === 'RUNWAY_OCCUPIED' ||
+        st === 'RUNWAY_CLEAR' ||
+        st === 'TAXI_APRON' ||
+        st === 'TAXI_TO_RWY' ||
+        st === 'HOLD_SHORT' ||
+        st === 'APRON_STOP' ||
+        isFinalLatched(name);
+
+      if (keepStrongState) {
+        // refrescamos timestamp sin cambiar el estado
+        opsReportedByName.set(name, {
+          ...v,
+          ts: now,
+        });
+        continue;
+      }
+
+      // si era un estado débil/viejo, ahí sí limpiamos
+      opsReportedByName.delete(name);
+      lastOpsStateByName.delete(name);
     }
   }
 }
@@ -2052,6 +2082,14 @@ io.on('connection', (socket) => {
     };
 
     socketIdToName[socket.id] = name;
+
+    const currentOps = opsReportedByName.get(name);
+    if (currentOps?.state === 'FINAL' || currentOps?.state === 'B1') {
+      opsReportedByName.set(name, {
+        ...currentOps,
+        ts: Date.now(),
+      });
+    }
 
     console.log('🗺️ Estado actual de userLocations:', userLocations);
 
