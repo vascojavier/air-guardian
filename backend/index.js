@@ -231,11 +231,19 @@ function getEffectiveOpsState(name) {
   const b = opsBackendByName.get(name)?.state || null; // FINAL / A_TO_Bx
 
   // 1) Críticos del frontend ganan siempre
-  if (r === 'RUNWAY_OCCUPIED' || r === 'RUNWAY_CLEAR' || r === 'APRON_STOP') 
-      r === 'FINAL' ||   // ✅ nuevo: FINAL fuerte
-      r === 'B1'         // ✅ opcional recomendado: B1 fuerte
-      return r; 
-  
+  if (
+    r === 'RUNWAY_OCCUPIED' ||
+    r === 'RUNWAY_CLEAR' ||
+    r === 'APRON_STOP' ||
+    r === 'TAXI_APRON' ||
+    r === 'TAXI_TO_RWY' ||
+    r === 'HOLD_SHORT' ||
+    r === 'AIRBORNE' ||
+    r === 'FINAL' ||   // ✅ FINAL fuerte
+    r === 'B1'         // ✅ B1 fuerte (recomendado)
+  ) {
+    return r;
+  }
 
   // 2) FINAL backend (solo para UI/guía)
   if (b === 'FINAL') return 'FINAL';
@@ -2193,6 +2201,7 @@ socket.on('ops/state', (msg) => {
       'TAXI_TO_RWY',
       'HOLD_SHORT',
       'APRON_STOP',
+      'GO_AROUND',
     ]);
 
     if (isFinalLatched(name)) {
@@ -2211,6 +2220,16 @@ socket.on('ops/state', (msg) => {
       'getReportedOpsState(leaderNow)=', leader ? getReportedOpsState(leader) : null,
       'aux=', aux
     );
+
+    const CRITICAL = new Set([
+      'RUNWAY_OCCUPIED',
+      'RUNWAY_CLEAR',
+      'AIRBORNE',
+      'TAXI_APRON',
+      'TAXI_TO_RWY',
+      'HOLD_SHORT',
+      'APRON_STOP',
+    ]);
 
     // 1) Si ya estaba FINAL reportado, no aceptes regresión (salvo críticos)
     const alreadyFinal = (getReportedOpsState(name) === 'FINAL');
