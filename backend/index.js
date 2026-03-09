@@ -1577,9 +1577,15 @@ function hasAnyArrivalInFinalLike() {
       // 1) Si está en pista o saliendo de pista => mandarlo al APRON
       if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
         const wantsTakeoff = runwayState.takeoffs?.some(t => t.name === name);
+        const isLanding    = runwayState.landings?.some(l => l.name === name);
+        const isFinalNow   = getReportedOpsState(name) === 'FINAL' || isFinalLatched(name);
 
-        // Si está en flujo de despegue, Ground guidance NO lo manda a APRON.
-        // Lo maneja el bloque TAKEOFF (HOLD_SHORT / RWY).
+        // Si está aterrizando o ya quedó fijado a FINAL, este bloque NO decide nada.
+        if (isLanding || isFinalNow) {
+          continue;
+        }
+
+        // Sólo bloquear APRON si realmente está en flujo de despegue
         if (wantsTakeoff) {
           continue;
         }
@@ -2125,59 +2131,42 @@ function hardResetUser(name) {
   if (!name) return;
 
   // 0) limpiar índices socket<->name
-  try {
-    for (const [sid, uname] of Object.entries(socketIdToName)) {
-      if (uname === name) delete socketIdToName[sid];
-    }
-  } catch {}
+  for (const [sid, uname] of Object.entries(socketIdToName)) {
+    if (uname === name) delete socketIdToName[sid];
+  }
 
-  // 1) Sacarlo de colas
+  // 1) sacarlo de colas
   runwayState.landings = (runwayState.landings || []).filter(x => x.name !== name);
   runwayState.takeoffs = (runwayState.takeoffs || []).filter(x => x.name !== name);
 
-  // 2) Borrar OPS y flancos (si existen)
-  try { opsStateByName?.delete(name); } catch {}
-  try { lastOpsStateByName?.delete(name); } catch {}
-
-  // 3) Borrar latches / drift / leases / fases / sticky (ACÁ estaba el bug)
-  try { clearTurnLease?.(name); } catch {}
-  try { turnLeaseByName?.delete(name); } catch {}       // por si existe como Map directo
-  try { clearFinalEnter?.(name); } catch {}
-  try { finalEnterByName?.delete(name); } catch {}      // si existe
-  try { b1LatchByName?.delete(name); } catch {}
-  try { driftSinceByName?.delete(name); } catch {}      // IMPORTANTE
-  try { landingStateByName?.delete(name); } catch {}
-  try { approachPhaseByName?.delete(name); } catch {}
-  try { setFinalLatched(name, false); } catch {}
-  
-    // ✅ ESTA ERA LA QUE FALTABA (es la que dispara A_TO_APRON)
-  try { opsReportedByName?.delete(name); } catch {}
-
-
+  // 2) limpiar estados / latches / fases
   try { opsReportedByName.delete(name); } catch {}
+  try { opsBackendByName.delete(name); } catch {}
+  try { opsStateByName.delete(name); } catch {}
   try { lastOpsStateByName.delete(name); } catch {}
-  try { opsStateByName?.delete(name); } catch {}          // si existe
-  try { opsBackendByName?.delete(name); } catch {}        // si existe
-  try { clearATC?.(name); } catch {}                      // si tenés algo así
-  try { setFinalLatched?.(name, false); } catch {}
-  try { b1LatchByName?.delete(name); } catch {}
-  try { clearFinalEnter?.(name); } catch {}
-  try { driftSinceByName?.delete(name); } catch {}
-  try { landingStateByName?.delete(name); } catch {}
-  try { approachPhaseByName?.delete(name); } catch {}
-  try { clearTurnLease?.(name); } catch {}
 
+  try { clearTurnLease(name); } catch {}
+  try { clearFinalEnter(name); } catch {}
+  try { b1LatchByName.delete(name); } catch {}
+  try { driftSinceByName.delete(name); } catch {}
+  try { landingStateByName.delete(name); } catch {}
+  try { approachPhaseByName.delete(name); } catch {}
+  try { setFinalLatched(name, false); } catch {}
 
-  // 4) Borrar ubicación (evita “avión fantasma”)
-  try { delete userLocations[name]; } catch {}
+  // 3) limpiar ATC backend
+  try { clearATC(name); } catch {}
 
-  // 5) Si estaba ocupando la pista
-  if (runwayState.inUse?.name === name) runwayState.inUse = null;
+  // 4) borrar ubicación
+  delete userLocations[name];
 
-  // 6) Replanificar y publicar
-  try { enforceCompliance?.(); } catch {}
-  try { planRunwaySequence?.(); } catch {}
-  try { publishRunwayState?.(); } catch {}
+  // 5) liberar pista si hacía falta
+  if (runwayState.inUse?.name === name) {
+    runwayState.inUse = null;
+  }
+
+  // 6) replan
+  try { planRunwaySequence(); } catch {}
+  try { publishRunwayState(); } catch {}
 
   console.log(`[OPS] hardResetUser(${name})`);
 }
@@ -2606,6 +2595,8 @@ socket.on('runway-request', (msg) => {
 
     if (action === 'land') {
 
+      runwayState.takeoffs = (runwayState.takeoffs || []).filter(t => t.name !== name);
+
             // ✅ RESET completo de aproximación/OPS al pedir aterrizaje (evita "FINAL fantasma")
       try { opsReportedByName.delete(name); } catch {}
       try { lastOpsStateByName.delete(name); } catch {}
@@ -2637,8 +2628,17 @@ socket.on('runway-request', (msg) => {
       try { setApproachPhase(name, 'TO_B2'); } catch {}
     }
 else if (action === 'takeoff') {
+  runwayState.landings = (runwayState.landings || []).filter(l => l.name !== name);
 
-  // ✅ HARD RULE: solo tierra puede pedir despegue
+  try { clearATC(name); } catch {}
+  try { opsBackendByName.delete(name); } catch {}
+  try { setFinalLatched(name, false); } catch {}
+  try { b1LatchByName.delete(name); } catch {}
+  try { clearFinalEnter(name); } catch {}
+  try { driftSinceByName.delete(name); } catch {}
+  try { landingStateByName.delete(name); } catch {}
+  try { approachPhaseByName.delete(name); } catch {}
+
   const TAKEOFF_ALLOWED = new Set([
     'RUNWAY_OCCUPIED',
     'RUNWAY_CLEAR',
@@ -2648,31 +2648,21 @@ else if (action === 'takeoff') {
     'TAXI_TO_RWY',
   ]);
 
-  // 1) Obtener OPS actual del piloto
   let st = null;
   try {
-    // Si ya tenés una función:
-    if (typeof getOpsState === 'function') {
-      st = getReportedOpsState(name);
-    } else {
-      // Fallback común: si guardás estados en un Map opsStateByName
-      // ejemplo: opsStateByName.set(name, { state:'TAXI_APRON', ts:Date.now() })
-      st = opsStateByName?.get(name)?.state ?? null;
-    }
+    st = getReportedOpsState(name);
   } catch (_) {
     st = null;
   }
 
-  // 2) Rechazar si NO está en tierra
   if (!st || !TAKEOFF_ALLOWED.has(st)) {
-  io.to(socket.id).emit('runway-msg', {
-    key: 'runway.mustBeOnApronOrRunwayToRequestTakeoff',
-    params: {}
-  });
-    return; // ⛔️ NO agregar a la cola de despegue
+    io.to(socket.id).emit('runway-msg', {
+      key: 'runway.mustBeOnApronOrRunwayToRequestTakeoff',
+      params: {}
+    });
+    return;
   }
 
-  // ✅ si pasó el guard, recién acá se permite
   const idx = runwayState.takeoffs.findIndex(x => x.name === name);
   if (idx === -1) {
     runwayState.takeoffs.push({
