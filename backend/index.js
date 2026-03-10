@@ -1576,19 +1576,29 @@ function hasAnyArrivalInFinalLike() {
 
       // 1) Si está en pista o saliendo de pista => mandarlo al APRON
       if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
-        const wantsTakeoff = runwayState.takeoffs?.some(t => t.name === name);
-        const isLanding    = runwayState.landings?.some(l => l.name === name);
-        const isFinalNow   = getReportedOpsState(name) === 'FINAL' || isFinalLatched(name);
+      const wantsTakeoff = runwayState.takeoffs?.some(t => t.name === name);
+      const isLanding    = runwayState.landings?.some(l => l.name === name);
+      const stRep        = getReportedOpsState(name);
+      const isFinalNow   = stRep === 'FINAL' || isFinalLatched(name);
 
-        // Si está aterrizando o ya quedó fijado a FINAL, este bloque NO decide nada.
-        if (isLanding || isFinalNow) {
-          continue;
-        }
+      // Si está aterrizando o ya quedó fijado a FINAL, este bloque NO decide nada.
+      if (isLanding || isFinalNow) {
+        continue;
+      }
 
-        // Sólo bloquear APRON si realmente está en flujo de despegue
-        if (wantsTakeoff) {
-          continue;
-        }
+      // ✅ Sólo bloquear APRON si realmente está en flujo lógico de despegue
+      const isRealTakeoffGroundFlow =
+        wantsTakeoff &&
+        (
+          stRep === 'APRON_STOP' ||
+          stRep === 'TAXI_APRON' ||
+          stRep === 'HOLD_SHORT' ||
+          stRep === 'TAXI_TO_RWY'
+        );
+
+      if (isRealTakeoffGroundFlow) {
+        continue;
+      }
 
         assignedOps[name] = 'A_TO_APRON';
         opsTargets[name]  = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
@@ -1847,8 +1857,11 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
     };
   }
 
-  // (2) Sacar al líder de la cola (consume turno)
-  runwayState.landings = runwayState.landings.filter(l => l.name !== leaderNameNow);
+// (2) Sacar al líder de la cola (consume turno)
+runwayState.landings = runwayState.landings.filter(l => l.name !== leaderNameNow);
+
+// ✅ MUY IMPORTANTE: si por algún motivo quedó en cola de despegue, borrarlo también
+runwayState.takeoffs = runwayState.takeoffs.filter(t => t.name !== leaderNameNow);
 
 clearATC(leaderNameNow);
 try { setFinalLatched(leaderNameNow, false); } catch {}
@@ -2284,13 +2297,16 @@ socket.on('ops/state', (msg) => {
     });
 
     // ✅ Trigger: flanco hacia RUNWAY_OCCUPIED
-    if (prev !== 'RUNWAY_OCCUPIED' && acceptedState === 'RUNWAY_OCCUPIED') {
-      const didConsumeLdg = consumeLeaderOnRunwayOccupied(name);
-      if (didConsumeLdg) return;
+if (prev !== 'RUNWAY_OCCUPIED' && acceptedState === 'RUNWAY_OCCUPIED') {
+  // ✅ si aterriza, no puede seguir figurando como DEP
+  runwayState.takeoffs = (runwayState.takeoffs || []).filter(t => t.name !== name);
 
-      const didConsumeDep = consumeTakeoffOnRunwayOccupied(name);
-      if (didConsumeDep) return;
-    }
+  const didConsumeLdg = consumeLeaderOnRunwayOccupied(name);
+  if (didConsumeLdg) return;
+
+  const didConsumeDep = consumeTakeoffOnRunwayOccupied(name);
+  if (didConsumeDep) return;
+}
 
     // Ajustes suaves al scheduler
     const leaderNow2 = leaderName();
