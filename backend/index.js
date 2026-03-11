@@ -1575,34 +1575,33 @@ function hasAnyArrivalInFinalLike() {
       if (!ALLOW_GROUND_GUIDE.has(st)) continue;
 
       // 1) Si está en pista o saliendo de pista => mandarlo al APRON
-      if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
-      const wantsTakeoff = runwayState.takeoffs?.some(t => t.name === name);
-      const stRep        = getReportedOpsState(name);
-      const isFinalNow   = stRep === 'FINAL' || isFinalLatched(name);
+if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
+  const wantsTakeoff = runwayState.takeoffs?.some(t => t.name === name);
+  const stRep        = getReportedOpsState(name);
 
-      // Sólo si realmente sigue en FINAL, este bloque no decide nada.
-      if (isFinalNow) {
-        continue;
-      }
+  // SOLO si el estado reportado ACTUAL es FINAL, no tocar todavía
+  if (stRep === 'FINAL') {
+    continue;
+  }
 
-      // ✅ Sólo bloquear APRON si realmente está en flujo lógico de despegue
-      const isRealTakeoffGroundFlow =
-        wantsTakeoff &&
-        (
-          stRep === 'APRON_STOP' ||
-          stRep === 'TAXI_APRON' ||
-          stRep === 'HOLD_SHORT' ||
-          stRep === 'TAXI_TO_RWY'
-        );
+  // Sólo bloquear APRON si realmente está en flujo lógico de despegue
+  const isRealTakeoffGroundFlow =
+    wantsTakeoff &&
+    (
+      stRep === 'APRON_STOP' ||
+      stRep === 'TAXI_APRON' ||
+      stRep === 'HOLD_SHORT' ||
+      stRep === 'TAXI_TO_RWY'
+    );
 
-      if (isRealTakeoffGroundFlow) {
-        continue;
-      }
+  if (isRealTakeoffGroundFlow) {
+    continue;
+  }
 
-        assignedOps[name] = 'A_TO_APRON';
-        opsTargets[name]  = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
-        continue;
-      }
+  assignedOps[name] = 'A_TO_APRON';
+  opsTargets[name]  = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
+  continue;
+}
 
       // 2) Si ya está en APRON => cortar ATC (sin línea azul)
       if (st === 'APRON_STOP') {
@@ -2311,16 +2310,21 @@ if (prev !== 'RUNWAY_OCCUPIED' && acceptedState === 'RUNWAY_OCCUPIED') {
     const leaderNow2 = leaderName();
     const isLeaderNow = !!leaderNow2 && leaderNow2 === name;
 
-    if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
-      runwayState.inUse = {
-        action: 'landing',
-        name,
-        callsign: userLocations[name]?.callsign || '',
-        startedAt: Date.now(),
-        slotMin: MIN_LDG_SEP_MIN
-      };
-      try { setFinalLatched(name, false); } catch {}
-    }
+if (acceptedState === 'RUNWAY_OCCUPIED') {
+  runwayState.landings = (runwayState.landings || []).filter(l => l.name !== name);
+  try { setFinalLatched(name, false); } catch {}
+  try { clearATC(name); } catch {}
+}
+
+if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
+  runwayState.inUse = {
+    action: 'landing',
+    name,
+    callsign: userLocations[name]?.callsign || '',
+    startedAt: Date.now(),
+    slotMin: MIN_LDG_SEP_MIN
+  };
+}
 
     if (acceptedState === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
       runwayState.inUse = null;
