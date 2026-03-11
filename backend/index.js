@@ -1577,12 +1577,11 @@ function hasAnyArrivalInFinalLike() {
       // 1) Si está en pista o saliendo de pista => mandarlo al APRON
       if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
       const wantsTakeoff = runwayState.takeoffs?.some(t => t.name === name);
-      const isLanding    = runwayState.landings?.some(l => l.name === name);
       const stRep        = getReportedOpsState(name);
       const isFinalNow   = stRep === 'FINAL' || isFinalLatched(name);
 
-      // Si está aterrizando o ya quedó fijado a FINAL, este bloque NO decide nada.
-      if (isLanding || isFinalNow) {
+      // Sólo si realmente sigue en FINAL, este bloque no decide nada.
+      if (isFinalNow) {
         continue;
       }
 
@@ -2325,6 +2324,8 @@ if (prev !== 'RUNWAY_OCCUPIED' && acceptedState === 'RUNWAY_OCCUPIED') {
 
     if (acceptedState === 'RUNWAY_CLEAR' && runwayState.inUse?.name === name) {
       runwayState.inUse = null;
+      runwayState.landings = (runwayState.landings || []).filter(l => l.name !== name);
+      clearATC(name);
       try { setFinalLatched(name, false); } catch {}
     }
 
