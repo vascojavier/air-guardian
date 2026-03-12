@@ -921,18 +921,30 @@ function buildOperations(nowMs) {
 
     l.priority = priorityBase;
 
-    ops.push({
-      id: `ARR#${l.name}`,
-      type: 'ARR',
-      name: l.name,
-      callsign: l.callsign || '',
-      category: parseCategory(l.type),
-      priority: priorityBase,
-      etaB1: l.etaB1, etaB2: l.etaB2,
-      frozen: l.frozenLevel === 1,
-      committed: !!l.committed,
-      emergency: !!l.emergency,
-    });
+    const reported = getReportedOpsState(l.name);
+    const hardFinal =
+    reported === 'FINAL' ||
+    isFinalLatched(l.name) ||
+    getApproachPhase(l.name) === 'FINAL' ||
+    getLandingState(l.name) === 'FINAL';
+
+  const hardB1 =
+    reported === 'B1' ||
+    isB1Latched(l.name);
+
+  ops.push({
+    id: `ARR#${l.name}`,
+    type: 'ARR',
+    name: l.name,
+    callsign: l.callsign || '',
+    category: parseCategory(l.type),
+    priority: hardFinal ? -1000000 : hardB1 ? -500000 : priorityBase,
+    etaB1: l.etaB1,
+    etaB2: l.etaB2,
+    frozen: hardFinal || hardB1 || l.frozenLevel === 1,
+    committed: hardFinal || hardB1 || !!l.committed,
+    emergency: !!l.emergency,
+  });
   }
 
   // Salidas
@@ -1957,6 +1969,29 @@ function planRunwaySequence() {
 
 if (arrOrder.length) {
   runwayState.landings.sort((a, b) => {
+    const aFinal =
+      getReportedOpsState(a.name) === 'FINAL' ||
+      isFinalLatched(a.name) ||
+      getApproachPhase(a.name) === 'FINAL' ||
+      getLandingState(a.name) === 'FINAL';
+
+    const bFinal =
+      getReportedOpsState(b.name) === 'FINAL' ||
+      isFinalLatched(b.name) ||
+      getApproachPhase(b.name) === 'FINAL' ||
+      getLandingState(b.name) === 'FINAL';
+
+    if (aFinal && !bFinal) return -1;
+    if (!aFinal && bFinal) return 1;
+
+    const aB1 =
+      getReportedOpsState(a.name) === 'B1' || isB1Latched(a.name);
+    const bB1 =
+      getReportedOpsState(b.name) === 'B1' || isB1Latched(b.name);
+
+    if (aB1 && !bB1) return -1;
+    if (!aB1 && bB1) return 1;
+
     const ia = arrOrder.indexOf(a.name);
     const ib = arrOrder.indexOf(b.name);
     return (ia === -1 ? 1e9 : ia) - (ib === -1 ? 1e9 : ib);
@@ -2661,10 +2696,8 @@ else if (action === 'takeoff') {
   try { approachPhaseByName.delete(name); } catch {}
 
   const TAKEOFF_ALLOWED = new Set([
-    'RUNWAY_OCCUPIED',
-    'RUNWAY_CLEAR',
-    'TAXI_APRON',
     'APRON_STOP',
+    'TAXI_APRON',
     'HOLD_SHORT',
     'TAXI_TO_RWY',
   ]);
