@@ -639,14 +639,14 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
     speed: 40,
   });
 
-      const displayPlanes = useMemo(() => {
+const displayPlanes = useMemo(() => {
   const byId = new Map(planes.map(p => [p.id, p]));
 
   return traffic.map(t => {
     const visual = byId.get(t.id);
 
     return {
-      ...t, // ✅ posición viva SIEMPRE desde traffic
+      ...t,
       alertLevel: visual?.alertLevel ?? 'none',
       timeToImpact: visual?.timeToImpact,
       ops: visual?.ops ?? t.ops,
@@ -654,13 +654,17 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
   });
 }, [traffic, planes]);
 
+useEffect(() => {
+  planesRef.current = planes;
+}, [planes]);
+
 
 
   
 
 useEffect(() => {
-  planesRef.current = displayPlanes;
-}, [displayPlanes]);
+  planesRef.current = planes;
+}, [planes]);
 
 
   // ✅ Ref para leer el último myPlane SIN depender del re-render
