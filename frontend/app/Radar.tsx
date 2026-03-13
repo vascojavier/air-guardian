@@ -305,7 +305,6 @@ const Radar = () => {
   const didRandomizeOnEnterRef = useRef(false);
   const sendIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isFocusedRef = useRef(false);
-  const finalApproachLatchedRef = useRef(false);
   const [opsStates, setOpsStates] = useState<Record<string, OpsState>>({});
   const arrivedSinceRef = useRef<Record<string, number>>({});
   const ARRIVE_DWELL_MS = 1500; // 1.5s estable dentro del radio
@@ -406,8 +405,6 @@ const refreshPinnedDistance = () => {
     return { ...prev, distanceMeters: freshDist };
   });
 };
-
-
 
 
   // único timer
@@ -525,17 +522,18 @@ function maybeConfirmHoldShort(socket: any) {
 }
 
 function canConfirmBeaconNow(fix: string): boolean {
-  if (finalApproachLatchedRef.current || finalLockedRef.current) return false;
-
-  const assigned = getBackendAssignedForMe();
+  // fix = 'B2','B17',...
+  const assigned = getBackendAssignedForMe(); // 'A_TO_B17' etc
 
   if (!/^B\d+$/.test(fix)) return false;
 
+    // ✅ si el backend ya te asignó FINAL, no confirmes beacons
   if (assigned === 'FINAL') return false;
 
+  // Debe haber asignación tipo A_TO_Bx
   if (!assigned || !assigned.startsWith('A_TO_')) return false;
 
-  const assignedFix = assigned.replace('A_TO_', '');
+  const assignedFix = assigned.replace('A_TO_', ''); // 'B17'
   if (assignedFix !== fix) return false;
 
   return true;
@@ -628,7 +626,6 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
 
   const [zoom, setZoom] = useState({ latitudeDelta: 0.1, longitudeDelta: 0.1 });
   const [planes, setPlanes] = useState<Plane[]>([]);
-  const [traffic, setTraffic] = useState<Plane[]>([]);
   const [myPlane, setMyPlane] = useState<Plane>({
     id: username,
     name: username, // estable
@@ -639,32 +636,7 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
     speed: 40,
   });
 
-const displayPlanes = useMemo(() => {
-  const byId = new Map(planes.map(p => [p.id, p]));
 
-  return traffic.map(t => {
-    const visual = byId.get(t.id);
-
-    return {
-      ...t,
-      alertLevel: visual?.alertLevel ?? 'none',
-      timeToImpact: visual?.timeToImpact,
-      ops: visual?.ops ?? t.ops,
-    };
-  });
-}, [traffic, planes]);
-
-useEffect(() => {
-  planesRef.current = planes;
-}, [planes]);
-
-
-
-  
-
-useEffect(() => {
-  planesRef.current = planes;
-}, [planes]);
 
 
   // ✅ Ref para leer el último myPlane SIN depender del re-render
@@ -725,12 +697,12 @@ useFocusEffect(
     return () => {
       isFocusedRef.current = false;
 
-      // 0) GPS watch (MUY importante)
+      // 0) cortar GPS watch (clave: si queda vivo, te mata ExpoGo)
       try { gpsWatchRef.current?.remove?.(); } catch {}
       gpsWatchRef.current = null;
       gpsBusyRef.current = false;
 
-      // 1) Frenar timers / intervalos
+      // 1) Frenar intervalos / timers
       try { if (sendIntervalRef.current) clearInterval(sendIntervalRef.current as any); } catch {}
       sendIntervalRef.current = null;
 
@@ -743,17 +715,16 @@ useFocusEffect(
       try { if (taDebounceRef.current) clearTimeout(taDebounceRef.current as any); } catch {}
       taDebounceRef.current = null;
 
-      // 2) Limpiar timeouts
       try { if (hideSelectedTimeout.current) clearTimeout(hideSelectedTimeout.current as any); } catch {}
       hideSelectedTimeout.current = null;
 
-      // 3) Reset TOTAL de refs “pegadas” (incluye TIERRA)
+      // 2) RESET TOTAL de LATCHES / REFS (tierra + runway + apron)
       landingRequestedRef.current = false;
       takeoffRequestedRef.current = false;
       finalLockedRef.current = false;
 
       apronLatchRef.current = false;
-      runwayOccupiedSentRef.current = false;   // 👈 clave para que no quede “latcheado”
+      runwayOccupiedSentRef.current = false;     // 👈 IMPORTANTÍSIMO
       lastApronStopSentRef.current = 0;
 
       iAmOccupyingRef.current = null;
@@ -761,8 +732,6 @@ useFocusEffect(
 
       lastOpsStateRef.current = null;
       lastOpsStateTsRef.current = 0;
-
-      selectedHoldUntilRef.current = 0;
 
       assignedRef.current = null;
       opsTargetsRef.current = null;
@@ -775,8 +744,12 @@ useFocusEffect(
       lastWarningTimeRef.current = {};
       raHoldUntilRef.current = {};
       activeRAIdRef.current = null;
+      lastRAIdRef.current = null;
 
-      // 4) Reset TOTAL de UI local
+      snoozeUntilRef.current = 0;
+      snoozeIdRef.current = null;
+
+      // 3) Reset de UI local
       try { setSelected(null); } catch {}
       try { setConflict(null); } catch {}
       try { setBackendWarning(null); } catch {}
@@ -784,26 +757,25 @@ useFocusEffect(
       try { setPrioritizedWarning(null); } catch {}
       try { setWarnings({}); } catch {}
       try { setTraffic([]); } catch {}
+      try { setSlots([]); } catch {}
+      try { setRunwayState(null as any); } catch {}
+      try { setNavTargetSafe(null); } catch {}
       try { setBanner(null); } catch {}
 
-      // 5) Reset runway-state local (clave para que NO redibuje línea al re-entrar)
-      try { setRunwayState(null as any); } catch {}
-      try { setSlots([]); } catch {}
-      try { setNavTargetSafe(null); } catch {}
-
-      // 6) Avisar al backend + limpiar socket para NO duplicar handlers al volver
+      // 4) Avisar al backend + limpiar listeners del socket
       const s = socketRef.current;
       if (s) {
         try { s.emit('leave', { name: username }); } catch {}
 
-        // evita “handlers duplicados” al reentrar
+        // 👇 esto evita “duplicar listeners” al re-entrar
         try { s.off('runway-state'); } catch {}
         try { s.off('traffic-update'); } catch {}
         try { s.off('conflicto'); } catch {}
         try { s.off('initial-traffic'); } catch {}
         try { s.off('sequence-update'); } catch {}
 
-        // recomendado si ExpoGo se cuelga: desconectar y reconectar al entrar
+        // opcional pero recomendable si ExpoGo se cuelga al volver:
+        // cortar del todo y reconectar al entrar
         try { s.disconnect(); } catch {}
       }
       socketRef.current = null;
@@ -850,9 +822,23 @@ useFocusEffect(
     }, [username]);
 
   const [track, setTrack] = useState<LatLon[]>([]);
- 
+  const [traffic, setTraffic] = useState<Plane[]>([]);
 
 
+  const displayPlanes = useMemo(() => {
+  const byId = new Map(planes.map(p => [p.id, p]));
+
+  return traffic.map(t => {
+    const visual = byId.get(t.id);
+
+    return {
+      ...t, // ✅ posición viva siempre desde traffic
+      alertLevel: visual?.alertLevel ?? 'none',
+      timeToImpact: visual?.timeToImpact,
+      ops: visual?.ops ?? t.ops,
+    };
+  });
+}, [traffic, planes]);
 
     useEffect(() => {
     const ids = new Set(traffic.map(t => t.id));
@@ -881,6 +867,10 @@ useFocusEffect(
       return changed ? next : prev; // evita re-render si no cambió nada
     });
   }, [traffic]);
+
+useEffect(() => {
+  planesRef.current = displayPlanes;
+}, [displayPlanes]);
 
 
   // Secuencia/slots (de sequence-update)
@@ -1152,102 +1142,86 @@ useEffect(() => {
   const me = myPlane?.id || username;
   if (!me) return;
 
-  const myFact = (lastOpsStateRef.current as OpsState | null);
-  const assigned = getBackendAssignedForMe2() || undefined;
-  const backendTarget = getBackendTargetForMe();
+  const st = (runwayState as any)?.state;
+  if (!st) return;
 
-  // 1) GROUND real siempre gana
-  if (
-    myFact === 'RUNWAY_OCCUPIED' ||
-    myFact === 'RUNWAY_CLEAR' ||
-    myFact === 'TAXI_APRON' ||
-    myFact === 'APRON_STOP'
-  ) {
-    setNavTargetSafe(getApronPoint() ?? null);
-    return;
-  }
+  if (freezeBeaconEngineRef.current) return;
 
-  // 2) HOLD_SHORT / TAXI_TO_RWY de despegue
-  if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
-    if (myFact === 'HOLD_SHORT') {
-      if (backendTarget) {
-        setNavTargetSafe({ latitude: backendTarget.lat, longitude: backendTarget.lon });
-      }
-      return;
-    }
+  const assigned = getBackendAssignedForMe2() || undefined;   // 'A_TO_B2'|'A_TO_B3'|'B1'|'FINAL'
+  const target = getBackendTargetForMe() || undefined;                        // {fix, lat, lon}
 
-    const end = rw?.active_end === 'B' ? 'B' : 'A';
-    const thr = end === 'B' ? B_runway : A_runway;
-    setNavTargetSafe(thr ?? null);
-    return;
-  }
-
-  // 3) FINAL latch local: una vez en FINAL, siempre al umbral
-  if (finalApproachLatchedRef.current || myFact === 'FINAL') {
-    setNavTargetSafe(activeThreshold ?? null);
-    return;
-  }
-
-  // 4) APRON latch
-  if (apronLatchRef.current) {
-    setNavTargetSafe(getApronPoint() ?? null);
-    return;
-  }
-
-  // 5) Backend target normal
-  if (backendTarget) {
-    setNavTargetSafe({ latitude: backendTarget.lat, longitude: backendTarget.lon });
-    return;
-  }
-
-  // 6) Si ATC dirigido está activo, no tocar más
-  if (serverATCRef.current) return;
-
-  // 7) Si no pedí aterrizaje, no guiar
-  if (!landingRequestedRef.current || defaultActionForMe() !== 'land') {
-    setNavTargetSafe(null);
-    return;
-  }
-
-  // 8) Landing fallback por assignedOps
   if (!assigned) return;
 
-  if (assigned === 'B1') {
-    setNavTargetSafe(beaconB1 ?? null);
+  // Si el backend ya te ve en B1/FINAL, no “auto-reportes” más aquí.
+  // (El backend puede latchear B1 por stReported === 'B1')
+  if (assigned === 'B1' || assigned === 'FINAL') return;
+
+  // Sólo reportamos llegada para A_TO_Bx
+  if (!assigned.startsWith('A_TO_')) return;
+
+  // Resolvemos el fix (por assigned o por opsTargets)
+  const fix =
+    (typeof target?.fix === 'string' ? target.fix : null) ??
+    (assigned.replace('A_TO_', '') as string); // 'B2','B3','B1'
+
+  // Coordenada del fix (preferir opsTargets; si no, local)
+  let fixLL: LatLon | null = null;
+
+  if (typeof target?.lat === 'number' && typeof target?.lon === 'number') {
+    fixLL = { latitude: target.lat, longitude: target.lon };
+  } else {
+    if (fix === 'B1') fixLL = beaconB1;
+    else if (fix === 'B2') fixLL = beaconB2;
+    else if (fix.startsWith('B')) {
+      const n = parseInt(fix.slice(1), 10);
+      if (Number.isFinite(n) && n >= 3) {
+        fixLL = extraBeacons[n - 3] ?? beaconB2 ?? null;
+      }
+    }
+  }
+
+  if (!fixLL) return;
+
+  // Check dentro de radio + dwell
+  const inside = inRadiusM({ lat: myPlane.lat, lon: myPlane.lon }, fixLL, ARRIVE_R_M);
+  const key = `${me}:${fix}`;
+
+  if (!inside) {
+    delete arrivedSinceRef.current[key];
     return;
   }
 
-  if (assigned === 'FINAL') {
-    setNavTargetSafe(activeThreshold ?? null);
-    return;
+  const now = Date.now();
+  const since = arrivedSinceRef.current[key] ?? now;
+  arrivedSinceRef.current[key] = since;
+
+  if (now - since < ARRIVE_DWELL_MS) return;
+
+  // ✅ Llegué: reportar OPS como 'B#' SOLO si el backend me asignó A_TO_B#
+  const report = fix as OpsState; // 'B1'|'B2'|'B3'...
+
+  if (canConfirmBeaconNow(String(report))) {
+    emitOpsNow(report, 'ARRIVE_DWELL', { fix });
+  } else {
+    console.log('[OPS] Skip beacon confirm (not assigned by backend):', {
+      report,
+      assigned: getBackendAssignedForMe(),
+    });
   }
 
-  if (typeof assigned === 'string' && assigned.startsWith('A_TO_B')) {
-    const n = Number(assigned.replace('A_TO_B', ''));
-    if (n === 2) {
-      setNavTargetSafe(beaconB2 ?? null);
-      return;
-    }
-    if (n >= 3) {
-      const idx = n - 3;
-      const b = extraBeacons[idx];
-      setNavTargetSafe(b ?? beaconB2 ?? null);
-      return;
-    }
-  }
-}, [
-  username,
-  runwayState,
-  rw,
-  beaconB1,
-  beaconB2,
-  activeThreshold,
-  extraBeacons,
-  myPlane?.id,
-  myPlane.lat,
-  myPlane.lon,
-  myPlane.speed,
-]);
+  // Limpieza para no re-disparar
+  delete arrivedSinceRef.current[key];
+
+  }, [
+    runwayState,
+    username,
+    myPlane?.id,
+    myPlane.lat,
+    myPlane.lon,
+    beaconB1,
+    beaconB2,
+    extraBeacons,
+  ]);
 
 
   // --- NAV: anti-histeresis ---
@@ -2807,19 +2781,6 @@ s.on('ops/state', (msg: any) => {
   if (name === me) {
     lastOpsStateRef.current = next;
     lastOpsStateTsRef.current = Date.now();
-
-    // ✅ breakers reales que sueltan FINAL
-    if (
-      next === 'RUNWAY_OCCUPIED' ||
-      next === 'RUNWAY_CLEAR' ||
-      next === 'TAXI_APRON' ||
-      next === 'APRON_STOP' ||
-      next === 'AIRBORNE'
-    ) {
-      finalApproachLatchedRef.current = false;
-      finalLockedRef.current = false;
-      freezeBeaconEngineRef.current = false;
-    }
   }
 
 
@@ -2982,20 +2943,16 @@ s.on('runway-state', (payload: any) => {
 
     assignedRef.current = assigned;
 
-if (assigned === 'FINAL') {
-  if (lastSentOpsRef.current !== 'FINAL') {
-    console.log('[OPS] backend assigned FINAL → freezing beacon engine');
-    lastSentOpsRef.current = 'FINAL';
-  }
-  freezeBeaconEngineRef.current = true;
-  finalApproachLatchedRef.current = true;
-  finalLockedRef.current = true;
-} else {
-  // ⚠️ NO soltar el FINAL latch acá.
-  // Se suelta sólo con breakers reales de tierra/pista.
-  freezeBeaconEngineRef.current = false;
-  lastSentOpsRef.current = null;
-}
+    if (assigned === 'FINAL') {
+      if (lastSentOpsRef.current !== 'FINAL') {
+        console.log('[OPS] backend assigned FINAL → freezing beacon engine');
+        lastSentOpsRef.current = 'FINAL';
+      }
+      freezeBeaconEngineRef.current = true;
+    } else {
+      freezeBeaconEngineRef.current = false;
+      lastSentOpsRef.current = null;
+    }
   } catch (e) {
     console.log('[RUNWAY FINAL guard error]', e);
   }
