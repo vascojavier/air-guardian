@@ -1424,11 +1424,13 @@ if (stReported === 'FINAL') {
     //    Si NO confirmó B1, backend lo guía a B1 (A_TO_B1)
     // -------------------------
     if (leaderNow && name === leaderNow) {
-      if (leaderWillBeFinal) {
-      assignedOps[name] = 'FINAL';
-      opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
-      setFinalLatched(name, true); // ✅ latch definitivo
+      const stLeadNow = getReportedOpsState(name);
 
+      // ✅ SOLO si el frontend ya confirmó B1
+      if (stLeadNow === 'B1' && gNow?.thr) {
+        assignedOps[name] = 'FINAL';
+        opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+        setFinalLatched(name, true);
       } else {
         assignedOps[name] = 'A_TO_B1';
 
@@ -1440,10 +1442,9 @@ if (stReported === 'FINAL') {
       }
       continue;
     }
-
     // ✅ PARCHE MÍNIMO:
     // Si el líder ya está en FINAL, empujar #2 a B1 YA MISMO (sin esperar RUNWAY_OCCUPIED)
-    if (leaderWillBeFinal && secondNow && name === secondNow) {
+    if (secondNow && name === secondNow) {
       assignedOps[name] = 'A_TO_B1';
 
       const lat = asg?.b1?.lat;

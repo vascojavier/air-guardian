@@ -501,6 +501,35 @@ function maybeConfirmApronStop(socket:any) {
   }
 }
 
+function maybeConfirmTaxiApron(socket: any) {
+  const me = myPlaneRef.current;
+  if (!me) return;
+
+  const targets = opsTargetsRef.current;
+  const t = myNameKeysFirstMatch(targets);
+  if (!t || t.fix !== 'APRON') return;
+
+  const d = distanceMeters(me.lat, me.lon, t.lat, t.lon);
+  const speed = me.speed ?? 0;
+  const currentOps = lastOpsStateRef.current;
+
+  // ✅ solo si ya salió de pista, sigue yendo al apron y todavía no llegó
+  const leftRunway = !isOnRunwayStrip();
+  const movingOnGround = speed > 5;
+  const notArrivedYet = d > 60;
+
+  if (
+    leftRunway &&
+    movingOnGround &&
+    notArrivedYet &&
+    (currentOps === 'RUNWAY_CLEAR' || currentOps === 'TAXI_APRON')
+  ) {
+    if (currentOps !== 'TAXI_APRON') {
+      console.log('[OPS] taxiing to APRON → sending TAXI_APRON', { d, speed });
+      socket.emit('ops/state', { name: me.name, state: 'TAXI_APRON' });
+    }
+  }
+}
 
 function maybeConfirmHoldShort(socket: any) {
   const me = myPlaneRef.current;
@@ -907,7 +936,9 @@ const emitUpdate = (p: PosUpdate) => {
     aircraftIcon: aircraftIcon || '2.png',
     isMotorized,
   });
+  maybeConfirmTaxiApron(s);   // ✅ NUEVO
   maybeConfirmApronStop(s);
+  maybeConfirmHoldShort(s);   // ✅ también conviene acá
 };
 
   //const isFocusedRef = useRef(false);
@@ -1771,24 +1802,21 @@ const markRunwayClear = () => {
   };
 
 
-    const requestTakeoffLabel = () => {
-      // ✅ cortar guía/latch al APRON
-      apronLatchRef.current = false;
+  const requestTakeoffLabel = () => {
+  apronLatchRef.current = false;
 
-      // ✅ guiar a cabecera activa
-      const end = rw?.active_end === 'B' ? 'B' : 'A';
-      const thr = end === 'B' ? B_runway : A_runway;
-      if (thr) setNavTarget(thr);
+  // ❌ NO apuntar localmente a cabecera
+  setNavTargetSafe(null);
 
-      // ✅ estado OPS explícito (camino a pista)
-      emitOpsNow('TAXI_TO_RWY', 'UI_REQUEST_TAKEOFF');
+  // ✅ estado OPS correcto al empezar a taxear para despegar
+  emitOpsNow('TAXI_TO_RWY', 'UI_REQUEST_TAKEOFF');
 
-      // ✅ pedir al backend
-      requestTakeoff(false);
+  // ✅ pedir al backend
+  requestTakeoff(false);
 
-      takeoffRequestedRef.current = true;
-      flashBanner(t("runway.goToThreshold"), 'go-threshold');
-    };
+  takeoffRequestedRef.current = true;
+  flashBanner(t("runway.goToHoldShort"), 'go-hold-short');
+};
 
 
 const cancelRunwayLabel = () => {
@@ -3423,18 +3451,18 @@ if (touchdownLike && speedKmh < 50) {
   const nearActiveThreshold =
     activeEnd ? isNearThreshold(activeEnd, 200) : false;
 
-  if (iAmOccupyingRef.current || (iAmGroundish() && nearActiveThreshold)) {
-    markRunwayClear();
+if (
+  landingRequestedRef.current &&
+  (iAmOccupyingRef.current === 'landing' || (iAmGroundish() && nearActiveThreshold))
+) {
+  markRunwayClear();
 
-    // Reset de aproximación y OPS visible
-    finalLockedRef.current = false;
-    emitOpsNow('RUNWAY_CLEAR', 'AUTOCLEAR');
+  finalLockedRef.current = false;
+  emitOpsNow('RUNWAY_CLEAR', 'AUTOCLEAR');
 
-    // ✅ NO setNavTarget acá (lo hace el NAV único vía apronLatchRef)
-    apronLatchRef.current = true;
-
-    iAmOccupyingRef.current = null;
-  }
+  apronLatchRef.current = true;
+  iAmOccupyingRef.current = null;
+}
   // Si no se cumple la condición conservadora, NO limpies nada.
 }
 
