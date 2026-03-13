@@ -501,7 +501,7 @@ function maybeConfirmApronStop(socket:any) {
   }
 }
 
-function maybeConfirmTaxiApron(socket: any) {
+function maybeConfirmTaxiApron() {
   const me = myPlaneRef.current;
   if (!me) return;
 
@@ -511,7 +511,7 @@ function maybeConfirmTaxiApron(socket: any) {
 
   const d = distanceMeters(me.lat, me.lon, t.lat, t.lon);
   const speed = me.speed ?? 0;
-  const currentOps = lastOpsStateRef.current;
+  const currentOps = lastOpsStateRef.current as OpsState | null;
 
   // ✅ solo si ya salió de pista, sigue yendo al apron y todavía no llegó
   const leftRunway = !isOnRunwayStrip();
@@ -522,11 +522,20 @@ function maybeConfirmTaxiApron(socket: any) {
     leftRunway &&
     movingOnGround &&
     notArrivedYet &&
-    (currentOps === 'RUNWAY_CLEAR' || currentOps === 'TAXI_APRON')
+    (
+      currentOps === 'RUNWAY_OCCUPIED' ||
+      currentOps === 'RUNWAY_CLEAR' ||
+      currentOps === 'TAXI_APRON'
+    )
   ) {
     if (currentOps !== 'TAXI_APRON') {
-      console.log('[OPS] taxiing to APRON → sending TAXI_APRON', { d, speed });
-      socket.emit('ops/state', { name: me.name, state: 'TAXI_APRON' });
+      console.log('[OPS] taxiing to APRON → sending TAXI_APRON', {
+        d,
+        speed,
+        currentOps,
+      });
+
+      emitOpsNow('TAXI_APRON', 'AUTO_TAXI_TO_APRON', { d, speed });
     }
   }
 }
@@ -936,7 +945,7 @@ const emitUpdate = (p: PosUpdate) => {
     aircraftIcon: aircraftIcon || '2.png',
     isMotorized,
   });
-  maybeConfirmTaxiApron(s);   // ✅ NUEVO
+  maybeConfirmTaxiApron();   // ✅ NUEVO
   maybeConfirmApronStop(s);
   maybeConfirmHoldShort(s);   // ✅ también conviene acá
 };
