@@ -1344,12 +1344,11 @@ function publishRunwayState() {
   const leaderNow = leaderName();
 
   // 1) ¿El líder "debe" estar en FINAL? (solo guía ATC)
-  let leaderWillBeFinal = false;
+  let leaderInFinalStrict = false;
   if (leaderNow) {
-    const b1LatchedLead = isB1Latched(leaderNow);
-    const stLead = getReportedOpsState(leaderNow); // lo que dijo el frontend: B#, RUNWAY_*, etc.
-    leaderWillBeFinal =
-      (stLead === 'B1' || stLead === 'FINAL') && !!gNow?.thr;
+    const stLead = getReportedOpsState(leaderNow);
+    leaderInFinalStrict =
+      (stLead === 'FINAL' || isFinalLatched(leaderNow)) && !!gNow?.thr;
   }
 
   // 2) ¿Quién es #2 ahora mismo?
@@ -1444,16 +1443,16 @@ if (stReported === 'FINAL') {
     }
     // ✅ PARCHE MÍNIMO:
     // Si el líder ya está en FINAL, empujar #2 a B1 YA MISMO (sin esperar RUNWAY_OCCUPIED)
-    if (secondNow && name === secondNow) {
-      assignedOps[name] = 'A_TO_B1';
+if (leaderInFinalStrict && secondNow && name === secondNow) {
+  assignedOps[name] = 'A_TO_B1';
 
-      const lat = asg?.b1?.lat;
-      const lon = asg?.b1?.lon;
-      if (typeof lat === 'number' && typeof lon === 'number') {
-        opsTargets[name] = { fix: 'B1', lat, lon };
-      }
-      continue;
-    }
+  const lat = asg?.b1?.lat;
+  const lon = asg?.b1?.lon;
+  if (typeof lat === 'number' && typeof lon === 'number') {
+    opsTargets[name] = { fix: 'B1', lat, lon };
+  }
+  continue;
+}
 
     // -------------------------
     // 2) NO-LÍDER: tu lógica original
