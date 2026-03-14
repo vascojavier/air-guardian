@@ -1453,6 +1453,25 @@ if (stReported === 'FINAL') {
       }
       continue;
     }
+    if (leaderNow && name === leaderNow) {
+      const stLeadNow = getReportedOpsState(name);
+
+      // ✅ SOLO si el frontend ya confirmó B1
+      if (stLeadNow === 'B1' && gNow?.thr) {
+        assignedOps[name] = 'FINAL';
+        opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
+        setFinalLatched(name, true);
+      } else {
+        assignedOps[name] = 'A_TO_B1';
+
+        const lat = asg?.b1?.lat;
+        const lon = asg?.b1?.lon;
+        if (typeof lat === 'number' && typeof lon === 'number') {
+          opsTargets[name] = { fix: 'B1', lat, lon };
+        }
+      }
+      continue;
+    }
     // ✅ PARCHE MÍNIMO:
     // Si el líder ya está en FINAL, empujar #2 a B1 YA MISMO (sin esperar RUNWAY_OCCUPIED)
 if (leaderInFinalStrict && secondNow && name === secondNow) {
@@ -1465,6 +1484,20 @@ if (leaderInFinalStrict && secondNow && name === secondNow) {
   }
   continue;
 }
+
+    // -------------------------
+    // 2) NO-LÍDER: tu lógica original
+    // -------------------------
+    if (b1Latched) {
+      assignedOps[name] = 'A_TO_B1';
+
+      const lat = asg?.b1?.lat;
+      const lon = asg?.b1?.lon;
+      if (typeof lat === 'number' && typeof lon === 'number') {
+        opsTargets[name] = { fix: 'B1', lat, lon };
+      }
+      continue;
+    }
 
     // -------------------------
     // 2) NO-LÍDER: tu lógica original
