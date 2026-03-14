@@ -1380,8 +1380,20 @@ function publishRunwayState() {
 //    - no-leader => HOLD en B1 (A_TO_B1) (NO FINAL)
 const clearance = decideRunwayClearance();
 
+const occupiedByLanding =
+  runwayState.inUse?.action === 'landing';
+
 if (stReported === 'B1') {
-  if (leaderNow && name === leaderNow && gNow?.thr && clearance.winner === 'ARR') {
+  const canAdvanceToFinal =
+    leaderNow &&
+    name === leaderNow &&
+    gNow?.thr &&
+    (
+      clearance.winner === 'ARR' ||
+      occupiedByLanding
+    );
+
+  if (canAdvanceToFinal) {
     assignedOps[name] = 'FINAL';
     opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
     setFinalLatched(name, true);
