@@ -1850,14 +1850,12 @@ function cleanupInUseIfDone() {
 
 // ✅ Consumir #1 cuando entra a RUNWAY_OCCUPIED y empujar nuevo líder a FINAL
 function consumeLeaderOnRunwayOccupied(leaderNameNow) {
-  const leader = leaderName(); // usa runwayState.landings[0]
+  const leader = leaderName();
   if (!leader || leader !== leaderNameNow) return false;
 
   const leadInfo = userLocations[leaderNameNow] || {};
   const leadCallsign = leadInfo.callsign || '';
 
-  // (1) Marcar pista ocupada un rato (lease)
-  //     (si ya existe, no la pisamos)
   if (!runwayState.inUse) {
     runwayState.inUse = {
       action: 'landing',
@@ -1868,62 +1866,20 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
     };
   }
 
-// (2) Sacar al líder de la cola (consume turno)
-runwayState.landings = runwayState.landings.filter(l => l.name !== leaderNameNow);
+  runwayState.landings = runwayState.landings.filter(l => l.name !== leaderNameNow);
+  runwayState.takeoffs = runwayState.takeoffs.filter(t => t.name !== leaderNameNow);
 
-// ✅ MUY IMPORTANTE: si por algún motivo quedó en cola de despegue, borrarlo también
-runwayState.takeoffs = runwayState.takeoffs.filter(t => t.name !== leaderNameNow);
+  clearATC(leaderNameNow);
+  try { setFinalLatched(leaderNameNow, false); } catch {}
 
-clearATC(leaderNameNow);
-try { setFinalLatched(leaderNameNow, false); } catch {}
-
-
-
-  // Limpiezas coherentes con tu lógica actual
   clearTurnLease(leaderNameNow);
   try { clearFinalEnter(leaderNameNow); } catch {}
   try { b1LatchByName.delete(leaderNameNow); } catch {}
 
-  // (3) Corrimiento + replanificación
-  //     (esto reordena y recalcula slots)
   try { enforceCompliance(); } catch {}
   try { planRunwaySequence(); } catch {}
-
-  // (4) Nuevo líder => FORZAR FINAL explícito
-  const newLead = leaderName();
-  if (newLead) {
-    const g = activeRunwayGeom();
-    if (g?.thr) {
-      // 🔥 instrucción explícita "ir a FINAL" (umbral activo)
-      emitToUser(newLead, 'atc-instruction', {
-        type: 'goto-beacon',
-        beacon: 'FINAL',
-        lat: g.thr.lat,
-        lon: g.thr.lon,
-        key: 'nav.proceedTo',
-        params: { fix: 'FINAL' },
-        spokenKey: 'nav.proceedToBeaconSpoken',
-        spokenParams: { beacon: 'FINAL' },
-      });
-
-      // ✅ NUEVO: verdad server-side para que runway-state refleje FINAL del nuevo líder
-      runwayState.assignedOps = runwayState.assignedOps || {};
-      runwayState.opsTargets  = runwayState.opsTargets  || {};
-      runwayState.assignedOps[newLead] = 'FINAL';
-      runwayState.opsTargets[newLead]  = { fix: 'FINAL', lat: g.thr.lat, lon: g.thr.lon };
-
-
-    setFinalLatched(newLead, true);
-
-      // Server-side: lo ponemos en FINAL para que tu FSM no lo degrade
-      const ph = getApproachPhase(newLead);
-      if (ph !== 'CLRD') setApproachPhase(newLead, 'FINAL');
-      try { setLandingStateForward(newLead, 'FINAL'); } catch {}
-    }
-  }
-
-  // (5) Publicar estado actualizado
   try { publishRunwayState(); } catch {}
+
   return true;
 }
 
