@@ -540,7 +540,7 @@ function maybeConfirmTaxiApron() {
   }
 }
 
-function maybeConfirmHoldShort(socket: any) {
+function maybeConfirmHoldShort() {
   const me = myPlaneRef.current;
   if (!me) return;
 
@@ -550,12 +550,23 @@ function maybeConfirmHoldShort(socket: any) {
 
   const d = distanceMeters(me.lat, me.lon, t.lat, t.lon);
   const speed = me.speed ?? 0;
+  const currentOps = lastOpsStateRef.current;
+  const now = Date.now();
 
-  const ARRIVE_HS_M = 40;     // 30–60m
-  const SLOW_KMH = 10;        // “llegando / frenando”
-  if (d <= ARRIVE_HS_M && speed <= SLOW_KMH) {
-    // IMPORTANTE: misma key que update
-    socket.emit('ops/state', { name: username, state: 'HOLD_SHORT' });
+  const ARRIVE_HS_M = 65;   // antes 40, demasiado justo para GPS real
+  const SLOW_KMH = 15;      // antes 10
+
+  if (
+    d <= ARRIVE_HS_M &&
+    speed <= SLOW_KMH &&
+    currentOps !== 'HOLD_SHORT'
+  ) {
+    console.log('[OPS] arrived HOLD_SHORT → sending HOLD_SHORT', { d, speed, currentOps });
+
+    socketRef.current?.emit('ops/state', {
+      name: me.name,
+      state: 'HOLD_SHORT'
+    });
   }
 }
 
@@ -911,6 +922,10 @@ useEffect(() => {
 }, [displayPlanes]);
 
 
+useEffect(() => {
+  maybeConfirmHoldShort();
+}, [myPlane.lat, myPlane.lon, myPlane.speed, runwayState]);
+
   // Secuencia/slots (de sequence-update)
   const [slots, setSlots] = useState<Array<{opId:string; type:'ARR'|'DEP'; name:string; startMs:number; endMs:number; frozen:boolean;}>>([]);
   // Target de navegación que llega por ATC (o por tu lógica local)
@@ -947,7 +962,6 @@ const emitUpdate = (p: PosUpdate) => {
   });
   maybeConfirmTaxiApron();   // ✅ NUEVO
   maybeConfirmApronStop(s);
-  maybeConfirmHoldShort(s);   // ✅ también conviene acá
 };
 
   //const isFocusedRef = useRef(false);
