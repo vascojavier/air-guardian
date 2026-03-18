@@ -544,6 +544,9 @@ function maybeConfirmHoldShort() {
   const me = myPlaneRef.current;
   if (!me) return;
 
+  const socket = socketRef.current;
+  if (!socket) return;
+
   const targets = opsTargetsRef.current;
   const t = myNameKeysFirstMatch(targets);
   if (!t || t.fix !== 'HOLD_SHORT') return;
@@ -551,21 +554,24 @@ function maybeConfirmHoldShort() {
   const d = distanceMeters(me.lat, me.lon, t.lat, t.lon);
   const speed = me.speed ?? 0;
   const currentOps = lastOpsStateRef.current;
-  const now = Date.now();
 
-  const ARRIVE_HS_M = 65;   // antes 40, demasiado justo para GPS real
-  const SLOW_KMH = 15;      // antes 10
+  const ARRIVE_HS_M = 65;
+  const SLOW_KMH = 15;
 
   if (
     d <= ARRIVE_HS_M &&
     speed <= SLOW_KMH &&
     currentOps !== 'HOLD_SHORT'
   ) {
-    console.log('[OPS] arrived HOLD_SHORT → sending HOLD_SHORT', { d, speed, currentOps });
+    console.log('[OPS] arrived HOLD_SHORT → sending HOLD_SHORT', {
+      d,
+      speed,
+      currentOps,
+    });
 
-    socketRef.current?.emit('ops/state', {
+    socket.emit('ops/state', {
       name: me.name,
-      state: 'HOLD_SHORT'
+      state: 'HOLD_SHORT',
     });
   }
 }
@@ -1825,16 +1831,22 @@ const markRunwayClear = () => {
   };
 
 
-  const requestTakeoffLabel = () => {
+const requestTakeoffLabel = () => {
   apronLatchRef.current = false;
 
-  // ❌ NO apuntar localmente a cabecera
+  // ✅ cortar completamente cualquier resto del flujo de aterrizaje
+  landingRequestedRef.current = false;
+  finalLockedRef.current = false;
+  iAmOccupyingRef.current = null;
+  runwayOccupiedSentRef.current = false;
+  landClearShownRef.current = false;
+
+  // ❌ no apuntar localmente a cabecera
   setNavTargetSafe(null);
 
-  // ✅ estado OPS correcto al empezar a taxear para despegar
+  // ✅ OPS correcto al empezar a taxear para despegar
   emitOpsNow('TAXI_TO_RWY', 'UI_REQUEST_TAKEOFF');
 
-  // ✅ pedir al backend
   requestTakeoff(false);
 
   takeoffRequestedRef.current = true;
@@ -3410,7 +3422,10 @@ function reportIfDwellInside(
 useEffect(() => {
   if (!rw) return;
 
-  // 1) "Liberar pista" solo si voy lento sobre la pista (< 50 km/h)
+  const backendTarget = getBackendTargetForMe();
+  const backendFix = backendTarget?.fix ?? null;
+
+  // 1) "Liberar pista" / touchdown
   const agl = getAGLmeters();
   const speedKmh =
     (myPlane && typeof myPlane.speed === 'number') ? myPlane.speed : 0;
@@ -3420,74 +3435,82 @@ useEffect(() => {
     agl < 8 &&
     speedKmh < 80;
 
-  // ✅ antes era: isOnRunwayStrip() && speed < 50
-  // ahora: sólo si realmente parece touchdown + rollout lento
-// reset del latch cuando ya estás en RUNWAY_CLEAR (confirmado por ops)
-if (lastOpsStateRef.current === 'RUNWAY_CLEAR') {
-  runwayOccupiedSentRef.current = false;
-}
+  // reset del latch cuando ya estás en RUNWAY_CLEAR (confirmado por ops)
+  if (lastOpsStateRef.current === 'RUNWAY_CLEAR') {
+    runwayOccupiedSentRef.current = false;
+  }
 
-if (touchdownLike && speedKmh < 50) {
-  flashBanner(t("runway.vacateRunway"), 'free-runway');
+  // ✅ apenas toca pista, ya entra en flujo de aterrizaje
+  if (touchdownLike) {
+    flashBanner(t("runway.vacateRunway"), 'free-runway');
 
-  // ✅ NO setNavTarget acá (lo hace el NAV único vía apronLatchRef)
-  apronLatchRef.current = true;
-
-  // --- LATCH: emitir RUNWAY_OCCUPIED solo una vez por aterrizaje ---
-  const me = myPlane?.id || username;
-
-  // debug rápido (opcional, borralo luego)
-  console.log('[TD DEBUG]', { touchdownLike, agl, speedKmh, assigned: getBackendAssignedForMe() });
-
-  if (!runwayOccupiedSentRef.current) {
-    // bypass de gates: el frontend debe confirmar RUNWAY_OCCUPIED en touchdown
-    console.log('[OPS] touchdown → RUNWAY_OCCUPIED (latch)');
-    emitOpsNow('RUNWAY_OCCUPIED', 'TOUCHDOWN_LATCH', { touchdownLike, agl, speedKmh });
-    runwayOccupiedSentRef.current = true;
-    // marca el latch para la navegación a apron cuando backend lo mande
+    // la navegación a APRON la maneja el NAV único
     apronLatchRef.current = true;
+
+    console.log('[TD DEBUG]', {
+      touchdownLike,
+      agl,
+      speedKmh,
+      assigned: getBackendAssignedForMe(),
+      backendFix,
+    });
+
+    if (!runwayOccupiedSentRef.current) {
+      console.log('[OPS] touchdown → RUNWAY_OCCUPIED (latch)');
+      emitOpsNow('RUNWAY_OCCUPIED', 'TOUCHDOWN_LATCH', {
+        touchdownLike,
+        agl,
+        speedKmh,
+      });
+      runwayOccupiedSentRef.current = true;
+      apronLatchRef.current = true;
+    }
+
+    if (
+      landingRequestedRef.current &&
+      iAmOccupyingRef.current !== 'landing' &&
+      defaultActionForMe() === 'land'
+    ) {
+      markRunwayOccupy('landing');
+      iAmOccupyingRef.current = 'landing';
+
+      try { cancelMyRequest(); } catch {}
+      landingRequestedRef.current = false;
+      finalLockedRef.current = false;
+      socketRef.current?.emit('runway-get');
+    }
+  } else {
+    // ✅ RUNWAY_CLEAR sólo si backend realmente me manda al APRON
+    let activeEnd: 'A' | 'B' | null = null;
+    if ((rw as any).active_end === 'B') activeEnd = 'B';
+    else activeEnd = 'A';
+
+    const nearActiveThreshold =
+      activeEnd ? isNearThreshold(activeEnd, 200) : false;
+
+    const canAutoClearToApron =
+      landingRequestedRef.current &&
+      !takeoffRequestedRef.current &&
+      backendFix === 'APRON' &&
+      (
+        iAmOccupyingRef.current === 'landing' ||
+        (
+          lastOpsStateRef.current === 'RUNWAY_OCCUPIED' &&
+          iAmGroundish() &&
+          nearActiveThreshold
+        )
+      );
+
+    if (canAutoClearToApron) {
+      markRunwayClear();
+
+      finalLockedRef.current = false;
+      emitOpsNow('RUNWAY_CLEAR', 'AUTOCLEAR');
+
+      apronLatchRef.current = true;
+      iAmOccupyingRef.current = null;
+    }
   }
-
-  // Si estoy aterrizando y aún no marqué occupy en la lógica local, marcar
-  if (
-    landingRequestedRef.current &&
-    iAmOccupyingRef.current !== 'landing' &&
-    defaultActionForMe() === 'land'
-  ) {
-    markRunwayOccupy('landing');
-    iAmOccupyingRef.current = 'landing';
-
-    // ✅ ya aterrizaste, podés cancelar la “request”
-    try { cancelMyRequest(); } catch {}
-    landingRequestedRef.current = false;
-    finalLockedRef.current = false;
-    socketRef.current?.emit('runway-get'); // refresco estado del server
-  }
-
-} else {
-  // Versión conservadora: hacer "clear" solo si venías ocupando
-  // o si estás en un estado de tierra real cerca de la cabecera activa
-  let activeEnd: 'A' | 'B' | null = null;
-  if ((rw as any).active_end === 'B') activeEnd = 'B';
-  else activeEnd = 'A';
-
-  const nearActiveThreshold =
-    activeEnd ? isNearThreshold(activeEnd, 200) : false;
-
-if (
-  landingRequestedRef.current &&
-  (iAmOccupyingRef.current === 'landing' || (iAmGroundish() && nearActiveThreshold))
-) {
-  markRunwayClear();
-
-  finalLockedRef.current = false;
-  emitOpsNow('RUNWAY_CLEAR', 'AUTOCLEAR');
-
-  apronLatchRef.current = true;
-  iAmOccupyingRef.current = null;
-}
-  // Si no se cumple la condición conservadora, NO limpies nada.
-}
 
   // 2) Permisos según turno y huecos
   const me = myPlane?.id || username;
@@ -3498,6 +3521,7 @@ if (
     assigned: st?.assignedOps?.[me],
     target: st?.opsTargets?.[me],
     reported: st?.reportedOpsStates?.[me],
+    backendFix,
   });
 
   if (!st) return;
@@ -3513,21 +3537,17 @@ if (
       if (distM <= radius) {
         if (!landClearShownRef.current) {
           flashBanner(t("runway.clearedToLand"), 'clr-land');
-          landClearShownRef.current = true; // mostrar una vez por “aproximación”
+          landClearShownRef.current = true;
         }
 
         if (activeThreshold) {
-          // ✅ lock final, pero NO setNavTarget acá
           finalLockedRef.current = true;
         }
-
       } else {
-        // si te volviste a alejar, reseteamos para poder volver a mostrar al reingresar
         landClearShownRef.current = false;
       }
     }
   } else {
-    // si dejaste de ser #1 o la pista se ocupó, resetea
     landClearShownRef.current = false;
   }
 
@@ -3549,16 +3569,13 @@ if (
       const landings = st.landings || [];
       const leaderL = landings[0];
 
-      // 🚫 si hay alguien en FINAL/B1 (o tocando pista) no hay despegue
       const leaderOps = leaderL?.name ? (opsMap[leaderL.name] as OpsState | undefined) : undefined;
       const landingOnShortFinal =
         !!leaderL &&
         (leaderOps === 'FINAL' || leaderOps === 'B1' || leaderOps === 'RUNWAY_OCCUPIED');
 
-      // 🚫 si la pista está en uso por aterrizaje/despegue, tampoco
       const runwayBusy = !!st.inUse;
 
-      // gapMin viene de tu timeline (lo dejás)
       const can =
         !runwayBusy &&
         !landingOnShortFinal &&
