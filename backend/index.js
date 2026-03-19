@@ -1544,27 +1544,17 @@ if (leaderInFinalStrict && secondNow && name === secondNow) {
   } 
 
 function hasAnyArrivalInFinalLike() {
-  // 1) cualquiera latcheado a FINAL
   for (const L of (runwayState.landings || [])) {
     const n = L?.name;
     if (!n) continue;
-    if (isFinalLatched(n)) return true;
-  }
+    if (!userLocations[n]) continue;
 
-  // 2) cualquiera reportando FINAL (si existiera)
-  for (const L of (runwayState.landings || [])) {
-    const n = L?.name;
-    if (!n) continue;
-    if (getReportedOpsState(n) === 'FINAL') return true;
-  }
+    const st = getReportedOpsState(n);
+    const latched = isFinalLatched(n);
 
-  // 3) cualquiera asignado a FINAL por runwayState (si lo guardás)
-  const asgMap = runwayState.assignedOps || null;
-  if (asgMap) {
-    for (const L of (runwayState.landings || [])) {
-      const n = L?.name;
-      if (!n) continue;
-      if (asgMap[n] === 'FINAL') return true;
+    if (st === 'FINAL' || st === 'B1' || latched) {
+      console.log('[FINAL-LIKE BLOCK]', { name: n, st, latched });
+      return true;
     }
   }
 
@@ -2796,22 +2786,23 @@ socket.on('runway-occupy', (msg) => {
 
   
   // Liberar pista
-  socket.on('runway-clear', () => {
-    try {
-      // ⚠️ Tomar el último antes de limpiar
-      const lastName = runwayState.inUse?.name;
+socket.on('runway-clear', () => {
+  try {
+    const lastName = runwayState.inUse?.name;
 
-      runwayState.inUse = null;
+    runwayState.inUse = null;
 
-      // El último que ocupó pista queda como RUNWAY_CLEAR
-      if (lastName) setLandingStateForward(lastName, 'RUNWAY_CLEAR');
-
-      planRunwaySequence();
-      publishRunwayState();
-    } catch (e) {
-      console.error('runway-clear error:', e);
+    if (lastName) {
+      setLandingStateForward(lastName, 'RUNWAY_CLEAR');
+      try { setFinalLatched(lastName, false); } catch {}
     }
-  });
+
+    planRunwaySequence();
+    publishRunwayState();
+  } catch (e) {
+    console.error('runway-clear error:', e);
+  }
+});
 
 
   // Obtener estado de pista bajo demanda (al abrir el panel en Radar)
