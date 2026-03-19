@@ -1834,19 +1834,16 @@ const markRunwayClear = () => {
 
 const requestTakeoffLabel = () => {
   apronLatchRef.current = false;
-  landingRequestedRef.current = false;
-  takeoffRequestedRef.current = true;
-  finalLockedRef.current = false;
 
-  // ❌ no setear nav local a cabecera
+  // ✅ NO apuntar localmente a cabecera
   setNavTargetSafe(null);
 
-  // ✅ OPS correcto al empezar a taxear a pista
+  // ✅ estado correcto al empezar a taxear para despegar
   emitOpsNow('TAXI_TO_RWY', 'UI_REQUEST_TAKEOFF');
 
-  // ✅ pedir turno al backend
   requestTakeoff(false);
 
+  takeoffRequestedRef.current = true;
   flashBanner(t("runway.goToHoldShort"), 'go-hold-short');
 };
 
@@ -3553,8 +3550,12 @@ useEffect(() => {
 
   // solicitud despegue: guiar a cabecera, ocupar, y despegar
   if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
-    const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
-    const nearThr = isNearThreshold(activeEnd, 80);
+    const currentOps = lastOpsStateRef.current;
+    const backendTarget = getBackendTargetForMe();
+    const backendFix = backendTarget?.fix ?? null;
+
+    const atHoldShort = currentOps === 'HOLD_SHORT';
+    const clearedToRunway = backendFix === 'RWY';
     const nextLanding = (st.timeline || []).find((x: any) =>
       x.action === 'landing' && new Date(x.at).getTime() > Date.now()
     );
@@ -3562,7 +3563,7 @@ useEffect(() => {
       ? Math.round((new Date(nextLanding.at).getTime() - Date.now()) / 60000)
       : 999;
 
-    if (nearThr) {
+    if (atHoldShort && clearedToRunway) {
       const meTk = (st.takeoffs || []).find((tt: any) => tt.name === me);
       const waited = meTk?.waitedMin ?? 0;
       const opsMap = (runwayState as any)?.state?.opsStates || {};
@@ -3582,13 +3583,9 @@ useEffect(() => {
         (gapMin >= 5 || waited >= 15);
 
       if (can && iAmOccupyingRef.current !== 'takeoff') {
-        flashBanner(t("runway.lineUp"), 'lineup');
-
-        if (isOnRunwayStrip()) {
-          markRunwayOccupy('takeoff');
-          iAmOccupyingRef.current = 'takeoff';
-          flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
-        }
+        markRunwayOccupy('takeoff');
+        iAmOccupyingRef.current = 'takeoff';
+        flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
       } else {
         if (landingOnShortFinal) flashBanner(t("runway.trafficOnFinalWait"), 'tko-wait-final');
       }

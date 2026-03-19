@@ -1705,17 +1705,15 @@ function decideRunwayClearance() {
   return { winner: 'ARR' };
 }
 
-  // ======================
-  // TAKEOFF GUIDANCE (HOLD_SHORT -> RWY)opsBackendByName.clear();
-  // Backend manda targets; frontend confirma OPS.
-  // ======================
-  const holdShortPt = getHoldShortPointFromAirfield();
-  const gTk = activeRunwayGeom();
-
+// ======================
+// TAKEOFF GUIDANCE (HOLD_SHORT -> RWY)
+// Backend manda targets; frontend confirma OPS.
+// ======================
+const holdShortPt = getHoldShortPointFromAirfield();
+const gTk = activeRunwayGeom();
 
 if (holdShortPt && gTk?.thr) {
   const depLeader = runwayState.takeoffs?.[0]?.name || null;
-  const arrivalFinal = hasAnyArrivalInFinalLike();
   const clearance = decideRunwayClearance();
   const canClearTakeoff = clearance.winner === 'DEP';
 
@@ -1725,46 +1723,56 @@ if (holdShortPt && gTk?.thr) {
 
     const st = getReportedOpsState(name);
 
-    // Solo guiamos al #1 de despegue (para que no se amontonen todos en hold short)
+    // Solo guiamos al #1 de despegue
     if (depLeader && name !== depLeader) continue;
 
-    // Si ya está airborne, no tiene sentido tenerlo en DEP
+    // Si ya voló, no guiamos más
     if (st === 'AIRBORNE') continue;
 
-    // Si está en runway occupied, ya "consumió" el slot: sacar guía
+    // Si ya ocupó pista, ya consumió el turno
     if (st === 'RUNWAY_OCCUPIED') {
       delete assignedOps[name];
       delete opsTargets[name];
       continue;
     }
 
-    // 1) Mientras esté en apron/taxi apron: mandarlo a HOLD_SHORT
-    if (st === 'APRON_STOP' || st === 'TAXI_APRON' || st === 'RUNWAY_CLEAR') {
+    // 1) Todo el flujo previo a HOLD_SHORT sigue apuntando a HOLD_SHORT
+    //    IMPORTANTE: TAXI_TO_RWY también va a HOLD_SHORT, NO a RWY.
+    if (
+      st === 'APRON_STOP' ||
+      st === 'TAXI_APRON' ||
+      st === 'RUNWAY_CLEAR' ||
+      st === 'TAXI_TO_RWY'
+    ) {
       assignedOps[name] = 'A_TO_HOLD_SHORT';
-      opsTargets[name] = { fix: 'HOLD_SHORT', lat: holdShortPt.lat, lon: holdShortPt.lon };
+      opsTargets[name] = {
+        fix: 'HOLD_SHORT',
+        lat: holdShortPt.lat,
+        lon: holdShortPt.lon,
+      };
       continue;
     }
 
-    // 2) Si ya llegó a HOLD_SHORT: decidir clearance o mantener hold
+    // 2) Recién cuando el frontend confirmó HOLD_SHORT,
+    //    el backend puede mantener HOLD_SHORT o liberar a RWY.
     if (st === 'HOLD_SHORT') {
       const runwayFree = !runwayState.inUse;
 
       if (runwayFree && canClearTakeoff) {
-        // ✅ clearance: ir a cabecera/umbral
         assignedOps[name] = 'A_TO_RWY';
-        opsTargets[name] = { fix: 'RWY', lat: gTk.thr.lat, lon: gTk.thr.lon };
+        opsTargets[name] = {
+          fix: 'RWY',
+          lat: gTk.thr.lat,
+          lon: gTk.thr.lon,
+        };
       } else {
-        // ⛔️ mantener hold short (NO clearance)
         assignedOps[name] = 'A_TO_HOLD_SHORT';
-        opsTargets[name] = { fix: 'HOLD_SHORT', lat: holdShortPt.lat, lon: holdShortPt.lon };
+        opsTargets[name] = {
+          fix: 'HOLD_SHORT',
+          lat: holdShortPt.lat,
+          lon: holdShortPt.lon,
+        };
       }
-      continue;
-    }
-
-    // 3) Si empezó a taxear a pista, mantener target RWY
-    if (st === 'TAXI_TO_RWY') {
-      assignedOps[name] = 'A_TO_RWY';
-      opsTargets[name] = { fix: 'RWY', lat: gTk.thr.lat, lon: gTk.thr.lon };
       continue;
     }
   }
