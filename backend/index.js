@@ -2383,13 +2383,23 @@ if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
       setFinalLatched(name, true);
     }
 
-    if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
-      runwayState.landings = runwayState.landings.filter(l => l.name !== name);
-      setLandingStateForward(name, 'IN_STANDS');
-      try { clearFinalEnter(name); } catch {}
-      try { b1LatchByName.delete(name); } catch {}
-      try { setFinalLatched(name, false); } catch {}
-    }
+if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
+  runwayState.landings = runwayState.landings.filter(l => l.name !== name);
+
+  // ✅ si este avión era el que figuraba ocupando pista por aterrizaje, liberarla
+  if (
+    runwayState.inUse?.name === name &&
+    runwayState.inUse?.action === 'landing'
+  ) {
+    runwayState.inUse = null;
+  }
+
+  setLandingStateForward(name, 'IN_STANDS');
+  try { clearFinalEnter(name); } catch {}
+  try { b1LatchByName.delete(name); } catch {}
+  try { setFinalLatched(name, false); } catch {}
+  try { clearATC(name); } catch {}
+}
 
     if (runwayState.landings.length || runwayState.takeoffs.length) {
       planRunwaySequence();
