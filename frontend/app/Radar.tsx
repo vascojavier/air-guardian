@@ -929,8 +929,9 @@ useEffect(() => {
 
 
 useEffect(() => {
+  if (!myPlane) return;
   maybeConfirmHoldShort();
-}, [myPlane.lat, myPlane.lon, myPlane.speed, runwayState]);
+}, [myPlane?.lat, myPlane?.lon, myPlane?.speed, runwayState]);
 
   // Secuencia/slots (de sequence-update)
   const [slots, setSlots] = useState<Array<{opId:string; type:'ARR'|'DEP'; name:string; startMs:number; endMs:number; frozen:boolean;}>>([]);
@@ -1833,23 +1834,19 @@ const markRunwayClear = () => {
 
 const requestTakeoffLabel = () => {
   apronLatchRef.current = false;
-
-  // ✅ cortar completamente cualquier resto del flujo de aterrizaje
   landingRequestedRef.current = false;
+  takeoffRequestedRef.current = true;
   finalLockedRef.current = false;
-  iAmOccupyingRef.current = null;
-  runwayOccupiedSentRef.current = false;
-  landClearShownRef.current = false;
 
-  // ❌ no apuntar localmente a cabecera
+  // ❌ no setear nav local a cabecera
   setNavTargetSafe(null);
 
-  // ✅ OPS correcto al empezar a taxear para despegar
+  // ✅ OPS correcto al empezar a taxear a pista
   emitOpsNow('TAXI_TO_RWY', 'UI_REQUEST_TAKEOFF');
 
+  // ✅ pedir turno al backend
   requestTakeoff(false);
 
-  takeoffRequestedRef.current = true;
   flashBanner(t("runway.goToHoldShort"), 'go-hold-short');
 };
 
@@ -3422,37 +3419,41 @@ function reportIfDwellInside(
 useEffect(() => {
   if (!rw) return;
 
-  const backendTarget = getBackendTargetForMe();
-  const backendFix = backendTarget?.fix ?? null;
-
-  // 1) "Liberar pista" / touchdown
   const agl = getAGLmeters();
   const speedKmh =
     (myPlane && typeof myPlane.speed === 'number') ? myPlane.speed : 0;
+
+  const backendTarget = getBackendTargetForMe();
+  const backendFix = backendTarget?.fix ?? null;
+  const assignedNow = getBackendAssignedForMe();
 
   const touchdownLike =
     isOnRunwayStrip() &&
     agl < 8 &&
     speedKmh < 80;
 
-  // reset del latch cuando ya estás en RUNWAY_CLEAR (confirmado por ops)
+  const isLandingFlow =
+    landingRequestedRef.current ||
+    assignedNow === 'FINAL' ||
+    assignedNow === 'B1';
+
   if (lastOpsStateRef.current === 'RUNWAY_CLEAR') {
     runwayOccupiedSentRef.current = false;
   }
 
-  // ✅ apenas toca pista, ya entra en flujo de aterrizaje
-  if (touchdownLike) {
+  if (touchdownLike && isLandingFlow) {
     flashBanner(t("runway.vacateRunway"), 'free-runway');
 
-    // la navegación a APRON la maneja el NAV único
     apronLatchRef.current = true;
 
     console.log('[TD DEBUG]', {
       touchdownLike,
       agl,
       speedKmh,
-      assigned: getBackendAssignedForMe(),
+      assigned: assignedNow,
       backendFix,
+      isLandingFlow,
+      takeoffRequested: takeoffRequestedRef.current,
     });
 
     if (!runwayOccupiedSentRef.current) {
@@ -3480,7 +3481,6 @@ useEffect(() => {
       socketRef.current?.emit('runway-get');
     }
   } else {
-    // ✅ RUNWAY_CLEAR sólo si backend realmente me manda al APRON
     let activeEnd: 'A' | 'B' | null = null;
     if ((rw as any).active_end === 'B') activeEnd = 'B';
     else activeEnd = 'A';
@@ -3489,7 +3489,7 @@ useEffect(() => {
       activeEnd ? isNearThreshold(activeEnd, 200) : false;
 
     const canAutoClearToApron =
-      landingRequestedRef.current &&
+      isLandingFlow &&
       !takeoffRequestedRef.current &&
       backendFix === 'APRON' &&
       (
@@ -3625,12 +3625,22 @@ useEffect(() => {
     if (serverATCRef.current) return;
 
     // 3) TAKEOFF: siempre a cabecera activa
-    if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
-      const end = rw?.active_end === 'B' ? 'B' : 'A';
-      const thr = end === 'B' ? B_runway : A_runway;
-      setNavTargetSafe(thr ?? null);
-      return;
-    }
+if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
+  const backendTarget = getBackendTargetForMe();
+
+  // ✅ si backend ya decidió HOLD_SHORT o RWY, obedecer eso
+  if (backendTarget) {
+    setNavTargetSafe({
+      latitude: backendTarget.lat,
+      longitude: backendTarget.lon,
+    });
+    return;
+  }
+
+  // ✅ mientras no haya target backend, no apuntar a ningún lado localmente
+  setNavTargetSafe(null);
+  return;
+}
 
     // 4) APRON latch → apron
     if (apronLatchRef.current) {
