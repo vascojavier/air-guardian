@@ -3411,6 +3411,20 @@ function reportIfDwellInside(
   onArrive();
 }
 
+useEffect(() => {
+  const backendTarget = getBackendTargetForMe();
+  const backendFix = backendTarget?.fix ?? null;
+  const currentOps = lastOpsStateRef.current;
+
+  if (
+    takeoffRequestedRef.current &&
+    currentOps === 'HOLD_SHORT' &&
+    backendFix === 'RWY'
+  ) {
+    flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
+  }
+}, [runwayState, myPlane.lat, myPlane.lon]);
+
 
   // === RUNWAY: Automatismos de avisos y ocupación/liberación ===
 useEffect(() => {
@@ -3429,10 +3443,13 @@ useEffect(() => {
     agl < 8 &&
     speedKmh < 80;
 
-  const isLandingFlow =
+const isLandingFlow =
+  !takeoffRequestedRef.current &&
+  (
     landingRequestedRef.current ||
     assignedNow === 'FINAL' ||
-    assignedNow === 'B1';
+    assignedNow === 'B1'
+  );
 
   if (lastOpsStateRef.current === 'RUNWAY_CLEAR') {
     runwayOccupiedSentRef.current = false;
@@ -3549,66 +3566,77 @@ useEffect(() => {
   }
 
   // solicitud despegue: guiar a cabecera, ocupar, y despegar
-  if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
-    const currentOps = lastOpsStateRef.current;
-    const backendTarget = getBackendTargetForMe();
-    const backendFix = backendTarget?.fix ?? null;
+if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
+  const currentOps = lastOpsStateRef.current;
+  const backendTarget = getBackendTargetForMe();
+  const backendFix = backendTarget?.fix ?? null;
 
-    const atHoldShort = currentOps === 'HOLD_SHORT';
-    const clearedToRunway = backendFix === 'RWY';
-    const nextLanding = (st.timeline || []).find((x: any) =>
-      x.action === 'landing' && new Date(x.at).getTime() > Date.now()
-    );
-    const gapMin = nextLanding
-      ? Math.round((new Date(nextLanding.at).getTime() - Date.now()) / 60000)
-      : 999;
+  const atHoldShort = currentOps === 'HOLD_SHORT';
+  const clearedToRunway = backendFix === 'RWY';
 
-    if (atHoldShort && clearedToRunway) {
-      const meTk = (st.takeoffs || []).find((tt: any) => tt.name === me);
-      const waited = meTk?.waitedMin ?? 0;
-      const opsMap = (runwayState as any)?.state?.opsStates || {};
-      const landings = st.landings || [];
-      const leaderL = landings[0];
+  const nextLanding = (st.timeline || []).find((x: any) =>
+    x.action === 'landing' && new Date(x.at).getTime() > Date.now()
+  );
 
-      const leaderOps = leaderL?.name ? (opsMap[leaderL.name] as OpsState | undefined) : undefined;
-      const landingOnShortFinal =
-        !!leaderL &&
-        (leaderOps === 'FINAL' || leaderOps === 'B1' || leaderOps === 'RUNWAY_OCCUPIED');
+  const gapMin = nextLanding
+    ? Math.round((new Date(nextLanding.at).getTime() - Date.now()) / 60000)
+    : 999;
 
-      const runwayBusy = !!st.inUse;
+  // 1) Está en HOLD_SHORT pero todavía sin permiso -> esperar
+  if (atHoldShort && !clearedToRunway) {
+    flashBanner("Hold short. Espere hasta que aterrice el tráfico en final.", 'hold-short-wait');
+  }
 
-      const can =
-        !runwayBusy &&
-        !landingOnShortFinal &&
-        (gapMin >= 5 || waited >= 15);
+  // 2) Ya tiene permiso para ir a pista
+  if (atHoldShort && clearedToRunway) {
+    const meTk = (st.takeoffs || []).find((tt: any) => tt.name === me);
+    const waited = meTk?.waitedMin ?? 0;
+    const opsMap = (runwayState as any)?.state?.opsStates || {};
+    const landings = st.landings || [];
+    const leaderL = landings[0];
 
-      if (can && iAmOccupyingRef.current !== 'takeoff') {
-        const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
-        const nearThr = isNearThreshold(activeEnd, 80);
-        const onRunway = isOnRunwayStrip();
+    const leaderOps = leaderL?.name
+      ? (opsMap[leaderL.name] as OpsState | undefined)
+      : undefined;
 
-        // 1) Mientras sigo en HOLD_SHORT pero ya tengo permiso,
-        //    solo mostrar clearance y dejar que la línea azul apunte a RWY.
-        if (!nearThr && !onRunway) {
-          flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
-          return;
-        }
+    const landingOnShortFinal =
+      !!leaderL &&
+      (leaderOps === 'FINAL' || leaderOps === 'B1' || leaderOps === 'RUNWAY_OCCUPIED');
 
-        // 2) Recién cuando llego a cabecera/entro en pista,
-        //    consumimos el despegue y desaparece la línea.
+    const runwayBusy = !!st.inUse;
+
+    const can =
+      !runwayBusy &&
+      !landingOnShortFinal &&
+      (gapMin >= 5 || waited >= 15);
+
+    if (can && iAmOccupyingRef.current !== 'takeoff') {
+      const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
+      const nearThr = isNearThreshold(activeEnd, 120);
+      const onRunway = isOnRunwayStrip();
+
+      // Todavía en hold short pero ya con permiso:
+      // mostrar permiso y dejar que la línea azul siga apuntando a cabecera
+      if (!nearThr && !onRunway) {
+        flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
+      } else {
+        // Ya llegó a cabecera o entró en pista:
+        // consumir el despegue y ocultar la línea azul
         emitOpsNow('RUNWAY_OCCUPIED', 'TAKEOFF_ENTER_RWY', {
           nearThr,
           onRunway,
         });
 
         iAmOccupyingRef.current = 'takeoff';
-      } else {
-        if (landingOnShortFinal) {
-          flashBanner(t("runway.trafficOnFinalWait"), 'tko-wait-final');
-        }
+        setNavTargetSafe(null);
+      }
+    } else {
+      if (landingOnShortFinal) {
+        flashBanner(t("runway.trafficOnFinalWait"), 'tko-wait-final');
       }
     }
   }
+}
 
 }, [myPlane.lat, myPlane.lon, myPlane.alt, myPlane.speed, runwayState, rw]);
 
