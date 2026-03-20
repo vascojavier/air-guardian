@@ -3583,11 +3583,29 @@ useEffect(() => {
         (gapMin >= 5 || waited >= 15);
 
       if (can && iAmOccupyingRef.current !== 'takeoff') {
-        markRunwayOccupy('takeoff');
+        const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
+        const nearThr = isNearThreshold(activeEnd, 80);
+        const onRunway = isOnRunwayStrip();
+
+        // 1) Mientras sigo en HOLD_SHORT pero ya tengo permiso,
+        //    solo mostrar clearance y dejar que la línea azul apunte a RWY.
+        if (!nearThr && !onRunway) {
+          flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
+          return;
+        }
+
+        // 2) Recién cuando llego a cabecera/entro en pista,
+        //    consumimos el despegue y desaparece la línea.
+        emitOpsNow('RUNWAY_OCCUPIED', 'TAKEOFF_ENTER_RWY', {
+          nearThr,
+          onRunway,
+        });
+
         iAmOccupyingRef.current = 'takeoff';
-        flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
       } else {
-        if (landingOnShortFinal) flashBanner(t("runway.trafficOnFinalWait"), 'tko-wait-final');
+        if (landingOnShortFinal) {
+          flashBanner(t("runway.trafficOnFinalWait"), 'tko-wait-final');
+        }
       }
     }
   }

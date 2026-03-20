@@ -2805,6 +2805,7 @@ socket.on('runway-clear', () => {
     if (lastName) {
       setLandingStateForward(lastName, 'RUNWAY_CLEAR');
       try { setFinalLatched(lastName, false); } catch {}
+      try { clearATC(lastName); } catch {}
     }
 
     planRunwaySequence();
