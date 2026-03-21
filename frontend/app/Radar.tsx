@@ -3451,9 +3451,15 @@ const isLandingFlow =
     assignedNow === 'B1'
   );
 
+
+  
+
   if (lastOpsStateRef.current === 'RUNWAY_CLEAR') {
     runwayOccupiedSentRef.current = false;
   }
+
+
+  
 
   if (touchdownLike && isLandingFlow) {
     flashBanner(t("runway.vacateRunway"), 'free-runway');
@@ -3611,25 +3617,41 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
       (gapMin >= 5 || waited >= 15);
 
     if (can && iAmOccupyingRef.current !== 'takeoff') {
-      const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
-      const nearThr = isNearThreshold(activeEnd, 120);
-      const onRunway = isOnRunwayStrip();
+  const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
+  const thr = activeEnd === 'B' ? B_runway : A_runway;
 
-      // Todavía en hold short pero ya con permiso:
-      // mostrar permiso y dejar que la línea azul siga apuntando a cabecera
-      if (!nearThr && !onRunway) {
-        flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
-      } else {
-        // Ya llegó a cabecera o entró en pista:
-        // consumir el despegue y ocultar la línea azul
-        emitOpsNow('RUNWAY_OCCUPIED', 'TAKEOFF_ENTER_RWY', {
-          nearThr,
-          onRunway,
-        });
+  const nearThr = isNearThreshold(activeEnd, 180);
+  const onRunway = isOnRunwayStrip();
 
-        iAmOccupyingRef.current = 'takeoff';
-        setNavTargetSafe(null);
-      }
+  const distToThr =
+  thr
+        ? getDistance(myPlane.lat, myPlane.lon, thr.latitude, thr.longitude)
+        : Infinity;
+
+    // ✅ detección más robusta de “ya entró a pista / ya llegó a cabecera”
+    const enteredRunwayForTakeoff =
+      onRunway ||
+      nearThr ||
+      distToThr <= 180 ||
+      ((myPlane.speed ?? 0) > 25 && distToThr <= 250);
+
+    // Todavía en hold short pero ya con permiso:
+    // mostrar permiso y dejar que la línea azul siga apuntando a cabecera
+    if (!enteredRunwayForTakeoff) {
+      flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
+    } else {
+      // Ya llegó a cabecera o entró en pista:
+      // consumir el despegue y ocultar la línea azul
+      emitOpsNow('RUNWAY_OCCUPIED', 'TAKEOFF_ENTER_RWY', {
+        nearThr,
+        onRunway,
+        distToThr,
+        speed: myPlane.speed,
+      });
+
+      iAmOccupyingRef.current = 'takeoff';
+      setNavTargetSafe(null);
+    }
     } else {
       if (landingOnShortFinal) {
         flashBanner(t("runway.trafficOnFinalWait"), 'tko-wait-final');
@@ -3637,6 +3659,36 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
     }
   }
 }
+
+
+// ✅ PEGAR ACÁ
+  if (takeoffRequestedRef.current) {
+    const currentOps = lastOpsStateRef.current;
+
+    if (currentOps === 'RUNWAY_OCCUPIED') {
+      const aglNow = getAGLmeters();
+      const speedNow = myPlane?.speed ?? 0;
+      const onRunwayNow = isOnRunwayStrip();
+
+      const becameAirborne =
+        !onRunwayNow &&
+        aglNow > 12 &&
+        speedNow > 70;
+
+      if (becameAirborne) {
+        emitOpsNow('AIRBORNE', 'TAKEOFF_LIFTOFF', {
+          agl: aglNow,
+          speed: speedNow,
+          onRunway: onRunwayNow,
+        });
+
+        iAmOccupyingRef.current = null;
+        setNavTargetSafe(null);
+        takeoffRequestedRef.current = false;
+      }
+    }
+  }
+
 
 }, [myPlane.lat, myPlane.lon, myPlane.alt, myPlane.speed, runwayState, rw]);
 
@@ -3668,10 +3720,18 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
     if (serverATCRef.current) return;
 
     // 3) TAKEOFF: siempre a cabecera activa
+// 3) TAKEOFF: seguir target backend solo hasta entrar en pista
 if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
+  const currentOps = lastOpsStateRef.current;
   const backendTarget = getBackendTargetForMe();
 
-  // ✅ si backend ya decidió HOLD_SHORT o RWY, obedecer eso
+  // ✅ si ya entré en pista, no volver a dibujar línea azul
+  if (currentOps === 'RUNWAY_OCCUPIED') {
+    setNavTargetSafe(null);
+    return;
+  }
+
+  // ✅ si backend decidió HOLD_SHORT o RWY, obedecer eso
   if (backendTarget) {
     setNavTargetSafe({
       latitude: backendTarget.lat,
@@ -3680,7 +3740,6 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
     return;
   }
 
-  // ✅ mientras no haya target backend, no apuntar a ningún lado localmente
   setNavTargetSafe(null);
   return;
 }
