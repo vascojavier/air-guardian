@@ -335,6 +335,7 @@ const Radar = () => {
   const opsTargetsRef = useRef<Record<string, { fix:string; lat:number; lon:number }> | null>(null);
   const lastApronStopSentRef = useRef(0);
   const runwayOccupiedSentRef = useRef(false);
+  const takeoffEntryLatchedRef = useRef(false);
   
 
 
@@ -1837,6 +1838,7 @@ const requestTakeoffLabel = () => {
 
   // ✅ NO apuntar localmente a cabecera
   setNavTargetSafe(null);
+  takeoffEntryLatchedRef.current = false;
 
   // ✅ estado correcto al empezar a taxear para despegar
   emitOpsNow('TAXI_TO_RWY', 'UI_REQUEST_TAKEOFF');
@@ -3617,36 +3619,41 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
       (gapMin >= 5 || waited >= 15);
 
     if (can && iAmOccupyingRef.current !== 'takeoff') {
-  const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
-  const thr = activeEnd === 'B' ? B_runway : A_runway;
+const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
+const thr = activeEnd === 'B' ? B_runway : A_runway;
 
-  const nearThr = isNearThreshold(activeEnd, 180);
-  const onRunway = isOnRunwayStrip();
+const nearThr = isNearThreshold(activeEnd, 220);
+const onRunway = isOnRunwayStrip();
 
-  const distToThr =
+const distToThr =
   thr
-        ? getDistance(myPlane.lat, myPlane.lon, thr.latitude, thr.longitude)
+    ? getDistance(myPlane.lat, myPlane.lon, thr.latitude, thr.longitude)
         : Infinity;
 
-    // ✅ detección más robusta de “ya entró a pista / ya llegó a cabecera”
-    const enteredRunwayForTakeoff =
+    const speedNow = myPlane.speed ?? 0;
+
+    // ✅ Latch: si ya estuvo suficientemente cerca / entrando, no perder ese evento
+    if (
       onRunway ||
       nearThr ||
-      distToThr <= 180 ||
-      ((myPlane.speed ?? 0) > 25 && distToThr <= 250);
+      distToThr <= 220 ||
+      (speedNow > 15 && distToThr <= 320)
+    ) {
+      takeoffEntryLatchedRef.current = true;
+    }
+
+    const enteredRunwayForTakeoff = takeoffEntryLatchedRef.current;
 
     // Todavía en hold short pero ya con permiso:
     // mostrar permiso y dejar que la línea azul siga apuntando a cabecera
     if (!enteredRunwayForTakeoff) {
       flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
     } else {
-      // Ya llegó a cabecera o entró en pista:
-      // consumir el despegue y ocultar la línea azul
       emitOpsNow('RUNWAY_OCCUPIED', 'TAKEOFF_ENTER_RWY', {
         nearThr,
         onRunway,
         distToThr,
-        speed: myPlane.speed,
+        speed: speedNow,
       });
 
       iAmOccupyingRef.current = 'takeoff';
@@ -3675,17 +3682,18 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
         aglNow > 12 &&
         speedNow > 70;
 
-      if (becameAirborne) {
-        emitOpsNow('AIRBORNE', 'TAKEOFF_LIFTOFF', {
-          agl: aglNow,
-          speed: speedNow,
-          onRunway: onRunwayNow,
-        });
+    if (becameAirborne) {
+      emitOpsNow('AIRBORNE', 'TAKEOFF_LIFTOFF', {
+        agl: aglNow,
+        speed: speedNow,
+        onRunway: onRunwayNow,
+      });
 
-        iAmOccupyingRef.current = null;
-        setNavTargetSafe(null);
-        takeoffRequestedRef.current = false;
-      }
+      iAmOccupyingRef.current = null;
+      setNavTargetSafe(null);
+      takeoffRequestedRef.current = false;
+      takeoffEntryLatchedRef.current = false;
+    }
     }
   }
 
