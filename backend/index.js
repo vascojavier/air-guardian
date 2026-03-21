@@ -1624,29 +1624,32 @@ function hasAnyArrivalInFinalLike() {
       // 1) Si está en pista o saliendo de pista => mandarlo al APRON
 if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
   const wantsTakeoff = runwayState.takeoffs?.some(t => t.name === name);
-  const stRep        = getReportedOpsState(name);
+  const stRep = getReportedOpsState(name);
 
-  // SOLO si el estado reportado ACTUAL es FINAL, no tocar todavía
+  // Si está en FINAL, no tocar
   if (stRep === 'FINAL') {
     continue;
   }
 
-  // Sólo bloquear APRON si realmente está en flujo lógico de despegue
-  const isRealTakeoffGroundFlow =
+  // ✅ NUEVO: si está ocupando pista por DESPEGUE, no mandarlo al APRON
+  const isTakeoffRunwayFlow =
     wantsTakeoff &&
     (
+      stRep === 'RUNWAY_OCCUPIED' ||
+      stRep === 'RUNWAY_CLEAR' ||
       stRep === 'APRON_STOP' ||
       stRep === 'TAXI_APRON' ||
       stRep === 'HOLD_SHORT' ||
       stRep === 'TAXI_TO_RWY'
     );
 
-  if (isRealTakeoffGroundFlow) {
+  if (isTakeoffRunwayFlow) {
     continue;
   }
 
+  // Solo flujo real de aterrizaje/liberación de pista va al APRON
   assignedOps[name] = 'A_TO_APRON';
-  opsTargets[name]  = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
+  opsTargets[name] = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
   continue;
 }
 
