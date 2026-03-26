@@ -339,8 +339,6 @@ const Radar = () => {
   
 
 
-
-
   // (opcional) si querés permitir update SOLO de distancia sin re-render grande
   const lastWinnerDistanceRef = useRef<number>(NaN);
 
@@ -3596,75 +3594,57 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
   }
 
   // 2) Ya tiene permiso para ir a pista
-  if (atHoldShort && clearedToRunway) {
-    const meTk = (st.takeoffs || []).find((tt: any) => tt.name === me);
-    const waited = meTk?.waitedMin ?? 0;
-    const opsMap = (runwayState as any)?.state?.opsStates || {};
-    const landings = st.landings || [];
-    const leaderL = landings[0];
+if (atHoldShort && clearedToRunway && iAmOccupyingRef.current !== 'takeoff') {
+  const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
+  const thr = activeEnd === 'B' ? B_runway : A_runway;
 
-    const leaderOps = leaderL?.name
-      ? (opsMap[leaderL.name] as OpsState | undefined)
-      : undefined;
+  const nearThr = isNearThreshold(activeEnd, 220);
+  const onRunway = isOnRunwayStrip();
 
-    const landingOnShortFinal =
-      !!leaderL &&
-      (leaderOps === 'FINAL' || leaderOps === 'B1' || leaderOps === 'RUNWAY_OCCUPIED');
+  const distToThr =
+    thr
+      ? getDistance(myPlane.lat, myPlane.lon, thr.latitude, thr.longitude)
+      : Infinity;
 
-    const runwayBusy = !!st.inUse;
+  const speedNow = myPlane.speed ?? 0;
 
-    const can =
-      !runwayBusy &&
-      !landingOnShortFinal &&
-      (gapMin >= 5 || waited >= 15);
-
-    if (can && iAmOccupyingRef.current !== 'takeoff') {
-const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
-const thr = activeEnd === 'B' ? B_runway : A_runway;
-
-const nearThr = isNearThreshold(activeEnd, 220);
-const onRunway = isOnRunwayStrip();
-
-const distToThr =
-  thr
-    ? getDistance(myPlane.lat, myPlane.lon, thr.latitude, thr.longitude)
-        : Infinity;
-
-    const speedNow = myPlane.speed ?? 0;
-
-    // ✅ Latch: si ya estuvo suficientemente cerca / entrando, no perder ese evento
-    if (
-      onRunway ||
-      nearThr ||
-      distToThr <= 220 ||
-      (speedNow > 15 && distToThr <= 320)
-    ) {
-      takeoffEntryLatchedRef.current = true;
-    }
-
-    const enteredRunwayForTakeoff = takeoffEntryLatchedRef.current;
-
-    // Todavía en hold short pero ya con permiso:
-    // mostrar permiso y dejar que la línea azul siga apuntando a cabecera
-    if (!enteredRunwayForTakeoff) {
-      flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
-    } else {
-      emitOpsNow('RUNWAY_OCCUPIED', 'TAKEOFF_ENTER_RWY', {
-        nearThr,
-        onRunway,
-        distToThr,
-        speed: speedNow,
-      });
-
-      iAmOccupyingRef.current = 'takeoff';
-      setNavTargetSafe(null);
-    }
-    } else {
-      if (landingOnShortFinal) {
-        flashBanner(t("runway.trafficOnFinalWait"), 'tko-wait-final');
-      }
-    }
+  // latch: si ya estuvo suficientemente cerca de cabecera / entrando a pista,
+  // no perder ese evento aunque un tick después cambie la geometría
+  if (
+    onRunway ||
+    nearThr ||
+    distToThr <= 220 ||
+    (speedNow > 15 && distToThr <= 320)
+  ) {
+    takeoffEntryLatchedRef.current = true;
   }
+
+  const enteredRunwayForTakeoff = takeoffEntryLatchedRef.current;
+
+  // todavía con permiso pero sin entrar a pista
+  if (!enteredRunwayForTakeoff) {
+    flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
+  } else {
+    console.log('[OPS] takeoff entry -> RUNWAY_OCCUPIED', {
+      nearThr,
+      onRunway,
+      distToThr,
+      speedNow,
+      currentOps,
+      backendFix,
+    });
+
+    emitOpsNow('RUNWAY_OCCUPIED', 'TAKEOFF_ENTER_RWY', {
+      nearThr,
+      onRunway,
+      distToThr,
+      speed: speedNow,
+    });
+
+    iAmOccupyingRef.current = 'takeoff';
+    setNavTargetSafe(null);
+  }
+}
 }
 
 
