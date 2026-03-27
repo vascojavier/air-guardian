@@ -1623,7 +1623,6 @@ function hasAnyArrivalInFinalLike() {
 
       // 1) Si está en pista o saliendo de pista => mandarlo al APRON
 if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
-  const wantsTakeoff = runwayState.takeoffs?.some(t => t.name === name);
   const stRep = getReportedOpsState(name);
 
   // Si está en FINAL, no tocar
@@ -1631,19 +1630,20 @@ if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
     continue;
   }
 
-  // ✅ NUEVO: si está ocupando pista por DESPEGUE, no mandarlo al APRON
-  const isTakeoffRunwayFlow =
-    wantsTakeoff &&
-    (
-      stRep === 'RUNWAY_OCCUPIED' ||
-      stRep === 'RUNWAY_CLEAR' ||
-      stRep === 'APRON_STOP' ||
-      stRep === 'TAXI_APRON' ||
-      stRep === 'HOLD_SHORT' ||
-      stRep === 'TAXI_TO_RWY'
-    );
+  // ✅ Si este avión está siendo tratado por backend como despegue en pista,
+  // no mandarlo jamás al APRON
+  const isCurrentTakeoffInUse =
+    runwayState.inUse?.name === name &&
+    runwayState.inUse?.action === 'takeoff';
 
-  if (isTakeoffRunwayFlow) {
+  // ✅ También proteger el flujo completo de despegue en tierra
+  const isTakeoffGroundFlow =
+    stRep === 'APRON_STOP' ||
+    stRep === 'TAXI_APRON' ||
+    stRep === 'HOLD_SHORT' ||
+    stRep === 'TAXI_TO_RWY';
+
+  if (isCurrentTakeoffInUse || isTakeoffGroundFlow) {
     continue;
   }
 
