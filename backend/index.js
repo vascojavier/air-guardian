@@ -1632,20 +1632,32 @@ if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
 
   // ✅ Si este avión está siendo tratado por backend como despegue en pista,
   // no mandarlo jamás al APRON
+if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
+  const stRep = getReportedOpsState(name);
+
+  if (stRep === 'FINAL') {
+    continue;
+  }
+
+  const wantsTakeoff =
+    runwayState.takeoffs?.some(t => t.name === name);
+
   const isCurrentTakeoffInUse =
     runwayState.inUse?.name === name &&
     runwayState.inUse?.action === 'takeoff';
 
-  // ✅ También proteger el flujo completo de despegue en tierra
-  const isTakeoffGroundFlow =
-    stRep === 'APRON_STOP' ||
-    stRep === 'TAXI_APRON' ||
-    stRep === 'HOLD_SHORT' ||
-    stRep === 'TAXI_TO_RWY';
+  // ✅ Solo proteger APRON si realmente sigue en flujo de despegue
+  const isProtectedTakeoffFlow = !!wantsTakeoff || !!isCurrentTakeoffInUse;
 
-  if (isCurrentTakeoffInUse || isTakeoffGroundFlow) {
+  if (isProtectedTakeoffFlow) {
     continue;
   }
+
+  // ✅ Si no está protegido como despegue, entonces sí va al APRON
+  assignedOps[name] = 'A_TO_APRON';
+  opsTargets[name] = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
+  continue;
+}
 
   // Solo flujo real de aterrizaje/liberación de pista va al APRON
   assignedOps[name] = 'A_TO_APRON';

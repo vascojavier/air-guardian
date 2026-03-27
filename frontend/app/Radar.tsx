@@ -3598,7 +3598,7 @@ if (atHoldShort && clearedToRunway && iAmOccupyingRef.current !== 'takeoff') {
   const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
   const thr = activeEnd === 'B' ? B_runway : A_runway;
 
-  const nearThr = isNearThreshold(activeEnd, 220);
+  const nearThr = isNearThreshold(activeEnd, 90);
   const onRunway = isOnRunwayStrip();
 
   const distToThr =
@@ -3608,20 +3608,20 @@ if (atHoldShort && clearedToRunway && iAmOccupyingRef.current !== 'takeoff') {
 
   const speedNow = myPlane.speed ?? 0;
 
-  // latch: si ya estuvo suficientemente cerca de cabecera / entrando a pista,
-  // no perder ese evento aunque un tick después cambie la geometría
+  // ✅ mucho más estricto:
+  // hold short NO debe contar como entrada a pista
   if (
     onRunway ||
-    nearThr ||
-    distToThr <= 220 ||
-    (speedNow > 15 && distToThr <= 320)
+    distToThr <= 90 ||
+    (nearThr && speedNow > 8) ||
+    (speedNow > 25 && distToThr <= 140)
   ) {
     takeoffEntryLatchedRef.current = true;
   }
 
   const enteredRunwayForTakeoff = takeoffEntryLatchedRef.current;
 
-  // todavía con permiso pero sin entrar a pista
+  // todavía con permiso pero sin entrar realmente a pista
   if (!enteredRunwayForTakeoff) {
     flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
   } else {
