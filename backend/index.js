@@ -174,6 +174,44 @@ app.use(express.json());
 const userLocations = {};
 const socketIdToName = {};
 
+function getUserIntent(name) {
+  return userLocations[name]?.intent ?? null;
+}
+
+function setUserIntent(name, intent) {
+  if (!name) return;
+  if (!userLocations[name]) return;
+  userLocations[name].intent = intent ?? null;
+}
+
+function clearUserIntent(name) {
+  if (!name) return;
+  if (!userLocations[name]) return;
+  userLocations[name].intent = null;
+}
+
+function getIntentOf(name) {
+  if (!name) return null;
+
+  // 1) si está ocupando pista, eso manda
+  if (runwayState.inUse?.name === name) {
+    return runwayState.inUse.action === 'takeoff' ? 'takeoff' : 'landing';
+  }
+
+  // 2) si está en cola de despegue
+  if ((runwayState.takeoffs || []).some(t => t.name === name)) {
+    return 'takeoff';
+  }
+
+  // 3) si está en cola de aterrizaje
+  if ((runwayState.landings || []).some(l => l.name === name)) {
+    return 'landing';
+  }
+
+  // 4) fallback: última intención reportada por el frontend
+  return userLocations?.[name]?.intent || null;
+}
+
 // === Airfield (pista activa en memoria) ===
 let lastAirfield = null;
 
@@ -1434,25 +1472,7 @@ if (stReported === 'FINAL') {
     // 1) LÍDER: si ya confirmó B1 (o está latcheado), backend lo guía a FINAL
     //    Si NO confirmó B1, backend lo guía a B1 (A_TO_B1)
     // -------------------------
-    if (leaderNow && name === leaderNow) {
-      const stLeadNow = getReportedOpsState(name);
 
-      // ✅ SOLO si el frontend ya confirmó B1
-      if (stLeadNow === 'B1' && gNow?.thr) {
-        assignedOps[name] = 'FINAL';
-        opsTargets[name] = { fix: 'FINAL', lat: gNow.thr.lat, lon: gNow.thr.lon };
-        setFinalLatched(name, true);
-      } else {
-        assignedOps[name] = 'A_TO_B1';
-
-        const lat = asg?.b1?.lat;
-        const lon = asg?.b1?.lon;
-        if (typeof lat === 'number' && typeof lon === 'number') {
-          opsTargets[name] = { fix: 'B1', lat, lon };
-        }
-      }
-      continue;
-    }
     if (leaderNow && name === leaderNow) {
       const stLeadNow = getReportedOpsState(name);
 
@@ -1485,19 +1505,6 @@ if (leaderInFinalStrict && secondNow && name === secondNow) {
   continue;
 }
 
-    // -------------------------
-    // 2) NO-LÍDER: tu lógica original
-    // -------------------------
-    if (b1Latched) {
-      assignedOps[name] = 'A_TO_B1';
-
-      const lat = asg?.b1?.lat;
-      const lon = asg?.b1?.lon;
-      if (typeof lat === 'number' && typeof lon === 'number') {
-        opsTargets[name] = { fix: 'B1', lat, lon };
-      }
-      continue;
-    }
 
     // -------------------------
     // 2) NO-LÍDER: tu lógica original
@@ -1625,16 +1632,6 @@ function hasAnyArrivalInFinalLike() {
 if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
   const stRep = getReportedOpsState(name);
 
-  // Si está en FINAL, no tocar
-  if (stRep === 'FINAL') {
-    continue;
-  }
-
-  // ✅ Si este avión está siendo tratado por backend como despegue en pista,
-  // no mandarlo jamás al APRON
-if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
-  const stRep = getReportedOpsState(name);
-
   if (stRep === 'FINAL') {
     continue;
   }
@@ -1646,20 +1643,15 @@ if (st === 'RUNWAY_OCCUPIED' || st === 'RUNWAY_CLEAR' || st === 'TAXI_APRON') {
     runwayState.inUse?.name === name &&
     runwayState.inUse?.action === 'takeoff';
 
-  // ✅ Solo proteger APRON si realmente sigue en flujo de despegue
-  const isProtectedTakeoffFlow = !!wantsTakeoff || !!isCurrentTakeoffInUse;
+  // Si todavía está en flujo real de despegue, NO mandarlo al APRON
+  const isProtectedTakeoffFlow =
+    !!wantsTakeoff || !!isCurrentTakeoffInUse;
 
   if (isProtectedTakeoffFlow) {
     continue;
   }
 
-  // ✅ Si no está protegido como despegue, entonces sí va al APRON
-  assignedOps[name] = 'A_TO_APRON';
-  opsTargets[name] = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
-  continue;
-}
-
-  // Solo flujo real de aterrizaje/liberación de pista va al APRON
+  // Si no está en despegue, entonces sí es flujo de aterrizaje/liberación
   assignedOps[name] = 'A_TO_APRON';
   opsTargets[name] = { fix: 'APRON', lat: apronPt.lat, lon: apronPt.lon };
   continue;
@@ -2119,7 +2111,8 @@ io.on('connection', (socket) => {
       type = 'unknown',
       speed = 0,
       callsign = '',
-      aircraftIcon = '2.png'
+      aircraftIcon = '2.png',
+      intent = null,
     } = data;
 
     if (!name || typeof latitude !== 'number' || typeof longitude !== 'number') return;
@@ -2142,6 +2135,7 @@ io.on('connection', (socket) => {
       speed,
       callsign,
       icon: aircraftIcon,
+      intent, // ✅ NUEVO
       timestamp: Date.now(),
       socketId: socket.id
     };
@@ -2168,6 +2162,7 @@ io.on('connection', (socket) => {
   speed,
   callsign,
   aircraftIcon: aircraftIcon,
+  intent, // ✅ NUEVO
   ts: Date.now(),
 };
 
@@ -2345,14 +2340,22 @@ socket.on('ops/state', (msg) => {
 
     // ✅ Trigger: flanco hacia RUNWAY_OCCUPIED
 if (prev !== 'RUNWAY_OCCUPIED' && acceptedState === 'RUNWAY_OCCUPIED') {
-  // ✅ si aterriza, no puede seguir figurando como DEP
-  runwayState.takeoffs = (runwayState.takeoffs || []).filter(t => t.name !== name);
+  const currentIntent = getIntentOf(name);
 
-  const didConsumeLdg = consumeLeaderOnRunwayOccupied(name);
-  if (didConsumeLdg) return;
+  if (currentIntent === 'landing') {
+    const didConsumeLdg = consumeLeaderOnRunwayOccupied(name);
+    if (didConsumeLdg) return;
+  } else if (currentIntent === 'takeoff') {
+    const didConsumeDep = consumeTakeoffOnRunwayOccupied(name);
+    if (didConsumeDep) return;
+  } else {
+    // fallback defensivo si por alguna razón no hay intent
+    const didConsumeLdg = consumeLeaderOnRunwayOccupied(name);
+    if (didConsumeLdg) return;
 
-  const didConsumeDep = consumeTakeoffOnRunwayOccupied(name);
-  if (didConsumeDep) return;
+    const didConsumeDep = consumeTakeoffOnRunwayOccupied(name);
+    if (didConsumeDep) return;
+  }
 }
 
     // Ajustes suaves al scheduler
@@ -2382,11 +2385,15 @@ if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
       try { setFinalLatched(name, false); } catch {}
     }
 
-    if (acceptedState === 'AIRBORNE') {
-      try { setFinalLatched(name, false); } catch {}
-      runwayState.takeoffs = (runwayState.takeoffs || []).filter(t => t.name !== name);
-      clearATC(name);
-    }
+if (acceptedState === 'AIRBORNE') {
+  try { setFinalLatched(name, false); } catch {}
+  runwayState.takeoffs = (runwayState.takeoffs || []).filter(t => t.name !== name);
+  clearATC(name);
+
+  if (getUserIntent(name) === 'takeoff') {
+    clearUserIntent(name);
+  }
+}
 
     if (acceptedState === 'B1' || acceptedState === 'FINAL') {
       const L = runwayState.landings.find(l => l.name === name);
@@ -2399,21 +2406,26 @@ if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
     }
 
 if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
-  runwayState.landings = runwayState.landings.filter(l => l.name !== name);
+  if (getUserIntent(name) === 'landing') {
+    runwayState.landings = runwayState.landings.filter(l => l.name !== name);
 
-  // ✅ si este avión era el que figuraba ocupando pista por aterrizaje, liberarla
-  if (
-    runwayState.inUse?.name === name &&
-    runwayState.inUse?.action === 'landing'
-  ) {
-    runwayState.inUse = null;
+    if (
+      runwayState.inUse?.name === name &&
+      runwayState.inUse?.action === 'landing'
+    ) {
+      runwayState.inUse = null;
+    }
+
+    setLandingStateForward(name, 'IN_STANDS');
+    try { clearFinalEnter(name); } catch {}
+    try { b1LatchByName.delete(name); } catch {}
+    try { setFinalLatched(name, false); } catch {}
+    try { clearATC(name); } catch {}
+
+    if (acceptedState === 'APRON_STOP') {
+      clearUserIntent(name);
+    }
   }
-
-  setLandingStateForward(name, 'IN_STANDS');
-  try { clearFinalEnter(name); } catch {}
-  try { b1LatchByName.delete(name); } catch {}
-  try { setFinalLatched(name, false); } catch {}
-  try { clearATC(name); } catch {}
 }
 
     if (runwayState.landings.length || runwayState.takeoffs.length) {
@@ -2602,10 +2614,12 @@ socket.on('air-guardian/leave', () => {
   }
 
   // ►► (AGREGADO) limpiar de colas si corresponde
-  runwayState.landings = runwayState.landings.filter(x => x.name !== name);
-  runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
-  planRunwaySequence();
-  publishRunwayState();
+runwayState.landings = runwayState.landings.filter(x => x.name !== name);
+runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
+try { setFinalLatched(name, false); } catch {}
+clearUserIntent(name);
+planRunwaySequence();
+publishRunwayState();
 });
 
 
@@ -2674,8 +2688,9 @@ socket.on('runway-request', (msg) => {
     if (!name || !action) return;
 
     if (action === 'land') {
-
+      setUserIntent(name, 'landing');
       runwayState.takeoffs = (runwayState.takeoffs || []).filter(t => t.name !== name);
+      
 
             // ✅ RESET completo de aproximación/OPS al pedir aterrizaje (evita "FINAL fantasma")
       try { opsReportedByName.delete(name); } catch {}
@@ -2740,6 +2755,8 @@ else if (action === 'takeoff') {
     });
     return;
   }
+
+  setUserIntent(name, 'takeoff');
 
   const idx = runwayState.takeoffs.findIndex(x => x.name === name);
   if (idx === -1) {

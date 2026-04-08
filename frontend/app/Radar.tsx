@@ -318,7 +318,7 @@ const Radar = () => {
     // fallback: dejá que el sistema elija
     undefined;
   const { settings } = useSettings();
-  const zoomDebounceRef = useRef<NodeJS.Timeout|null>(null);
+  const zoomDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const gpsWatchRef = useRef<Location.LocationSubscription | null>(null);
   const gpsBusyRef = useRef(false);
   const isProgrammaticMoveRef = useRef(false);
@@ -327,8 +327,8 @@ const Radar = () => {
   // ✅ evita setState repetidos cuando el “winner” es el mismo
   const lastWinnerRef = useRef<string>("");
   const lastPlanesSigRef = useRef<string>(""); // para setPlanes
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const socketRef = useRef<ReturnType<typeof io> | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const socketRef = useRef<Socket | null>(null);
   const freezeBeaconEngineRef = useRef<boolean>(false);
   const lastSentOpsRef = useRef<string | null>(null);
   const assignedRef = useRef<string | null>(null);
@@ -407,9 +407,9 @@ const refreshPinnedDistance = () => {
 
 
   // único timer
-  const holdTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // debounce solo para TA
-  const taDebounceRef = useRef<NodeJS.Timeout | null>(null);
+  const taDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const TA_DEBOUNCE_MS = 400;
   const snoozeUntilRef = useRef<number>(0);
   const snoozeIdRef = useRef<string | null>(null);
@@ -775,6 +775,7 @@ useFocusEffect(
       // 2) RESET TOTAL de LATCHES / REFS (tierra + runway + apron)
       landingRequestedRef.current = false;
       takeoffRequestedRef.current = false;
+      intentRef.current = null;
       finalLockedRef.current = false;
 
       apronLatchRef.current = false;
@@ -964,6 +965,7 @@ const emitUpdate = (p: PosUpdate) => {
     speed: typeof p.speed === 'number' ? p.speed : (myPlaneRef.current?.speed ?? 0),
     callsign: callsign || '',
     aircraftIcon: aircraftIcon || '2.png',
+    intent: intentRef.current,
     isMotorized,
   });
   maybeConfirmTaxiApron();   // ✅ NUEVO
@@ -1367,6 +1369,7 @@ const [banner, setBanner] = useState<{ text: string; key?: string } | null>(null
 const takeoffRequestedRef = useRef(false);
 const landingRequestedRef = useRef(false);
 const iAmOccupyingRef = useRef<null | 'landing' | 'takeoff'>(null); // sé si marqué occupy
+const intentRef = useRef<'landing' | 'takeoff' | null>(null);
 
 // cooldown anti-spam para banners
 const lastBannerAtRef = useRef<Record<string, number>>({});
@@ -1826,8 +1829,10 @@ const markRunwayClear = () => {
     lastGroundSeenAtRef.current = 0;
     airborneCandidateSinceRef.current = Date.now();
 
+    intentRef.current = 'landing';
     requestLanding();
     landingRequestedRef.current = true;
+    takeoffRequestedRef.current = false;
   };
 
 
@@ -1843,8 +1848,12 @@ const requestTakeoffLabel = () => {
 
   requestTakeoff(false);
 
-  takeoffRequestedRef.current = true;
-  flashBanner(t("runway.goToHoldShort"), 'go-hold-short');
+intentRef.current = 'takeoff';
+requestTakeoff(false);
+
+takeoffRequestedRef.current = true;
+landingRequestedRef.current = false;
+flashBanner(t("runway.goToHoldShort"), 'go-hold-short');
 };
 
 
@@ -1852,6 +1861,7 @@ const cancelRunwayLabel = () => {
   cancelMyRequest();
   landingRequestedRef.current = false;
   takeoffRequestedRef.current = false;
+  intentRef.current = null;
   finalLockedRef.current = false;
   navPhaseRef.current = null;
   prevIdxRef.current = null;
@@ -1913,18 +1923,19 @@ useFocusEffect(
         };
 
         // ✅ IMPORTANTE: emitimos con NEXT (no con myPlane viejo)
-        register({
-          name: username,
-          latitude: next.lat,
-          longitude: next.lon,
-          alt: next.alt,
-          heading: next.heading,
-          type: aircraftModel,
-          speed: next.speed,
-          callsign: callsign || '',
-          aircraftIcon: aircraftIcon || '2.png',
-          isMotorized,
-        });
+      register({
+        name: username,
+        latitude: next.lat,
+        longitude: next.lon,
+        alt: next.alt,
+        heading: next.heading,
+        type: aircraftModel,
+        speed: next.speed,
+        callsign: callsign || '',
+        aircraftIcon: aircraftIcon || '2.png',
+        intent: intentRef.current,
+        isMotorized,
+      });
 
         return next;
       });
@@ -1941,6 +1952,7 @@ useFocusEffect(
         speed: myPlane.speed,
         callsign: callsign || '',
         aircraftIcon: aircraftIcon || '2.png',
+        intent: intentRef.current,
         isMotorized,
       });
     }
@@ -2838,6 +2850,16 @@ s.on('ops/state', (msg: any) => {
   if (name === me) {
     lastOpsStateRef.current = next;
     lastOpsStateTsRef.current = Date.now();
+
+    if (next === 'APRON_STOP' && intentRef.current === 'landing') {
+      intentRef.current = null;
+      landingRequestedRef.current = false;
+    }
+
+    if (next === 'AIRBORNE' && intentRef.current === 'takeoff') {
+      intentRef.current = null;
+      takeoffRequestedRef.current = false;
+    }
   }
 
 
@@ -3625,24 +3647,25 @@ if (atHoldShort && clearedToRunway && iAmOccupyingRef.current !== 'takeoff') {
   if (!enteredRunwayForTakeoff) {
     flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
   } else {
-    console.log('[OPS] takeoff entry -> RUNWAY_OCCUPIED', {
-      nearThr,
-      onRunway,
-      distToThr,
-      speedNow,
-      currentOps,
-      backendFix,
-    });
+console.log('[OPS] takeoff entry -> RUNWAY_OCCUPIED', {
+  nearThr,
+  onRunway,
+  distToThr,
+  speedNow,
+  currentOps,
+  backendFix,
+});
 
-    emitOpsNow('RUNWAY_OCCUPIED', 'TAKEOFF_ENTER_RWY', {
-      nearThr,
-      onRunway,
-      distToThr,
-      speed: speedNow,
-    });
+intentRef.current = 'takeoff'; // ✅ reforzar intención justo al entrar
+emitOpsNow('RUNWAY_OCCUPIED', 'TAKEOFF_ENTER_RWY', {
+  nearThr,
+  onRunway,
+  distToThr,
+  speed: speedNow,
+});
 
-    iAmOccupyingRef.current = 'takeoff';
-    setNavTargetSafe(null);
+iAmOccupyingRef.current = 'takeoff';
+setNavTargetSafe(null);
   }
 }
 }
@@ -3673,6 +3696,7 @@ if (atHoldShort && clearedToRunway && iAmOccupyingRef.current !== 'takeoff') {
       setNavTargetSafe(null);
       takeoffRequestedRef.current = false;
       takeoffEntryLatchedRef.current = false;
+      intentRef.current = null;
     }
     }
   }

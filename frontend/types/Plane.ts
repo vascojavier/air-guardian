@@ -15,5 +15,5 @@ export interface Plane {
   timeToImpact?: number; // ⏱️ nuevo
   ops?: OpsState | null; // ✅ agregado
   lastSeenTs?: number;
-  
+  intent?: 'landing' | 'takeoff' | null;
 }
