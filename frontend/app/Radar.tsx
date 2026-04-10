@@ -938,6 +938,7 @@ useEffect(() => {
   // Target de navegación que llega por ATC (o por tu lógica local)
   const [navTarget, setNavTarget] = useState<LatLon | null>(null);
   const mapRef = useRef<MapView | null>(null);
+  const [navPath, setNavPath] = useState<LatLon[]>([]);
  
   // ======================
 // Emisor único de updates
@@ -1024,7 +1025,293 @@ function setNavTargetSafe(next: { latitude: number; longitude: number } | null) 
   setNavTarget(next);
 }
 
+type NavLL = { latitude: number; longitude: number };
 
+function normalizeHeadingDeg(h?: number): number {
+  const v = Number(h ?? 0);
+  return ((v % 360) + 360) % 360;
+}
+
+function estimateBankDeg(type?: string): number {
+  const t = String(type || '').toUpperCase();
+
+  if (t.includes('AIRBUS') || t.includes('BOEING') || t.includes('AIRLINER')) return 18;
+  if (t.includes('JET')) return 22;
+  if (t.includes('TWIN') || t.includes('BIMOTOR') || t.includes('TURBOPROP')) return 24;
+  if (t.includes('GLIDER') || t.includes('PLANEADOR')) return 28;
+
+  return 25;
+}
+
+function getHoldingRadiusM(type?: string, speedKmh?: number): number {
+  const vMps = Math.max(18, (Number(speedKmh ?? 120) * 1000) / 3600);
+  const bankDeg = estimateBankDeg(type);
+  const g = 9.81;
+  const bankRad = (bankDeg * Math.PI) / 180;
+
+  const physicalR = (vMps * vMps) / (g * Math.tan(bankRad));
+
+  const t = String(type || '').toUpperCase();
+  let minR = 140;
+  let maxR = 1400;
+
+  if (t.includes('GLIDER') || t.includes('PLANEADOR') || t.includes('SAILPLANE')) {
+    minR = 100; maxR = 260;
+  } else if (t.includes('CESSNA') || t.includes('PIPER') || t.includes('LIGHT') || t.includes('ULM')) {
+    minR = 140; maxR = 380;
+  } else if (t.includes('TWIN') || t.includes('BIMOTOR') || t.includes('TURBOPROP')) {
+    minR = 220; maxR = 650;
+  } else if (t.includes('JET') && !t.includes('AIRBUS') && !t.includes('BOEING')) {
+    minR = 350; maxR = 900;
+  } else if (t.includes('AIRBUS') || t.includes('BOEING') || t.includes('AIRLINER')) {
+    minR = 700; maxR = 1800;
+  }
+
+  return Math.max(minR, Math.min(maxR, physicalR));
+}
+
+function buildHoldingOrbit(center: NavLL, radiusM: number, points = 40): NavLL[] {
+  const result: NavLL[] = [];
+  for (let i = 0; i <= points; i++) {
+    const angle = (i / points) * 360;
+    result.push(movePoint(center.latitude, center.longitude, angle, radiusM));
+  }
+  return result;
+}
+
+function buildApproachToOrbit(
+  from: NavLL,
+  center: NavLL,
+  radiusM: number,
+  desiredInboundCourseDeg: number
+): NavLL[] {
+  const entryPoint = movePoint(
+    center.latitude,
+    center.longitude,
+    normalizeHeadingDeg(desiredInboundCourseDeg + 180),
+    radiusM
+  );
+
+  return [from, entryPoint];
+}
+
+function buildArcPoints(
+  center: NavLL,
+  radiusM: number,
+  startDeg: number,
+  endDeg: number,
+  steps = 18,
+  clockwise = true
+): NavLL[] {
+  const pts: NavLL[] = [];
+  let s = normalizeHeadingDeg(startDeg);
+  let e = normalizeHeadingDeg(endDeg);
+
+  if (clockwise) {
+    if (e < s) e += 360;
+    for (let i = 0; i <= steps; i++) {
+      const a = s + ((e - s) * i) / steps;
+      pts.push(movePoint(center.latitude, center.longitude, a % 360, radiusM));
+    }
+  } else {
+    if (s < e) s += 360;
+    for (let i = 0; i <= steps; i++) {
+      const a = s - ((s - e) * i) / steps;
+      pts.push(movePoint(center.latitude, center.longitude, a % 360, radiusM));
+    }
+  }
+
+  return pts;
+}
+
+function buildFinalInterceptPath(
+  from: NavLL,
+  threshold: NavLL,
+  runwayCourseDeg: number,
+  radiusM: number
+): NavLL[] {
+  const backCourse = normalizeHeadingDeg(runwayCourseDeg + 180);
+
+  const interceptPoint = movePoint(
+    threshold.latitude,
+    threshold.longitude,
+    backCourse,
+    Math.max(radiusM * 4, 900)
+  );
+
+  const arcCenter = movePoint(
+    interceptPoint.latitude,
+    interceptPoint.longitude,
+    normalizeHeadingDeg(runwayCourseDeg - 90),
+    radiusM
+  );
+
+  const startBearing = bearingDeg(
+    arcCenter.latitude,
+    arcCenter.longitude,
+    from.latitude,
+    from.longitude
+  );
+
+  const endBearing = bearingDeg(
+    arcCenter.latitude,
+    arcCenter.longitude,
+    interceptPoint.latitude,
+    interceptPoint.longitude
+  );
+
+  const arc = buildArcPoints(
+    arcCenter,
+    radiusM,
+    startBearing,
+    endBearing,
+    18,
+    true
+  );
+
+  return [from, ...arc, threshold];
+}
+
+function isReallyHolding(args: {
+  assigned: string | null;
+  currentOps: OpsState | null;
+  backendTarget: { fix?: string; lat: number; lon: number } | null;
+}): boolean {
+  const { assigned, currentOps, backendTarget } = args;
+  const fix = backendTarget?.fix ?? null;
+
+  if (!assigned) return false;
+
+  if (assigned.startsWith('A_TO_B')) {
+    const n = Number(assigned.replace('A_TO_B', ''));
+    if (Number.isFinite(n) && n >= 2) return true;
+  }
+
+  if (assigned === 'B1' && currentOps !== 'FINAL') return true;
+
+  if (fix === 'B1' && currentOps !== 'FINAL') return true;
+
+  return false;
+}
+
+function resolveAssignedBeaconTarget(
+  assigned: string | null,
+  backendTarget: { fix?: string; lat: number; lon: number } | null,
+  beaconB1: NavLL | null,
+  beaconB2: NavLL | null,
+  extraBeacons: NavLL[]
+): NavLL | null {
+  if (backendTarget && typeof backendTarget.lat === 'number' && typeof backendTarget.lon === 'number') {
+    return { latitude: backendTarget.lat, longitude: backendTarget.lon };
+  }
+
+  if (!assigned) return null;
+
+  if (assigned === 'B1') return beaconB1;
+
+  if (assigned.startsWith('A_TO_B')) {
+    const n = Number(assigned.replace('A_TO_B', ''));
+    if (n === 1) return beaconB1;
+    if (n === 2) return beaconB2;
+    if (n >= 3) return extraBeacons[n - 3] ?? null;
+  }
+
+  return null;
+}
+
+function buildAdvancedNavPathForMeV2(args: {
+  myPlane: Plane;
+  assigned: string | null;
+  currentOps: OpsState | null;
+  backendTarget: { fix?: string; lat: number; lon: number } | null;
+  beaconB1: NavLL | null;
+  beaconB2: NavLL | null;
+  extraBeacons: NavLL[];
+  activeThreshold: NavLL | null;
+  rw: any;
+  fallbackNavTarget: NavLL | null;
+}): NavLL[] {
+  const {
+    myPlane,
+    assigned,
+    currentOps,
+    backendTarget,
+    beaconB1,
+    beaconB2,
+    extraBeacons,
+    activeThreshold,
+    rw,
+    fallbackNavTarget,
+  } = args;
+
+  const mePos: NavLL = { latitude: myPlane.lat, longitude: myPlane.lon };
+  const radius = getHoldingRadiusM(myPlane.type || aircraftModel, myPlane.speed);
+
+  if ((assigned === 'FINAL' || currentOps === 'FINAL') && activeThreshold && rw) {
+    const runwayCourseDeg =
+      rw.active_end === 'A'
+        ? rw.heading_true_ab
+        : (rw.heading_true_ab + 180) % 360;
+
+    return buildFinalInterceptPath(mePos, activeThreshold, runwayCourseDeg, radius);
+  }
+
+  const target = resolveAssignedBeaconTarget(
+    assigned,
+    backendTarget,
+    beaconB1,
+    beaconB2,
+    extraBeacons
+  );
+
+  if (target) {
+    let nextCourse = myPlane.heading || 0;
+
+    if (assigned === 'B1' && activeThreshold) {
+      nextCourse = bearingDeg(
+        target.latitude,
+        target.longitude,
+        activeThreshold.latitude,
+        activeThreshold.longitude
+      );
+    } else if (assigned === 'A_TO_B2' && beaconB1) {
+      nextCourse = bearingDeg(
+        target.latitude,
+        target.longitude,
+        beaconB1.latitude,
+        beaconB1.longitude
+      );
+    } else if (assigned && assigned.startsWith('A_TO_B')) {
+      const n = Number(assigned.replace('A_TO_B', ''));
+      if (n >= 3) {
+        const nextBeacon = n === 3 ? beaconB2 : extraBeacons[n - 4] ?? beaconB2;
+        if (nextBeacon) {
+          nextCourse = bearingDeg(
+            target.latitude,
+            target.longitude,
+            nextBeacon.latitude,
+            nextBeacon.longitude
+          );
+        }
+      }
+    }
+
+    const approach = buildApproachToOrbit(mePos, target, radius, nextCourse);
+
+    if (isReallyHolding({ assigned, currentOps, backendTarget })) {
+      const orbit = buildHoldingOrbit(target, radius, 36);
+      return [...approach, ...orbit];
+    }
+
+    return [mePos, target];
+  }
+
+  if (fallbackNavTarget) {
+    return [mePos, fallbackNavTarget];
+  }
+
+  return [];
+}
 
 
 // === Airfield (pista) ===
@@ -3737,8 +4024,24 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
   const currentOps = lastOpsStateRef.current;
   const backendTarget = getBackendTargetForMe();
 
-  // ✅ si ya entré en pista, no volver a dibujar línea azul
+  const activeEnd = (rw as any)?.active_end === 'B' ? 'B' : 'A';
+  const oppositeThr = activeEnd === 'B' ? A_runway : B_runway;
+
+  // ✅ cuando ya ocupó pista para despegar, guiar hacia la cabecera opuesta
   if (currentOps === 'RUNWAY_OCCUPIED') {
+    if (oppositeThr) {
+      setNavTargetSafe({
+        latitude: oppositeThr.latitude,
+        longitude: oppositeThr.longitude,
+      });
+    } else {
+      setNavTargetSafe(null);
+    }
+    return;
+  }
+
+  // ✅ si ya está airborne, sacar línea
+  if (currentOps === 'AIRBORNE') {
     setNavTargetSafe(null);
     return;
   }
@@ -3817,7 +4120,36 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
     myPlane.speed,
   ]);
 
+useEffect(() => {
+  const assigned = getBackendAssignedForMe2();
+  const backendTarget = getBackendTargetForMe();
+  const currentOps = lastOpsStateRef.current as OpsState | null;
 
+  const path = buildAdvancedNavPathForMeV2({
+    myPlane,
+    assigned,
+    currentOps,
+    backendTarget,
+    beaconB1,
+    beaconB2,
+    extraBeacons,
+    activeThreshold,
+    rw,
+    fallbackNavTarget: navTarget,
+  });
+
+  setNavPath(path);
+}, [
+  myPlane,
+  navTarget,
+  runwayState,
+  beaconB1,
+  beaconB2,
+  extraBeacons,
+  activeThreshold,
+  rw,
+  aircraftModel,
+]);
 
   useEffect(() => {
     return () => {
@@ -4109,22 +4441,15 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
 
 
         {/* Mi pierna hacia el target (B2/B1/Umbral) */}
-        {navTarget && (
+        {/* Ruta avanzada visual: holding / órbita / interceptación a final */}
+        {navPath.length >= 2 && (
           <Polyline
-            coordinates={[
-              { latitude: myPlane.lat, longitude: myPlane.lon },
-              navTarget
-            ]}
+            coordinates={navPath}
             strokeColor="blue"
             strokeWidth={2}
           />
-          
         )}
-
-
-
-
-
+        )
 
       </MapView>
 

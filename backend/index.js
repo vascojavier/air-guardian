@@ -2363,9 +2363,11 @@ if (prev !== 'RUNWAY_OCCUPIED' && acceptedState === 'RUNWAY_OCCUPIED') {
     const isLeaderNow = !!leaderNow2 && leaderNow2 === name;
 
 if (acceptedState === 'RUNWAY_OCCUPIED') {
-  runwayState.landings = (runwayState.landings || []).filter(l => l.name !== name);
-  try { setFinalLatched(name, false); } catch {}
-  try { clearATC(name); } catch {}
+  if (getUserIntent(name) === 'landing') {
+    runwayState.landings = (runwayState.landings || []).filter(l => l.name !== name);
+    try { setFinalLatched(name, false); } catch {}
+    try { clearATC(name); } catch {}
+  }
 }
 
 if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
@@ -2407,7 +2409,7 @@ if (acceptedState === 'AIRBORNE') {
 
 if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
   if (getUserIntent(name) === 'landing') {
-    runwayState.landings = runwayState.landings.filter(l => l.name !== name);
+    runwayState.landings = (runwayState.landings || []).filter(l => l.name !== name);
 
     if (
       runwayState.inUse?.name === name &&
@@ -2417,12 +2419,20 @@ if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
     }
 
     setLandingStateForward(name, 'IN_STANDS');
+
     try { clearFinalEnter(name); } catch {}
     try { b1LatchByName.delete(name); } catch {}
     try { setFinalLatched(name, false); } catch {}
     try { clearATC(name); } catch {}
 
+    // ✅ limpieza fuerte para que no queden restos de aproximación
+    try { landingStateByName.delete(name); } catch {}
+    try { approachPhaseByName.delete(name); } catch {}
+    try { clearTurnLease(name); } catch {}
+    try { opsBackendByName.delete(name); } catch {}
+
     if (acceptedState === 'APRON_STOP') {
+      try { opsReportedByName.set(name, { state: 'APRON_STOP', ts: Date.now(), aux: null }); } catch {}
       clearUserIntent(name);
     }
   }
@@ -2780,19 +2790,30 @@ else if (action === 'takeoff') {
 
 
   // Cancelar solicitud
-  socket.on('runway-cancel', (msg) => {
-    try {
-      const { name } = msg || {};
-      if (!name) return;
-      runwayState.landings = runwayState.landings.filter(x => x.name !== name);
-      runwayState.takeoffs = runwayState.takeoffs.filter(x => x.name !== name);
-      try { setFinalLatched(name, false); } catch {}
-      planRunwaySequence();
-      publishRunwayState();
-    } catch (e) {
-      console.error('runway-cancel error:', e);
-    }
-  });
+socket.on('runway-cancel', (msg) => {
+  try {
+    const { name } = msg || {};
+    if (!name) return;
+
+    runwayState.landings = (runwayState.landings || []).filter(x => x.name !== name);
+    runwayState.takeoffs = (runwayState.takeoffs || []).filter(x => x.name !== name);
+
+    try { setFinalLatched(name, false); } catch {}
+    try { b1LatchByName.delete(name); } catch {}
+    try { clearFinalEnter(name); } catch {}
+    try { clearTurnLease(name); } catch {}
+    try { landingStateByName.delete(name); } catch {}
+    try { approachPhaseByName.delete(name); } catch {}
+    try { clearATC(name); } catch {}
+    try { opsBackendByName.delete(name); } catch {}
+    try { clearUserIntent(name); } catch {}
+
+    planRunwaySequence();
+    publishRunwayState();
+  } catch (e) {
+    console.error('runway-cancel error:', e);
+  }
+});
 
   // Marcar pista ocupada (cuando inicia final corta o rueda para despegar)
 socket.on('runway-occupy', (msg) => {
