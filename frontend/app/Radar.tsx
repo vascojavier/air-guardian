@@ -1200,14 +1200,18 @@ function buildApproachToHoldEntry(
   return [from, entryPoint];
 }
 
-function buildFinalInterceptPath(
+function buildFinalTransitionPath(
   from: NavLL,
+  currentHeadingDeg: number,
   threshold: NavLL,
   runwayCourseDeg: number,
   radiusM: number
 ): NavLL[] {
-  const backCourse = normalizeHeadingDeg(runwayCourseDeg + 180);
+  const hdg = normalizeHeadingDeg(currentHeadingDeg);
+  const finalCourse = normalizeHeadingDeg(runwayCourseDeg);
+  const backCourse = normalizeHeadingDeg(finalCourse + 180);
 
+  // Punto de intercepción sobre final, antes del threshold
   const interceptPoint = movePoint(
     threshold.latitude,
     threshold.longitude,
@@ -1215,37 +1219,118 @@ function buildFinalInterceptPath(
     Math.max(radiusM * 4, 900)
   );
 
-  const arcCenter = movePoint(
-    interceptPoint.latitude,
-    interceptPoint.longitude,
-    normalizeHeadingDeg(runwayCourseDeg - 90),
-    radiusM
-  );
-
-  const startBearing = bearingDeg(
-    arcCenter.latitude,
-    arcCenter.longitude,
+  // Elegimos el lado del primer giro según hacia qué lado queda la final respecto del heading actual
+  const bearingToIntercept = bearingDeg(
     from.latitude,
-    from.longitude
-  );
-
-  const endBearing = bearingDeg(
-    arcCenter.latitude,
-    arcCenter.longitude,
+    from.longitude,
     interceptPoint.latitude,
     interceptPoint.longitude
   );
 
-  const arc = buildArcPoints(
-    arcCenter,
-    radiusM,
-    startBearing,
-    endBearing,
-    18,
-    true
+  const diffRaw = normalizeHeadingDeg(bearingToIntercept - hdg);
+  const firstTurnClockwise = diffRaw <= 180;
+
+  // Primera curva: tangente al heading actual del avión
+  const firstCenter = movePoint(
+    from.latitude,
+    from.longitude,
+    normalizeHeadingDeg(hdg + (firstTurnClockwise ? 90 : -90)),
+    radiusM
   );
 
-  return [from, ...arc, threshold];
+  const firstStartBearing = bearingDeg(
+    firstCenter.latitude,
+    firstCenter.longitude,
+    from.latitude,
+    from.longitude
+  );
+
+  // Segunda curva: tangente a la línea final
+  // La ponemos del mismo lado de giro para que la transición sea continua
+  const secondCenter = movePoint(
+    interceptPoint.latitude,
+    interceptPoint.longitude,
+    normalizeHeadingDeg(finalCourse + (firstTurnClockwise ? 90 : -90)),
+    radiusM
+  );
+
+  // Tangente común aproximada entre ambos círculos:
+  // usamos la línea entre centros y corremos 90° según sentido de giro
+  const centersBearing = bearingDeg(
+    firstCenter.latitude,
+    firstCenter.longitude,
+    secondCenter.latitude,
+    secondCenter.longitude
+  );
+
+  const tangentDir = normalizeHeadingDeg(
+    centersBearing + (firstTurnClockwise ? 90 : -90)
+  );
+
+  // Punto de salida de la primera curva hacia la recta
+  const firstExit = movePoint(
+    firstCenter.latitude,
+    firstCenter.longitude,
+    normalizeHeadingDeg(tangentDir - (firstTurnClockwise ? 90 : -90)),
+    radiusM
+  );
+
+  // Punto de entrada a la segunda curva desde la recta
+  const secondEntry = movePoint(
+    secondCenter.latitude,
+    secondCenter.longitude,
+    normalizeHeadingDeg(tangentDir - (firstTurnClockwise ? 90 : -90)),
+    radiusM
+  );
+
+  // Arco 1
+  const firstEndBearing = bearingDeg(
+    firstCenter.latitude,
+    firstCenter.longitude,
+    firstExit.latitude,
+    firstExit.longitude
+  );
+
+  const arc1 = buildArcPoints(
+    firstCenter,
+    radiusM,
+    firstStartBearing,
+    firstEndBearing,
+    14,
+    firstTurnClockwise
+  );
+
+  // Arco 2
+  const secondStartBearing = bearingDeg(
+    secondCenter.latitude,
+    secondCenter.longitude,
+    secondEntry.latitude,
+    secondEntry.longitude
+  );
+
+  const secondEndBearing = bearingDeg(
+    secondCenter.latitude,
+    secondCenter.longitude,
+    interceptPoint.latitude,
+    interceptPoint.longitude
+  );
+
+  const arc2 = buildArcPoints(
+    secondCenter,
+    radiusM,
+    secondStartBearing,
+    secondEndBearing,
+    14,
+    firstTurnClockwise
+  );
+
+  return [
+    from,
+    ...arc1,
+    secondEntry,
+    ...arc2,
+    threshold,
+  ];
 }
 
 function isReallyHolding(args: {
@@ -1323,14 +1408,20 @@ function buildAdvancedNavPathForMeV3(args: {
   const radius = getHoldingRadiusM(myPlane.type || aircraftModel, myPlane.speed);
   const legLengthM = Math.max(radius * 4, 700);
 
-  // FINAL -> curva + recta estabilizada
+  // FINAL -> curva + recta + curva, tangente al heading actual y a la final
   if ((assigned === 'FINAL' || currentOps === 'FINAL') && activeThreshold && rw) {
     const runwayCourseDeg =
       rw.active_end === 'A'
         ? rw.heading_true_ab
         : (rw.heading_true_ab + 180) % 360;
 
-    return buildFinalInterceptPath(mePos, activeThreshold, runwayCourseDeg, radius);
+    return buildFinalTransitionPath(
+      mePos,
+      myPlane.heading || 0,
+      activeThreshold,
+      runwayCourseDeg,
+      radius
+    );
   }
 
   const target = resolveAssignedBeaconTarget(
