@@ -1070,31 +1070,6 @@ function getHoldingRadiusM(type?: string, speedKmh?: number): number {
   return Math.max(minR, Math.min(maxR, physicalR));
 }
 
-function buildHoldingOrbit(center: NavLL, radiusM: number, points = 40): NavLL[] {
-  const result: NavLL[] = [];
-  for (let i = 0; i <= points; i++) {
-    const angle = (i / points) * 360;
-    result.push(movePoint(center.latitude, center.longitude, angle, radiusM));
-  }
-  return result;
-}
-
-function buildApproachToOrbit(
-  from: NavLL,
-  center: NavLL,
-  radiusM: number,
-  desiredInboundCourseDeg: number
-): NavLL[] {
-  const entryPoint = movePoint(
-    center.latitude,
-    center.longitude,
-    normalizeHeadingDeg(desiredInboundCourseDeg + 180),
-    radiusM
-  );
-
-  return [from, entryPoint];
-}
-
 function buildArcPoints(
   center: NavLL,
   radiusM: number,
@@ -1122,6 +1097,107 @@ function buildArcPoints(
   }
 
   return pts;
+}
+
+function buildRacetrackHold(
+  center: NavLL,
+  inboundCourseDeg: number,
+  legLengthM: number,
+  radiusM: number,
+  clockwise = true
+): NavLL[] {
+  const inbound = normalizeHeadingDeg(inboundCourseDeg);
+  const outbound = normalizeHeadingDeg(inbound + 180);
+
+  const halfLeg = Math.max(legLengthM / 2, radiusM * 1.2);
+
+  const inboundStart = movePoint(center.latitude, center.longitude, outbound, halfLeg);
+  const inboundEnd = movePoint(center.latitude, center.longitude, inbound, halfLeg);
+
+  const rightOfInbound = normalizeHeadingDeg(inbound + 90);
+  const leftOfInbound = normalizeHeadingDeg(inbound - 90);
+
+  const side = clockwise ? rightOfInbound : leftOfInbound;
+
+  const turn1Center = movePoint(inboundEnd.latitude, inboundEnd.longitude, side, radiusM);
+  const turn2Center = movePoint(inboundStart.latitude, inboundStart.longitude, side, radiusM);
+
+  const turn1StartBearing = bearingDeg(
+    turn1Center.latitude,
+    turn1Center.longitude,
+    inboundEnd.latitude,
+    inboundEnd.longitude
+  );
+
+  const turn1EndPoint = movePoint(inboundEnd.latitude, inboundEnd.longitude, side, radiusM * 2);
+  const turn1EndBearing = bearingDeg(
+    turn1Center.latitude,
+    turn1Center.longitude,
+    turn1EndPoint.latitude,
+    turn1EndPoint.longitude
+  );
+
+  const arc1 = buildArcPoints(
+    turn1Center,
+    radiusM,
+    turn1StartBearing,
+    turn1EndBearing,
+    14,
+    clockwise
+  );
+
+  const outboundEnd = movePoint(inboundStart.latitude, inboundStart.longitude, side, radiusM * 2);
+
+  const turn2StartBearing = bearingDeg(
+    turn2Center.latitude,
+    turn2Center.longitude,
+    outboundEnd.latitude,
+    outboundEnd.longitude
+  );
+
+  const turn2EndBearing = bearingDeg(
+    turn2Center.latitude,
+    turn2Center.longitude,
+    inboundStart.latitude,
+    inboundStart.longitude
+  );
+
+  const arc2 = buildArcPoints(
+    turn2Center,
+    radiusM,
+    turn2StartBearing,
+    turn2EndBearing,
+    14,
+    clockwise
+  );
+
+  return [
+    inboundStart,
+    inboundEnd,
+    ...arc1,
+    outboundEnd,
+    ...arc2,
+    inboundStart,
+  ];
+}
+
+function buildApproachToHoldEntry(
+  from: NavLL,
+  holdCenter: NavLL,
+  inboundCourseDeg: number,
+  legLengthM: number,
+  radiusM: number
+): NavLL[] {
+  const halfLeg = Math.max(legLengthM / 2, radiusM * 1.2);
+
+  const entryPoint = movePoint(
+    holdCenter.latitude,
+    holdCenter.longitude,
+    normalizeHeadingDeg(inboundCourseDeg + 180),
+    halfLeg
+  );
+
+  return [from, entryPoint];
 }
 
 function buildFinalInterceptPath(
@@ -1188,7 +1264,6 @@ function isReallyHolding(args: {
   }
 
   if (assigned === 'B1' && currentOps !== 'FINAL') return true;
-
   if (fix === 'B1' && currentOps !== 'FINAL') return true;
 
   return false;
@@ -1219,7 +1294,7 @@ function resolveAssignedBeaconTarget(
   return null;
 }
 
-function buildAdvancedNavPathForMeV2(args: {
+function buildAdvancedNavPathForMeV3(args: {
   myPlane: Plane;
   assigned: string | null;
   currentOps: OpsState | null;
@@ -1246,7 +1321,9 @@ function buildAdvancedNavPathForMeV2(args: {
 
   const mePos: NavLL = { latitude: myPlane.lat, longitude: myPlane.lon };
   const radius = getHoldingRadiusM(myPlane.type || aircraftModel, myPlane.speed);
+  const legLengthM = Math.max(radius * 4, 700);
 
+  // FINAL -> curva + recta estabilizada
   if ((assigned === 'FINAL' || currentOps === 'FINAL') && activeThreshold && rw) {
     const runwayCourseDeg =
       rw.active_end === 'A'
@@ -1265,17 +1342,17 @@ function buildAdvancedNavPathForMeV2(args: {
   );
 
   if (target) {
-    let nextCourse = myPlane.heading || 0;
+    let inboundCourse = myPlane.heading || 0;
 
     if (assigned === 'B1' && activeThreshold) {
-      nextCourse = bearingDeg(
+      inboundCourse = bearingDeg(
         target.latitude,
         target.longitude,
         activeThreshold.latitude,
         activeThreshold.longitude
       );
     } else if (assigned === 'A_TO_B2' && beaconB1) {
-      nextCourse = bearingDeg(
+      inboundCourse = bearingDeg(
         target.latitude,
         target.longitude,
         beaconB1.latitude,
@@ -1286,7 +1363,7 @@ function buildAdvancedNavPathForMeV2(args: {
       if (n >= 3) {
         const nextBeacon = n === 3 ? beaconB2 : extraBeacons[n - 4] ?? beaconB2;
         if (nextBeacon) {
-          nextCourse = bearingDeg(
+          inboundCourse = bearingDeg(
             target.latitude,
             target.longitude,
             nextBeacon.latitude,
@@ -1296,11 +1373,23 @@ function buildAdvancedNavPathForMeV2(args: {
       }
     }
 
-    const approach = buildApproachToOrbit(mePos, target, radius, nextCourse);
+    const approach = buildApproachToHoldEntry(
+      mePos,
+      target,
+      inboundCourse,
+      legLengthM,
+      radius
+    );
 
     if (isReallyHolding({ assigned, currentOps, backendTarget })) {
-      const orbit = buildHoldingOrbit(target, radius, 36);
-      return [...approach, ...orbit];
+      const hold = buildRacetrackHold(
+        target,
+        inboundCourse,
+        legLengthM,
+        radius,
+        true
+      );
+      return [...approach, ...hold];
     }
 
     return [mePos, target];
@@ -4125,7 +4214,7 @@ useEffect(() => {
   const backendTarget = getBackendTargetForMe();
   const currentOps = lastOpsStateRef.current as OpsState | null;
 
-  const path = buildAdvancedNavPathForMeV2({
+  const path = buildAdvancedNavPathForMeV3({
     myPlane,
     assigned,
     currentOps,
@@ -4449,7 +4538,6 @@ useEffect(() => {
             strokeWidth={2}
           />
         )}
-        )
 
       </MapView>
 
