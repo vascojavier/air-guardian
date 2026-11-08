@@ -85,15 +85,15 @@
     "vacateRunway": "¡Liberar pista!",
     "clearedToLand": "Tiene permiso para aterrizar",
     "lineUp": "Ocupe cabecera de pista",
-    "clearedToTakeoff": "Puede despegar",
-    "trafficOnFinalWait": "Tráfico en final: espere",
+    "clearedToTakeoff": "Tiene permiso para despegar",
+    "trafficOnFinalWait": "Hold short. Espere en el punto de espera.",
     "goAroundRegistered": "Arremetida registrada. Reingresando en secuencia.",
     "clearedToLandSpoken": "Autorizado a aterrizar {{rwy}}",
     "yourTakeoffTurnIsNumber": "Su turno de despegue es número {{n}}.",
     "yourLandingTurnIsNumber": "Su turno de aterrizaje es número {{n}}.",
     "landingOut": "OUT: perdió el turno. Si desea aterrizar, solicite nuevamente.",
     "landingTurnLost": "TURN LOST: perdió el turno ({{reason}}). Si desea aterrizar, solicite nuevamente.",
-    "landingTimeout": "TIMEOUT: perdió el turno por demora ({{reason}}). Si desea aterrizar, solicite nuevamente.",
+    "landingTimeout": "Se terminó su tiempo para aterrizar y perdió el turno. Si desea aterrizar, vuelva a solicitar permiso.",
     "landingDrift": "DRIFT: perdió el turno por alejarse ({{reason}}). Si desea aterrizar, solicite nuevamente."
   },
   "nav": {

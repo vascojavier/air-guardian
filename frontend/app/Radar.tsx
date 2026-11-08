@@ -775,6 +775,7 @@ useFocusEffect(
       // 2) RESET TOTAL de LATCHES / REFS (tierra + runway + apron)
       landingRequestedRef.current = false;
       takeoffRequestedRef.current = false;
+      navGuidanceEndedRef.current = false;
       intentRef.current = null;
       finalLockedRef.current = false;
 
@@ -1211,124 +1212,57 @@ function buildFinalTransitionPath(
   const finalCourse = normalizeHeadingDeg(runwayCourseDeg);
   const backCourse = normalizeHeadingDeg(finalCourse + 180);
 
-  // Punto de intercepción sobre final, antes del threshold
+  // Punto de intercepción cerca de la pista
   const interceptPoint = movePoint(
     threshold.latitude,
     threshold.longitude,
     backCourse,
-    Math.max(radiusM * 4, 900)
+    Math.max(radiusM * 2.2, 450)
   );
 
-  // Elegimos el lado del primer giro según hacia qué lado queda la final respecto del heading actual
-  const bearingToIntercept = bearingDeg(
+  // Rumbo desde el avión hacia la zona de interceptación
+  const toIntercept = bearingDeg(
     from.latitude,
     from.longitude,
     interceptPoint.latitude,
     interceptPoint.longitude
   );
 
-  const diffRaw = normalizeHeadingDeg(bearingToIntercept - hdg);
-  const firstTurnClockwise = diffRaw <= 180;
+  // En final corta, no volver a un punto de intercepción que ya quedó atrás.
+  const interceptAheadM = getDistance(
+    from.latitude,
+    from.longitude,
+    interceptPoint.latitude,
+    interceptPoint.longitude
+  ) * Math.cos(toRad(toIntercept - finalCourse));
+  if (interceptAheadM <= 1) return [from, threshold];
 
-  // Primera curva: tangente al heading actual del avión
+  const turnDeg = normalizeHeadingDeg(toIntercept - hdg + 180) - 180;
+  const firstTurnClockwise = turnDeg >= 0;
+  const turnSideDeg = firstTurnClockwise ? 90 : -90;
+
+  // Primera curva: tangente al heading actual
   const firstCenter = movePoint(
     from.latitude,
     from.longitude,
-    normalizeHeadingDeg(hdg + (firstTurnClockwise ? 90 : -90)),
+    normalizeHeadingDeg(hdg + turnSideDeg),
     radiusM
   );
 
-  const firstStartBearing = bearingDeg(
-    firstCenter.latitude,
-    firstCenter.longitude,
-    from.latitude,
-    from.longitude
-  );
-
-  // Segunda curva: tangente a la línea final
-  // La ponemos del mismo lado de giro para que la transición sea continua
-  const secondCenter = movePoint(
-    interceptPoint.latitude,
-    interceptPoint.longitude,
-    normalizeHeadingDeg(finalCourse + (firstTurnClockwise ? 90 : -90)),
-    radiusM
-  );
-
-  // Tangente común aproximada entre ambos círculos:
-  // usamos la línea entre centros y corremos 90° según sentido de giro
-  const centersBearing = bearingDeg(
-    firstCenter.latitude,
-    firstCenter.longitude,
-    secondCenter.latitude,
-    secondCenter.longitude
-  );
-
-  const tangentDir = normalizeHeadingDeg(
-    centersBearing + (firstTurnClockwise ? 90 : -90)
-  );
-
-  // Punto de salida de la primera curva hacia la recta
-  const firstExit = movePoint(
-    firstCenter.latitude,
-    firstCenter.longitude,
-    normalizeHeadingDeg(tangentDir - (firstTurnClockwise ? 90 : -90)),
-    radiusM
-  );
-
-  // Punto de entrada a la segunda curva desde la recta
-  const secondEntry = movePoint(
-    secondCenter.latitude,
-    secondCenter.longitude,
-    normalizeHeadingDeg(tangentDir - (firstTurnClockwise ? 90 : -90)),
-    radiusM
-  );
-
-  // Arco 1
-  const firstEndBearing = bearingDeg(
-    firstCenter.latitude,
-    firstCenter.longitude,
-    firstExit.latitude,
-    firstExit.longitude
-  );
-
+  const firstStartBearing = hdg - turnSideDeg;
   const arc1 = buildArcPoints(
     firstCenter,
     radiusM,
     firstStartBearing,
-    firstEndBearing,
-    14,
-    firstTurnClockwise
-  );
-
-  // Arco 2
-  const secondStartBearing = bearingDeg(
-    secondCenter.latitude,
-    secondCenter.longitude,
-    secondEntry.latitude,
-    secondEntry.longitude
-  );
-
-  const secondEndBearing = bearingDeg(
-    secondCenter.latitude,
-    secondCenter.longitude,
-    interceptPoint.latitude,
-    interceptPoint.longitude
-  );
-
-  const arc2 = buildArcPoints(
-    secondCenter,
-    radiusM,
-    secondStartBearing,
-    secondEndBearing,
-    14,
+    firstStartBearing + turnDeg,
+    10,
     firstTurnClockwise
   );
 
   return [
     from,
     ...arc1,
-    secondEntry,
-    ...arc2,
+    interceptPoint,
     threshold,
   ];
 }
@@ -1408,7 +1342,7 @@ function buildAdvancedNavPathForMeV3(args: {
   const radius = getHoldingRadiusM(myPlane.type || aircraftModel, myPlane.speed);
   const legLengthM = Math.max(radius * 4, 700);
 
-  // FINAL -> curva + recta + curva, tangente al heading actual y a la final
+  // FINAL: interceptación del eje o tramo directo en final corta.
   if ((assigned === 'FINAL' || currentOps === 'FINAL') && activeThreshold && rw) {
     const runwayCourseDeg =
       rw.active_end === 'A'
@@ -1835,6 +1769,7 @@ const [banner, setBanner] = useState<{ text: string; key?: string } | null>(null
 // flags de flujo
 const takeoffRequestedRef = useRef(false);
 const landingRequestedRef = useRef(false);
+const navGuidanceEndedRef = useRef(false);
 const iAmOccupyingRef = useRef<null | 'landing' | 'takeoff'>(null); // sé si marqué occupy
 const intentRef = useRef<'landing' | 'takeoff' | null>(null);
 
@@ -1962,8 +1897,9 @@ function flashBanner(text: string, key?: string) {
     if (now - last < 2500) return; // no repetir en <2.5s
     lastBannerAtRef.current[key] = now;
   }
-  setBanner({ text, key });
-  setTimeout(() => setBanner(null), 6000);
+  const nextBanner = { text, key };
+  setBanner(nextBanner);
+  setTimeout(() => setBanner(current => current === nextBanner ? null : current), 6000);
 }
 
 // al tocar la pista/cabecera -> abrir label 6s y sugerir alineamiento si vienes por contraria
@@ -1980,34 +1916,6 @@ function showRunwayLabel(end:'A'|'B') {
   }
 }
 
-// --- PERMISO DE ATERRIZAJE SEGÚN DISTANCIA ---
-type Cat = 'GLIDER_HELI' | 'PROP' | 'BIZJET' | 'AIRLINER';
-
-function aircraftCategory(t?: string): Cat {
-  const up = (t || '').toUpperCase();
-  if (up.includes('GLIDER') || up.includes('PLANEADOR') || up.includes('HELI')) return 'GLIDER_HELI';
-  // Airliners (heurística)
-  if (
-    up.includes('AIRBUS') || up.includes('BOEING') || up.includes('A3') || up.includes('B7') ||
-    up.includes('E19') || up.includes('E17') || up.includes('E-JET') || up.includes('A32') || up.includes('A33')
-  ) return 'AIRLINER';
-  // Jets no comerciales (bizjets)
-  if (up.includes('JET')) return 'BIZJET';
-  // Turboprop y hélice
-  if (up.includes('TURBOPROP') || up.includes('HELICES') || up.includes('HÉLICE') || up.includes('HÉLICE') || up.includes('PROP')) return 'PROP';
-  return 'PROP';
-}
-
-// Distancias de permiso (en metros)
-// (Si querés ajustar airliners, cambiá 8000 por el valor que prefieras)
-const PERMIT_RADIUS_M: Record<Cat, number> = {
-  GLIDER_HELI: 500,    // planeadores y helicópteros
-  PROP:        2000,   // aviones a hélice
-  BIZJET:      5000,   // jets no comerciales
-  AIRLINER:    8000,   // línea (sugerencia)
-};
-
-  // ⬇️ PEGAR DEBAJO de const PERMIT_RADIUS_M
   const GROUND_OPS = new Set<OpsState>([
     'RUNWAY_CLEAR',
     'TAXI_APRON',
@@ -2207,15 +2115,6 @@ function inferOpsForDisplay(p: Plane): OpsState | null {
 
 
 
-function distToActiveThresholdM(): number | null {
-  if (!rw) return null;
-  const end = rw.active_end === 'B' ? 'B' : 'A';
-  const thr = end === 'A' ? A_runway : B_runway;
-  if (!thr) return null;
-  return getDistance(myPlane.lat, myPlane.lon, thr.latitude, thr.longitude); // metros
-}
-
-
 // === RUNWAY: acción por defecto según altura relativa ===
 // Usamos function declaration para que se hoistee y pueda usarse antes.
 function defaultActionForMe(): 'land' | 'takeoff' {
@@ -2230,6 +2129,7 @@ function defaultActionForMe(): 'land' | 'takeoff' {
 
 // === RUNWAY: pedidos al backend ===
 const requestLanding = () => {
+  navGuidanceEndedRef.current = false;
   const payload = {
     action: 'land',
     name: myPlane?.id || username,
@@ -2246,6 +2146,7 @@ const requestLanding = () => {
 };
 
 const requestTakeoff = (ready: boolean) => {
+  navGuidanceEndedRef.current = false;
   const payload = {
     action: 'takeoff',
     name: myPlane?.id || username,
@@ -2531,7 +2432,7 @@ useEffect(() => {
     if (myOps && GROUND_OPS.has(myOps)) {
       if (prioritizedWarning) setPrioritizedWarning(null);
       if (conflict) setConflict(null);
-      if (selected) setSelected(null);
+      if (Date.now() >= selectedHoldUntilRef.current) setSelected(null);
 
       // ✅ guard: evitar setPlanes(...) si ya está igual
       const groundSig =
@@ -2970,7 +2871,7 @@ if (
       if (ops && GROUND_OPS.has(ops)) {
         if (prioritizedWarning) setPrioritizedWarning(null);
         if (conflict) setConflict(null);
-        if (selected) setSelected(null);
+        if (Date.now() >= selectedHoldUntilRef.current) setSelected(null);
         // igual después actualizamos planes
       }
     }
@@ -3326,6 +3227,9 @@ s.on('ops/state', (msg: any) => {
     if (next === 'AIRBORNE' && intentRef.current === 'takeoff') {
       intentRef.current = null;
       takeoffRequestedRef.current = false;
+      navGuidanceEndedRef.current = true;
+      setNavTargetSafe(null);
+      setNavPath([]);
     }
   }
 
@@ -3510,10 +3414,22 @@ s.on('runway-state', (payload: any) => {
 
   // ✅ runway-msg
  s.on('runway-msg', (m: any) => {
+  const landingTimedOut = m?.key === 'landing-timeout';
+  if (landingTimedOut) {
+    landingRequestedRef.current = false;
+    navGuidanceEndedRef.current = true;
+    if (intentRef.current === 'landing') intentRef.current = null;
+    finalLockedRef.current = false;
+    navPhaseRef.current = null;
+    prevIdxRef.current = null;
+    setNavTargetSafe(null);
+    setNavPath([]);
+  }
+
   // 1) Resolver texto (i18n si viene key, si no texto plano)
   const bannerText =
     m?.key
-      ? t(String(m.key), m.params || {})
+      ? t(landingTimedOut ? 'runway.landingTimeout' : String(m.key), m.params || {})
       : (typeof m?.text === 'string' ? m.text : '');
 
   if (!bannerText) return;
@@ -3868,7 +3784,7 @@ useEffect(() => {
   if (ops && GROUND_OPS.has(ops)) {
     setPrioritizedWarning(null);
     setConflict(null);
-    setSelected(null);
+    if (Date.now() >= selectedHoldUntilRef.current) setSelected(null);
     setPlanes((prev: Plane[]) =>
       prev.map(p => ({ ...p, alertLevel: 'none' as const, timeToImpact: undefined }))
     );
@@ -3900,19 +3816,36 @@ function reportIfDwellInside(
   onArrive();
 }
 
-useEffect(() => {
-  const backendTarget = getBackendTargetForMe();
-  const backendFix = backendTarget?.fix ?? null;
-  const currentOps = lastOpsStateRef.current;
+const takeoffFix = takeoffRequestedRef.current && iAmOccupyingRef.current !== 'takeoff'
+  ? getBackendTargetForMe()?.fix
+  : undefined;
+const waitingAtHoldShort =
+  takeoffFix === 'HOLD_SHORT' && lastOpsStateRef.current === 'HOLD_SHORT';
+const clearedForTakeoff = takeoffFix === 'RWY';
+const holdShortText = t('runway.trafficOnFinalWait');
 
-  if (
-    takeoffRequestedRef.current &&
-    currentOps === 'HOLD_SHORT' &&
-    backendFix === 'RWY'
-  ) {
-    flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
+useEffect(() => {
+  if (!waitingAtHoldShort) {
+    setBanner(current => current?.key === 'hold-short-wait' ? null : current);
+    return;
   }
-}, [runwayState, myPlane.lat, myPlane.lon]);
+
+  const remind = () => flashBanner(holdShortText, 'hold-short-wait');
+  remind();
+  const reminder = setInterval(remind, 2 * 60 * 1000);
+  return () => clearInterval(reminder);
+}, [waitingAtHoldShort, holdShortText]);
+
+useEffect(() => {
+  if (!clearedForTakeoff) return;
+
+  const text = t('runway.clearedToTakeoff');
+  flashBanner(text, 'cleared-tko');
+  try {
+    Speech.stop();
+    Speech.speak(text, { language: ttsLang });
+  } catch {}
+}, [clearedForTakeoff]);
 
 
   // === RUNWAY: Automatismos de avisos y ocupación/liberación ===
@@ -3933,6 +3866,7 @@ useEffect(() => {
     speedKmh < 80;
 
 const isLandingFlow =
+  !navGuidanceEndedRef.current &&
   !takeoffRequestedRef.current &&
   (
     landingRequestedRef.current ||
@@ -4035,27 +3969,19 @@ const isLandingFlow =
 
   if (!st) return;
 
-  // permiso de aterrizar: sólo si soy #1, pista libre y estoy dentro del radio según tipo
+  // Avisar cuando el backend autoriza FINAL con la pista libre.
   const firstLanding = (st.landings || [])[0];
-  if (firstLanding?.name === me && !st.inUse && defaultActionForMe() === 'land') {
-    const distM = distToActiveThresholdM();
-    const cat = aircraftCategory(aircraftModel || (myPlane as any)?.type);
-    const radius = PERMIT_RADIUS_M[cat];
-
-    if (typeof distM === 'number') {
-      if (distM <= radius) {
-        if (!landClearShownRef.current) {
-          flashBanner(t("runway.clearedToLand"), 'clr-land');
-          landClearShownRef.current = true;
-        }
-
-        if (activeThreshold) {
-          finalLockedRef.current = true;
-        }
-      } else {
-        landClearShownRef.current = false;
-      }
+  if (!navGuidanceEndedRef.current && firstLanding?.name === me && !st.inUse && assignedNow === 'FINAL') {
+    if (!landClearShownRef.current) {
+      landClearShownRef.current = true;
+      const text = t('runway.clearedToLand');
+      flashBanner(text, 'clr-land');
+      try {
+        Speech.stop();
+        Speech.speak(text, { language: ttsLang });
+      } catch {}
     }
+    finalLockedRef.current = true;
   } else {
     landClearShownRef.current = false;
   }
@@ -4069,55 +3995,20 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
   const atHoldShort = currentOps === 'HOLD_SHORT';
   const clearedToRunway = backendFix === 'RWY';
 
-  const nextLanding = (st.timeline || []).find((x: any) =>
-    x.action === 'landing' && new Date(x.at).getTime() > Date.now()
-  );
-
-  const gapMin = nextLanding
-    ? Math.round((new Date(nextLanding.at).getTime() - Date.now()) / 60000)
-    : 999;
-
-  // 1) Está en HOLD_SHORT pero todavía sin permiso -> esperar
-  if (atHoldShort && !clearedToRunway) {
-    flashBanner("Hold short. Espere hasta que aterrice el tráfico en final.", 'hold-short-wait');
-  }
-
   // 2) Ya tiene permiso para ir a pista
 if (atHoldShort && clearedToRunway && iAmOccupyingRef.current !== 'takeoff') {
-  const activeEnd = (rw as any).active_end === 'B' ? 'B' : 'A';
-  const thr = activeEnd === 'B' ? B_runway : A_runway;
-
-  const nearThr = isNearThreshold(activeEnd, 90);
   const onRunway = isOnRunwayStrip();
-
-  const distToThr =
-    thr
-      ? getDistance(myPlane.lat, myPlane.lon, thr.latitude, thr.longitude)
-      : Infinity;
-
   const speedNow = myPlane.speed ?? 0;
 
-  // ✅ mucho más estricto:
-  // hold short NO debe contar como entrada a pista
-  if (
-    onRunway ||
-    distToThr <= 90 ||
-    (nearThr && speedNow > 8) ||
-    (speedNow > 25 && distToThr <= 140)
-  ) {
+  if (onRunway) {
     takeoffEntryLatchedRef.current = true;
   }
 
   const enteredRunwayForTakeoff = takeoffEntryLatchedRef.current;
 
-  // todavía con permiso pero sin entrar realmente a pista
-  if (!enteredRunwayForTakeoff) {
-    flashBanner(t("runway.clearedToTakeoff"), 'cleared-tko');
-  } else {
+  if (enteredRunwayForTakeoff) {
 console.log('[OPS] takeoff entry -> RUNWAY_OCCUPIED', {
-  nearThr,
   onRunway,
-  distToThr,
   speedNow,
   currentOps,
   backendFix,
@@ -4125,9 +4016,7 @@ console.log('[OPS] takeoff entry -> RUNWAY_OCCUPIED', {
 
 intentRef.current = 'takeoff'; // ✅ reforzar intención justo al entrar
 emitOpsNow('RUNWAY_OCCUPIED', 'TAKEOFF_ENTER_RWY', {
-  nearThr,
   onRunway,
-  distToThr,
   speed: speedNow,
 });
 
@@ -4138,33 +4027,24 @@ setNavTargetSafe(null);
 }
 
 
-// ✅ PEGAR ACÁ
-  if (takeoffRequestedRef.current) {
-    const currentOps = lastOpsStateRef.current;
+  if (iAmOccupyingRef.current === 'takeoff' && lastOpsStateRef.current === 'RUNWAY_OCCUPIED') {
+    const aglNow = getAGLmeters();
+    const speedNow = myPlane.speed ?? 0;
 
-    if (currentOps === 'RUNWAY_OCCUPIED') {
-      const aglNow = getAGLmeters();
-      const speedNow = myPlane?.speed ?? 0;
-      const onRunwayNow = isOnRunwayStrip();
-
-      const becameAirborne =
-        !onRunwayNow &&
-        aglNow > 12 &&
-        speedNow > 70;
-
-    if (becameAirborne) {
+    if (aglNow > 12 && speedNow > 70) {
       emitOpsNow('AIRBORNE', 'TAKEOFF_LIFTOFF', {
         agl: aglNow,
         speed: speedNow,
-        onRunway: onRunwayNow,
+        onRunway: isOnRunwayStrip(),
       });
 
       iAmOccupyingRef.current = null;
+      navGuidanceEndedRef.current = true;
       setNavTargetSafe(null);
+      setNavPath([]);
       takeoffRequestedRef.current = false;
       takeoffEntryLatchedRef.current = false;
       intentRef.current = null;
-    }
     }
   }
 
@@ -4178,8 +4058,10 @@ setNavTargetSafe(null);
   useEffect(() => {
     const me = myPlane?.id || username;
     if (!me) return;
-
-    const st = runwayState?.state;
+    if (navGuidanceEndedRef.current || iAmOccupyingRef.current === 'takeoff') {
+      setNavTargetSafe(null);
+      return;
+    }
 
     // ✅ verdad local solo para GROUND
     const myFact = (lastOpsStateRef.current as OpsState | null);
@@ -4198,46 +4080,10 @@ setNavTargetSafe(null);
     // 2) Si ATC dirigido está activo, no tocar navTarget (lo maneja atc-instruction)
     if (serverATCRef.current) return;
 
-    // 3) TAKEOFF: siempre a cabecera activa
-// 3) TAKEOFF: seguir target backend solo hasta entrar en pista
-if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
-  const currentOps = lastOpsStateRef.current;
-  const backendTarget = getBackendTargetForMe();
-
-  const activeEnd = (rw as any)?.active_end === 'B' ? 'B' : 'A';
-  const oppositeThr = activeEnd === 'B' ? A_runway : B_runway;
-
-  // ✅ cuando ya ocupó pista para despegar, guiar hacia la cabecera opuesta
-  if (currentOps === 'RUNWAY_OCCUPIED') {
-    if (oppositeThr) {
-      setNavTargetSafe({
-        latitude: oppositeThr.latitude,
-        longitude: oppositeThr.longitude,
-      });
-    } else {
+    if (takeoffRequestedRef.current) {
       setNavTargetSafe(null);
+      return;
     }
-    return;
-  }
-
-  // ✅ si ya está airborne, sacar línea
-  if (currentOps === 'AIRBORNE') {
-    setNavTargetSafe(null);
-    return;
-  }
-
-  // ✅ si backend decidió HOLD_SHORT o RWY, obedecer eso
-  if (backendTarget) {
-    setNavTargetSafe({
-      latitude: backendTarget.lat,
-      longitude: backendTarget.lon,
-    });
-    return;
-  }
-
-  setNavTargetSafe(null);
-  return;
-}
 
     // 4) APRON latch → apron
     if (apronLatchRef.current) {
@@ -4301,6 +4147,18 @@ if (takeoffRequestedRef.current && defaultActionForMe() === 'takeoff') {
   ]);
 
 useEffect(() => {
+  if (navGuidanceEndedRef.current) {
+    setNavPath([]);
+    return;
+  }
+
+  if (iAmOccupyingRef.current === 'takeoff') {
+    const oppositeThreshold = rw?.active_end === 'B' ? A_runway : B_runway;
+    const position = { latitude: myPlane.lat, longitude: myPlane.lon };
+    setNavPath(oppositeThreshold ? [position, oppositeThreshold] : []);
+    return;
+  }
+
   const assigned = getBackendAssignedForMe2();
   const backendTarget = getBackendTargetForMe();
   const currentOps = lastOpsStateRef.current as OpsState | null;
@@ -4463,7 +4321,8 @@ useEffect(() => {
           const isPureInfo =
             !warning &&
             (plane.alertLevel === 'none' || !plane.alertLevel);
-          selectedHoldUntilRef.current = isPureInfo ? Date.now() + 5000 : 0;
+          const labelDurationMs = isPureInfo ? 5000 : 6000;
+          selectedHoldUntilRef.current = Date.now() + labelDurationMs;
           if (warning) {
             const w = { ...warning, ops, atcAssigned, atcTarget } as any;
             priorizarWarningManual(w);
@@ -4497,14 +4356,9 @@ useEffect(() => {
           }
           hideSelectedTimeout.current = setTimeout(() => {
             setSelected(null);
-          }, 6000);
-          if (isPureInfo) {
-            hideSelectedTimeout.current = setTimeout(() => {
-              setSelected(null);
-              selectedHoldUntilRef.current = 0;
-              hideSelectedTimeout.current = null;
-            }, 5000);
-          }
+            selectedHoldUntilRef.current = 0;
+            hideSelectedTimeout.current = null;
+          }, labelDurationMs);
         }}
       />
     );
@@ -4821,6 +4675,7 @@ useEffect(() => {
                     type: aircraftModel||'', emergency:true, altitude: myPlane?.alt??0
                   });
                   landingRequestedRef.current = true;
+                  navGuidanceEndedRef.current = false;
                   flashBanner(t("runway.emergencyDeclared"), 'emg');
                 }}
                 style={{backgroundColor:'#b71c1c', paddingHorizontal:12, paddingVertical:8, borderRadius:10}}
@@ -4935,7 +4790,7 @@ useEffect(() => {
 )}
 
 {/* === RUNWAY: Banner efímero 6s === */}
-{banner && (
+{banner && (banner.key !== 'hold-short-wait' || !selected) && (
   <View style={{
     position:'absolute', left:10, right:10, bottom: Platform.OS==='android'? 270 : 240,
     backgroundColor:'#263238', borderRadius:12, padding:10, elevation:4

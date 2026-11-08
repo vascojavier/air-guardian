@@ -1550,26 +1550,6 @@ if (leaderInFinalStrict && secondNow && name === secondNow) {
     return { lat: hs.lat, lon: hs.lon };
   } 
 
-function hasAnyArrivalInFinalLike() {
-  for (const L of (runwayState.landings || [])) {
-    const n = L?.name;
-    if (!n) continue;
-    if (!userLocations[n]) continue;
-
-    const st = getReportedOpsState(n);
-    const latched = isFinalLatched(n);
-
-    if (st === 'FINAL' || st === 'B1' || latched) {
-      console.log('[FINAL-LIKE BLOCK]', { name: n, st, latched });
-      return true;
-    }
-  }
-
-  return false;
-}
-
-  
-
   // === Ground guidance: TAXI_APRON ===
   function getApronPointFromAirfield() {
     const a = lastAirfield;
@@ -1930,6 +1910,24 @@ function consumeLeaderOnRunwayOccupied(leaderNameNow) {
   try { publishRunwayState(); } catch {}
 
   return true;
+}
+
+function hasAnyArrivalInFinalLike() {
+  for (const L of (runwayState.landings || [])) {
+    const n = L?.name;
+    if (!n) continue;
+    if (!userLocations[n]) continue;
+
+    const st = getReportedOpsState(n);
+    const latched = isFinalLatched(n);
+
+    if (st === 'FINAL' || st === 'B1' || latched) {
+      console.log('[FINAL-LIKE BLOCK]', { name: n, st, latched });
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function consumeTakeoffOnRunwayOccupied(name) {
@@ -2388,6 +2386,9 @@ if (acceptedState === 'RUNWAY_OCCUPIED' && !runwayState.inUse && isLeaderNow) {
     }
 
 if (acceptedState === 'AIRBORNE') {
+  if (runwayState.inUse?.action === 'takeoff' && runwayState.inUse.name === name) {
+    runwayState.inUse = null;
+  }
   try { setFinalLatched(name, false); } catch {}
   runwayState.takeoffs = (runwayState.takeoffs || []).filter(t => t.name !== name);
   clearATC(name);
