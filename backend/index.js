@@ -1418,18 +1418,12 @@ function publishRunwayState() {
 //    - no-leader => HOLD en B1 (A_TO_B1) (NO FINAL)
 const clearance = decideRunwayClearance();
 
-const occupiedByLanding =
-  runwayState.inUse?.action === 'landing';
-
 if (stReported === 'B1') {
   const canAdvanceToFinal =
     leaderNow &&
     name === leaderNow &&
     gNow?.thr &&
-    (
-      clearance.winner === 'ARR' ||
-      occupiedByLanding
-    );
+    clearance.winner === 'ARR';
 
   if (canAdvanceToFinal) {
     assignedOps[name] = 'FINAL';
@@ -1873,6 +1867,8 @@ runwayState.opsTargets  = opsTargets;   // ✅ IMPORTANTE
 // ========= Ciclo principal =========
 function cleanupInUseIfDone() {
   if (!runwayState.inUse) return;
+  if (runwayState.inUse.action === 'landing' &&
+      getReportedOpsState(runwayState.inUse.name) === 'RUNWAY_OCCUPIED') return;
   const end = runwayState.inUse.startedAt + runwayState.inUse.slotMin * 60000;
   if (Date.now() > end) runwayState.inUse = null;
 }

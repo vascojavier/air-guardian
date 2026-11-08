@@ -95,7 +95,7 @@
     "lineUp": "Line up and wait",
     "clearedToTakeoff": "Cleared for takeoff",
     "goAroundRegistered": "Go-around registered. Re-entering the sequence.",
-    "trafficOnFinalWait": "Hold short. Wait at the holding point.",
+    "trafficOnFinalWait": "Stop and hold short of the runway.",
     "clearedToLandSpoken": "Cleared to land {{rwy}}",
     "yourTakeoffTurnIsNumber": "Your takeoff turn is number {{n}}.",
     "yourLandingTurnIsNumber": "Your landing turn is number {{n}}.",

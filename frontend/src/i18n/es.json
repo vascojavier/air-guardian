@@ -86,7 +86,7 @@
     "clearedToLand": "Tiene permiso para aterrizar",
     "lineUp": "Ocupe cabecera de pista",
     "clearedToTakeoff": "Tiene permiso para despegar",
-    "trafficOnFinalWait": "Hold short. Espere en el punto de espera.",
+    "trafficOnFinalWait": "Detenga la marcha y espere antes de entrar a pista.",
     "goAroundRegistered": "Arremetida registrada. Reingresando en secuencia.",
     "clearedToLandSpoken": "Autorizado a aterrizar {{rwy}}",
     "yourTakeoffTurnIsNumber": "Su turno de despegue es número {{n}}.",

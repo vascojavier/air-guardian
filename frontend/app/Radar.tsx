@@ -334,7 +334,6 @@ const Radar = () => {
   const assignedRef = useRef<string | null>(null);
   const opsTargetsRef = useRef<Record<string, { fix:string; lat:number; lon:number }> | null>(null);
   const lastApronStopSentRef = useRef(0);
-  const runwayOccupiedSentRef = useRef(false);
   const takeoffEntryLatchedRef = useRef(false);
   
 
@@ -480,6 +479,7 @@ function myNameKeysFirstMatch<T>(obj: Record<string,T> | null | undefined): T | 
 function maybeConfirmApronStop(socket:any) {
   const me = myPlaneRef.current;
   if (!me) return;
+  if (lastOpsStateRef.current === 'RUNWAY_OCCUPIED' || isOnRunwayStrip()) return;
 
   const targets = opsTargetsRef.current;
   const t = myNameKeysFirstMatch(targets);
@@ -522,7 +522,6 @@ function maybeConfirmTaxiApron() {
     movingOnGround &&
     notArrivedYet &&
     (
-      currentOps === 'RUNWAY_OCCUPIED' ||
       currentOps === 'RUNWAY_CLEAR' ||
       currentOps === 'TAXI_APRON'
     )
@@ -539,6 +538,8 @@ function maybeConfirmTaxiApron() {
   }
 }
 
+const HOLD_SHORT_ARRIVAL_M = 65;
+
 function maybeConfirmHoldShort() {
   const me = myPlaneRef.current;
   if (!me) return;
@@ -554,11 +555,10 @@ function maybeConfirmHoldShort() {
   const speed = me.speed ?? 0;
   const currentOps = lastOpsStateRef.current;
 
-  const ARRIVE_HS_M = 65;
   const SLOW_KMH = 15;
 
   if (
-    d <= ARRIVE_HS_M &&
+    d <= HOLD_SHORT_ARRIVAL_M &&
     speed <= SLOW_KMH &&
     currentOps !== 'HOLD_SHORT'
   ) {
@@ -610,9 +610,9 @@ function emitOpsNow(next: OpsState, source: string = 'UNKNOWN', extra?: Record<s
   const stAny: any = runwayState?.state;
   const assigned2 = stAny?.assignedOps?.[meKey]; // 'FINAL' | 'A_TO_Bx' | ...
 
-  // ✅ Si backend asignó FINAL, frontend NO puede cambiar OPS
-  //    ÚNICA excepción: RUNWAY_OCCUPIED (touchdown)
-  if (assigned2 === 'FINAL' && next !== 'RUNWAY_OCCUPIED') {
+  // Permitir el aterrizaje y la salida aunque todavía se vea el FINAL anterior.
+  const clearingAfterLanding = next === 'RUNWAY_CLEAR' && iAmOccupyingRef.current === 'landing';
+  if (assigned2 === 'FINAL' && next !== 'RUNWAY_OCCUPIED' && !clearingAfterLanding) {
     console.log('[OPS] BLOCKED by FINAL lock (backend).', { next, source, assigned2, meKey });
     return;
   }
@@ -780,7 +780,6 @@ useFocusEffect(
       finalLockedRef.current = false;
 
       apronLatchRef.current = false;
-      runwayOccupiedSentRef.current = false;     // 👈 IMPORTANTÍSIMO
       lastApronStopSentRef.current = 0;
 
       iAmOccupyingRef.current = null;
@@ -1201,6 +1200,12 @@ function buildApproachToHoldEntry(
   return [from, entryPoint];
 }
 
+function hasReachedFinalThreshold(position: NavLL, threshold: NavLL, runwayCourseDeg: number): boolean {
+  const distance = getDistance(threshold.latitude, threshold.longitude, position.latitude, position.longitude);
+  const bearing = bearingDeg(threshold.latitude, threshold.longitude, position.latitude, position.longitude);
+  return distance * Math.cos(toRad(bearing - runwayCourseDeg)) >= 0;
+}
+
 function buildFinalTransitionPath(
   from: NavLL,
   currentHeadingDeg: number,
@@ -1208,6 +1213,8 @@ function buildFinalTransitionPath(
   runwayCourseDeg: number,
   radiusM: number
 ): NavLL[] {
+  if (hasReachedFinalThreshold(from, threshold, runwayCourseDeg)) return [];
+
   const hdg = normalizeHeadingDeg(currentHeadingDeg);
   const finalCourse = normalizeHeadingDeg(runwayCourseDeg);
   const backCourse = normalizeHeadingDeg(finalCourse + 180);
@@ -1345,9 +1352,9 @@ function buildAdvancedNavPathForMeV3(args: {
   // FINAL: interceptación del eje o tramo directo en final corta.
   if ((assigned === 'FINAL' || currentOps === 'FINAL') && activeThreshold && rw) {
     const runwayCourseDeg =
-      rw.active_end === 'A'
-        ? rw.heading_true_ab
-        : (rw.heading_true_ab + 180) % 360;
+      rw.active_end === 'B'
+        ? (rw.heading_true_ab + 180) % 360
+        : rw.heading_true_ab;
 
     return buildFinalTransitionPath(
       mePos,
@@ -1484,7 +1491,7 @@ const activeIdent = useMemo<string | null>(() => {
 }, [rw]);
 
 const runwayHeading = rw
-  ? (rw.active_end === 'A' ? rw.heading_true_ab : (rw.heading_true_ab + 180) % 360)
+  ? (rw.active_end === 'B' ? (rw.heading_true_ab + 180) % 360 : rw.heading_true_ab)
   : 0;
 const runwayMid = (A_runway && B_runway)
   ? { latitude: (A_runway.latitude + B_runway.latitude) / 2, longitude: (A_runway.longitude + B_runway.longitude) / 2 }
@@ -1768,6 +1775,7 @@ const [banner, setBanner] = useState<{ text: string; key?: string } | null>(null
 
 // flags de flujo
 const takeoffRequestedRef = useRef(false);
+const LANDING_TAXI_SPEED_KMH = 80;
 const landingRequestedRef = useRef(false);
 const navGuidanceEndedRef = useRef(false);
 const iAmOccupyingRef = useRef<null | 'landing' | 'takeoff'>(null); // sé si marqué occupy
@@ -2167,21 +2175,6 @@ const cancelMyRequest = () => {
   socketRef.current?.emit('runway-cancel', payload);
   socketRef.current?.emit('runway-get');
 };
-
-const markRunwayOccupy = (action: 'landing' | 'takeoff' | any) => {
-  socketRef.current?.emit('runway-occupy', {
-    action,
-    name: myPlane?.id || username,
-    callsign: callsign || '',
-  });
-  socketRef.current?.emit('runway-get');
-};
-
-const markRunwayClear = () => {
-  socketRef.current?.emit('runway-clear');
-  socketRef.current?.emit('runway-get');
-};
-
 
   // === RUNWAY: wrappers para setear flags y banners ===
   const requestLandingLabel = () => {
@@ -3816,25 +3809,34 @@ function reportIfDwellInside(
   onArrive();
 }
 
-const takeoffFix = takeoffRequestedRef.current && iAmOccupyingRef.current !== 'takeoff'
-  ? getBackendTargetForMe()?.fix
-  : undefined;
+const takeoffTarget = takeoffRequestedRef.current && iAmOccupyingRef.current !== 'takeoff'
+  ? getBackendTargetForMe()
+  : null;
 const waitingAtHoldShort =
-  takeoffFix === 'HOLD_SHORT' && lastOpsStateRef.current === 'HOLD_SHORT';
-const clearedForTakeoff = takeoffFix === 'RWY';
+  takeoffTarget?.fix === 'HOLD_SHORT' &&
+  (lastOpsStateRef.current === 'HOLD_SHORT' ||
+    distanceMeters(myPlane.lat, myPlane.lon, takeoffTarget.lat, takeoffTarget.lon) <= HOLD_SHORT_ARRIVAL_M);
+const clearedForTakeoff = takeoffTarget?.fix === 'RWY';
+const holdShortAssigned = takeoffTarget?.fix === 'HOLD_SHORT';
 const holdShortText = t('runway.trafficOnFinalWait');
 
 useEffect(() => {
   if (!waitingAtHoldShort) {
-    setBanner(current => current?.key === 'hold-short-wait' ? null : current);
+    if (!holdShortAssigned) {
+      setBanner(current => current?.key === 'hold-short-wait' ? null : current);
+    }
     return;
   }
 
   const remind = () => flashBanner(holdShortText, 'hold-short-wait');
   remind();
+  try {
+    Speech.stop();
+    Speech.speak(holdShortText, { language: ttsLang });
+  } catch {}
   const reminder = setInterval(remind, 2 * 60 * 1000);
   return () => clearInterval(reminder);
-}, [waitingAtHoldShort, holdShortText]);
+}, [waitingAtHoldShort, holdShortAssigned, holdShortText, ttsLang]);
 
 useEffect(() => {
   if (!clearedForTakeoff) return;
@@ -3860,97 +3862,30 @@ useEffect(() => {
   const backendFix = backendTarget?.fix ?? null;
   const assignedNow = getBackendAssignedForMe();
 
-  const touchdownLike =
-    isOnRunwayStrip() &&
-    agl < 8 &&
-    speedKmh < 80;
+  const onRunway = isOnRunwayStrip();
+  const onGround = agl < 8;
+  const position = { latitude: myPlane.lat, longitude: myPlane.lon };
 
-const isLandingFlow =
-  !navGuidanceEndedRef.current &&
-  !takeoffRequestedRef.current &&
-  (
-    landingRequestedRef.current ||
-    assignedNow === 'FINAL' ||
-    assignedNow === 'B1'
-  );
-
-
-  
-
-  if (lastOpsStateRef.current === 'RUNWAY_CLEAR') {
-    runwayOccupiedSentRef.current = false;
+  if (
+    !navGuidanceEndedRef.current && !takeoffRequestedRef.current && !iAmOccupyingRef.current &&
+    assignedNow === 'FINAL' && !runwayState?.state?.inUse &&
+    onRunway && onGround && activeThreshold &&
+    hasReachedFinalThreshold(position, activeThreshold, runwayHeading)
+  ) {
+    emitOpsNow('RUNWAY_OCCUPIED', 'TOUCHDOWN_LATCH', { agl, speed: speedKmh });
+    iAmOccupyingRef.current = 'landing';
+    landingRequestedRef.current = false;
+    finalLockedRef.current = false;
   }
 
-
-  
-
-  if (touchdownLike && isLandingFlow) {
-    flashBanner(t("runway.vacateRunway"), 'free-runway');
-
-    apronLatchRef.current = true;
-
-    console.log('[TD DEBUG]', {
-      touchdownLike,
-      agl,
-      speedKmh,
-      assigned: assignedNow,
-      backendFix,
-      isLandingFlow,
-      takeoffRequested: takeoffRequestedRef.current,
-    });
-
-    if (!runwayOccupiedSentRef.current) {
-      console.log('[OPS] touchdown → RUNWAY_OCCUPIED (latch)');
-      emitOpsNow('RUNWAY_OCCUPIED', 'TOUCHDOWN_LATCH', {
-        touchdownLike,
-        agl,
-        speedKmh,
-      });
-      runwayOccupiedSentRef.current = true;
+  if (iAmOccupyingRef.current === 'landing') {
+    if (speedKmh < LANDING_TAXI_SPEED_KMH && !apronLatchRef.current) {
       apronLatchRef.current = true;
+      flashBanner(t('runway.vacateRunway'), 'free-runway');
     }
 
-    if (
-      landingRequestedRef.current &&
-      iAmOccupyingRef.current !== 'landing' &&
-      defaultActionForMe() === 'land'
-    ) {
-      markRunwayOccupy('landing');
-      iAmOccupyingRef.current = 'landing';
-
-      try { cancelMyRequest(); } catch {}
-      landingRequestedRef.current = false;
-      finalLockedRef.current = false;
-      socketRef.current?.emit('runway-get');
-    }
-  } else {
-    let activeEnd: 'A' | 'B' | null = null;
-    if ((rw as any).active_end === 'B') activeEnd = 'B';
-    else activeEnd = 'A';
-
-    const nearActiveThreshold =
-      activeEnd ? isNearThreshold(activeEnd, 200) : false;
-
-    const canAutoClearToApron =
-      isLandingFlow &&
-      !takeoffRequestedRef.current &&
-      backendFix === 'APRON' &&
-      (
-        iAmOccupyingRef.current === 'landing' ||
-        (
-          lastOpsStateRef.current === 'RUNWAY_OCCUPIED' &&
-          iAmGroundish() &&
-          nearActiveThreshold
-        )
-      );
-
-    if (canAutoClearToApron) {
-      markRunwayClear();
-
-      finalLockedRef.current = false;
-      emitOpsNow('RUNWAY_CLEAR', 'AUTOCLEAR');
-
-      apronLatchRef.current = true;
+    if (!onRunway && onGround) {
+      emitOpsNow('RUNWAY_CLEAR', 'AUTOCLEAR', { agl, speed: speedKmh });
       iAmOccupyingRef.current = null;
     }
   }
@@ -4162,6 +4097,15 @@ useEffect(() => {
   const assigned = getBackendAssignedForMe2();
   const backendTarget = getBackendTargetForMe();
   const currentOps = lastOpsStateRef.current as OpsState | null;
+
+  if (iAmOccupyingRef.current === 'landing' || currentOps === 'RUNWAY_CLEAR' || backendTarget?.fix === 'APRON') {
+    const apron = backendTarget?.fix === 'APRON'
+      ? { latitude: backendTarget.lat, longitude: backendTarget.lon }
+      : getApronPoint();
+    const position = { latitude: myPlane.lat, longitude: myPlane.lon };
+    setNavPath(apron && myPlane.speed < LANDING_TAXI_SPEED_KMH ? [position, apron] : []);
+    return;
+  }
 
   const path = buildAdvancedNavPathForMeV3({
     myPlane,
