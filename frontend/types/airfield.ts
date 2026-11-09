@@ -43,12 +43,15 @@ export type Runway = {
   identB: string; // "27", "36R", etc.
   thresholdA: { lat: number; lng: number };
   thresholdB: { lat: number; lng: number };
+  endA?: { lat: number; lng: number };
+  endB?: { lat: number; lng: number };
   heading_true_ab: number;  // grados (A → B)
   length_m?: number;
   width_m?: number;
   surface?: string;         // "asphalt" | "grass" | ...
   active_end?: RunwayEndId; // cabecera activa ('A' | 'B')
   beacons?: RunwayBeacon[]; // <<< NUEVO: B1 y B2 para aproximación
+  beaconsByEnd?: Partial<Record<RunwayEndId, RunwayBeacon[]>>;
   notes?: string;
 };
 
@@ -61,6 +64,7 @@ export type Airfield = {
   elevation_ft?: number;
   location?: { lat: number; lng: number };
   runways: Runway[];
+  incompleteRunways?: number;
   meteo?: Meteo;
   apron?: { lat: number; lng: number };
   lastUpdated: number;

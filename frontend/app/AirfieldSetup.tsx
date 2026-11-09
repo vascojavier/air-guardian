@@ -5,7 +5,8 @@ import MapView, { Marker, Polyline, LatLng } from 'react-native-maps';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import ioDefault from 'socket.io-client'; // ✅ default import (compat v2/v3)
 //import type { Socket } from "socket.io-client";
-import { useRouter } from 'expo-router';
+import { Redirect, useRouter } from 'expo-router';
+import { useUser } from '../context/UserContext';
 
 
 type IOSocket = ReturnType<typeof ioDefault>;
@@ -92,6 +93,11 @@ const BACKEND_URL =
   (Platform.OS === 'web' ? 'http://localhost:3000' : 'http://192.168.0.10:3000');
 
 export default function AirfieldSetup() {
+  const { role } = useUser();
+  return role === 'aeroclub' ? <AirfieldSetupEditor /> : <Redirect href="/welcome" />;
+}
+
+function AirfieldSetupEditor() {
   const router = useRouter();
 
   // Estado cabeceras

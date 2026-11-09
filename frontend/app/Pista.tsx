@@ -1,14 +1,14 @@
 // C:\air-guardian\frontend\app\Pista.tsx
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, Button, StyleSheet, Alert, TextInput, Modal } from 'react-native';
 import MapView, { Marker, Polyline, MapPressEvent, Region } from 'react-native-maps';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useUser } from '../context/UserContext';
-import { useRouter } from 'expo-router';
-import ioDefault from 'socket.io-client';
-import { Platform } from 'react-native';
-import type { Airfield, Runway } from '../types/airfield';
+import { useFocusEffect, useRouter } from 'expo-router';
+import type { Airfield, Runway, RunwayBeacon, RunwayEndId } from '../types/airfield';
 import { socket } from '../utils/socket';
+import { BACKEND_URL } from '../utils/config';
+import { Picker } from '@react-native-picker/picker';
 import { useTranslation } from 'react-i18next';
 
 // ---------------------- Tipos locales ----------------------
@@ -100,6 +100,52 @@ function makeDefaultBeacons(A: LatLng, B: LatLng, active: 'A' | 'B') {
   return { B1, B2 };
 }
 
+function reciprocalIdent(ident: string): string {
+  const reciprocal = ((Number(ident.slice(0, 2)) + 17) % 36) + 1;
+  const suffix = ident[2] === 'L' ? 'R' : ident[2] === 'R' ? 'L' : ident[2] ?? '';
+  return String(reciprocal).padStart(2, '0') + suffix;
+}
+
+function runwayBeacons(B1: LatLng, B2: LatLng): RunwayBeacon[] {
+  return [
+    { name: 'B1', lat: B1.latitude, lon: B1.longitude },
+    { name: 'B2', lat: B2.latitude, lon: B2.longitude },
+  ];
+}
+
+function changeRunwayEnd(runway: Runway, end: RunwayEndId): Runway {
+  const currentEnd = runway.active_end ?? 'A';
+  const byEnd = { ...runway.beaconsByEnd };
+  if (runway.beacons?.length === 2) byEnd[currentEnd] = runway.beacons;
+  const A = { latitude: runway.thresholdA.lat, longitude: runway.thresholdA.lng };
+  const B = { latitude: runway.thresholdB.lat, longitude: runway.thresholdB.lng };
+  if (!byEnd[end]) {
+    const { B1, B2 } = makeDefaultBeacons(A, B, end);
+    byEnd[end] = runwayBeacons(B1, B2);
+  }
+  return { ...runway, active_end: end, beacons: byEnd[end], beaconsByEnd: byEnd };
+}
+
+function chooseOperativeRunway(airport: Airfield, id: string): Airfield | null {
+  const runway = airport.runways.find(item => item.id === id);
+  if (!runway) return null;
+  return { ...airport, runways: [runway, ...airport.runways.filter(item => item.id !== id)] };
+}
+
+function thresholdPosition(point: Runway['thresholdA']): LatLng {
+  return { latitude: point.lat, longitude: point.lng };
+}
+
+function previewHoldShort(A: LatLng, B: LatLng, apron: LatLng, end: RunwayEndId) {
+  const axis = calcularRumbo(A, B);
+  const distance = 111195 * Math.hypot(apron.latitude - A.latitude,
+    (apron.longitude - A.longitude) * Math.cos(toRad(A.latitude)));
+  const lateral = distance * Math.sin(toRad(calcularRumbo(A, apron) - axis));
+  const side = axis + (lateral < -1 ? -90 : 90);
+  const approach = computeApproachBearing(A, B, end);
+  return destinationPoint(destinationPoint(end === 'A' ? A : B, approach, 80), side, 80);
+}
+
 export default function PistaScreen() {
   const { t } = useTranslation();
   const router = useRouter();
@@ -111,7 +157,6 @@ export default function PistaScreen() {
   const [rumbo, setRumbo] = useState<number>(0);
   const [modoSeteo, setModoSeteo] = useState<boolean>(false);
   const [numeroPista, setNumeroPista] = useState<string>('');
-  const [showModal, setShowModal] = useState<boolean>(false);
   const [showDetails, setShowDetails] = useState(true);
   const [beaconB1, setBeaconB1] = useState<LatLng | null>(null);
   const [beaconB2, setBeaconB2] = useState<LatLng | null>(null);
@@ -121,315 +166,360 @@ export default function PistaScreen() {
   const [apronEdit, setApronEdit] = useState(false); // modo edición
   const [tempApron, setTempApron] = useState<LatLng | null>(null); // pin temporal
 
-  // Asegurar conexión cuando entra a Pista
-  useEffect(() => {
-    if (!socket.connected) socket.connect();
-  }, []);
+  const [editing, setEditing] = useState(false);
+  const [draftAirport, setDraftAirport] = useState<Airfield | null>(null);
+  const [selectedRunwayId, setSelectedRunwayId] = useState('');
+  const [showImport, setShowImport] = useState(false);
+  const [icao, setIcao] = useState('');
+  const [importing, setImporting] = useState(false);
+  const importRequestRef = useRef<AbortController | null>(null);
+  const [live, setLive] = useState(false);
+  const [current, setCurrent] = useState<Airfield | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const currentRef = useRef<Airfield | null>(null);
+  const editingRef = useRef(false);
+  const draftBaseRef = useRef<Airfield | null>(null);
+  const publishingRef = useRef(false);
+  const mapRef = useRef<MapView | null>(null);
+  const [mapReady, setMapReady] = useState(false);
 
-  // Carga inicial: primero intentamos airfieldActive; si no hay, caemos a pistaActiva (legacy)
-  useEffect(() => {
-    const cargar = async () => {
-      try {
-        const afRaw = await AsyncStorage.getItem('airfieldActive');
-        if (afRaw) {
-          const af: Airfield = JSON.parse(afRaw);
-          const rw = af.runways?.[0];
-
-          // ⬇️ cargar APRON si existe
-          const afApron = (af as any)?.apron;
-          if (afApron && typeof afApron.lat === 'number' && typeof afApron.lng === 'number') {
-            setApron({ latitude: afApron.lat, longitude: afApron.lng });
-          }
-
-          if (rw) {
-            const A: LatLng = { latitude: rw.thresholdA.lat, longitude: rw.thresholdA.lng };
-            const B: LatLng = { latitude: rw.thresholdB.lat, longitude: rw.thresholdB.lng };
-            setCabeceraA(A);
-            setCabeceraB(B);
-            const active = (rw.active_end ?? 'A') as 'A' | 'B';
-            setCabeceraActiva(active);
-            const baseHeading = rw.heading_true_ab;
-            setRumbo(active === 'A' ? baseHeading : (baseHeading + 180) % 360);
-            setNumeroPista(rw.identA ?? '');
-
-            // ==== Beacons: usar los guardados si existen, si no autogenerar ====
-            const beaconsAny = (rw as any).beacons;
-            if (Array.isArray(beaconsAny) && beaconsAny.length >= 2) {
-              const b1 = beaconsAny.find((b: any) => (b.name || '').toUpperCase() === 'B1');
-              const b2 = beaconsAny.find((b: any) => (b.name || '').toUpperCase() === 'B2');
-              if (b1 && b2) {
-                setBeaconB1({ latitude: b1.lat, longitude: b1.lon });
-                setBeaconB2({ latitude: b2.lat, longitude: b2.lon });
-              } else {
-                const { B1, B2 } = makeDefaultBeacons(A, B, active);
-                setBeaconB1(B1);
-                setBeaconB2(B2);
-              }
-            } else {
-              const { B1, B2 } = makeDefaultBeacons(A, B, active);
-              setBeaconB1(B1);
-              setBeaconB2(B2);
-            }
-
-            // ← APRON desde airfield o desde runway, si existe
-            try {
-              const apr: any = (af as any)?.apron || (rw as any)?.apron;
-              if (apr && typeof apr.lat === 'number' && typeof apr.lng === 'number') {
-                setApron({ latitude: apr.lat, longitude: apr.lng });
-              }
-            } catch {}
-
-            // re-publicar
-            try {
-              socket.emit('airfield-upsert', { airfield: af });
-            } catch {}
-
-            return;
-          }
-        }
-
-        // Fallback legacy
-        const datos = await AsyncStorage.getItem('pistaActiva');
-        if (datos) {
-          const { runway, defaultActiveHeading, numero } = JSON.parse(datos);
-          setCabeceraA(runway.A);
-          setCabeceraB(runway.B);
-          setCabeceraActiva(defaultActiveHeading);
-          setNumeroPista(numero || '');
-          const calcHeading = calcularRumbo(runway.A, runway.B);
-          setRumbo(defaultActiveHeading === 'A' ? calcHeading : (calcHeading + 180) % 360);
-        }
-      } catch (error) {
-        console.error(t('pista.loadError'), error);
-      }
-    };
-
-    cargar();
-    return () => {
-      // ❌ no desconectes el socket global acá
-    };
-  }, [socket, t]);
-
-  // ---------------------- Handlers ----------------------
-  const handleMapPress = async (event: MapPressEvent) => {
-    const coords = event.nativeEvent.coordinate;
-
-    // 1) Modo APRON tiene prioridad
-    if (apronEdit) {
-      setTempApron(coords);
+  function showAirfield(airfield: Airfield | null) {
+    const runway = airfield?.runways?.[0];
+    if (!runway) {
+      setCabeceraA(null);
+      setCabeceraB(null);
+      setCabeceraActiva(null);
+      setNumeroPista('');
+      setBeaconB1(null);
+      setBeaconB2(null);
+      setApron(null);
       return;
     }
+    const A = { latitude: runway.thresholdA.lat, longitude: runway.thresholdA.lng };
+    const B = { latitude: runway.thresholdB.lat, longitude: runway.thresholdB.lng };
+    const end = runway.active_end ?? 'A';
+    const points = makeDefaultBeacons(A, B, end);
+    const b1 = runway.beacons?.find(beacon => beacon.name === 'B1');
+    const b2 = runway.beacons?.find(beacon => beacon.name === 'B2');
+    setCabeceraA(A);
+    setCabeceraB(B);
+    setCabeceraActiva(end);
+    setNumeroPista(runway.identA);
+    setRumbo((runway.heading_true_ab + (end === 'B' ? 180 : 0)) % 360);
+    setBeaconB1(b1 ? { latitude: b1.lat, longitude: b1.lon } : points.B1);
+    setBeaconB2(b2 ? { latitude: b2.lat, longitude: b2.lon } : points.B2);
+    setApron(airfield?.apron ? { latitude: airfield.apron.lat, longitude: airfield.apron.lng } : null);
+  }
 
-    // 2) Modo seteo de pista (A/B)
-    if (role !== 'aeroclub' || !modoSeteo) return;
-    if (!cabeceraA) {
-      setCabeceraA(coords);
-      Alert.alert(t('pista.setThresholdA'));
-    } else if (!cabeceraB) {
-      setCabeceraB(coords);
-      setShowModal(true);
+  useFocusEffect(React.useCallback(() => {
+    let disposed = false;
+    let remoteReceived = false;
+    const receive = ({ airfield }: { airfield?: Airfield }) => {
+      if (!airfield?.runways?.[0]?.thresholdA || !airfield.runways[0].thresholdB) return;
+      remoteReceived = true;
+      currentRef.current = airfield;
+      setCurrent(airfield);
+      setLive(true);
+      if (!editingRef.current) showAirfield(airfield);
+      if (role === 'aeroclub') {
+        void AsyncStorage.setItem('airfieldActive', JSON.stringify(airfield)).catch(() => {});
+      }
+    };
+    const request = () => socket.emit('airfield-get');
+    socket.on('airfield-update', receive);
+    socket.on('connect', request);
+    if (socket.connected) request();
+    else socket.connect();
+
+    void (async () => {
+      try {
+        const values = await AsyncStorage.multiGet(['airfieldActive', 'pistaActiva']);
+        if (disposed || remoteReceived) return;
+        const raw = values[0][1];
+        let saved: Airfield | null = raw ? JSON.parse(raw) : null;
+        if (!saved?.runways?.[0] && values[1][1]) {
+          const legacy = JSON.parse(values[1][1]);
+          const { A, B } = legacy.runway ?? {};
+          if (!A || !B) return;
+          const heading = calcularRumbo(A, B);
+          const identA = legacy.numero || headingToRunwayIdent(heading);
+          saved = {
+            id: uuid(), source: 'manual', lastUpdated: Date.now(), location: midpointToLoc(A, B),
+            runways: [{
+              id: uuid(), identA, identB: headingToRunwayIdent(heading + 180),
+              thresholdA: { lat: A.latitude, lng: A.longitude },
+              thresholdB: { lat: B.latitude, lng: B.longitude },
+              heading_true_ab: heading,
+              active_end: legacy.defaultActiveHeading === 'B' ? 'B' : 'A',
+            }],
+          };
+        }
+        if (!saved?.runways?.[0]) return;
+        currentRef.current = saved;
+        setCurrent(saved);
+        setLive(false);
+        if (!editingRef.current) showAirfield(saved);
+      } catch (error) {
+        console.warn('Could not read saved runway:', error);
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      socket.off('airfield-update', receive);
+      socket.off('connect', request);
+      importRequestRef.current?.abort();
+      importRequestRef.current = null;
+    };
+  }, [role]));
+
+  const currentRunway = current?.runways?.[0];
+  const mapAirport = editing ? draftAirport : current;
+  const mapRunway = editing ? draftAirport?.runways.find(runway => runway.id === selectedRunwayId) : currentRunway;
+  const endA = mapRunway?.endA ? thresholdPosition(mapRunway.endA) : cabeceraA;
+  const endB = mapRunway?.endB ? thresholdPosition(mapRunway.endB) : cabeceraB;
+  const otherRunways = (mapAirport?.runways ?? []).filter(runway =>
+    runway.id !== (editing ? selectedRunwayId : currentRunway?.id)
+  );
+
+  useEffect(() => {
+    if (!mapReady || !mapAirport?.runways.length) return;
+    mapRef.current?.fitToCoordinates(
+      mapAirport.runways.flatMap(runway => [
+        thresholdPosition(runway.endA ?? runway.thresholdA), thresholdPosition(runway.endB ?? runway.thresholdB),
+      ]),
+      { edgePadding: { top: 60, left: 50, bottom: 60, right: 50 }, animated: true }
+    );
+  }, [mapReady, mapAirport?.id, mapAirport?.runways.length]);
+
+  async function importAirport() {
+    const code = icao.trim().toUpperCase();
+    if (!/^[A-Z]{4}$/.test(code) || role !== 'aeroclub' || importRequestRef.current) return;
+    const controller = new AbortController();
+    importRequestRef.current = controller;
+    setImporting(true);
+    try {
+      const response = await fetch(BACKEND_URL + '/api/airports/' + code, { signal: controller.signal });
+      if (!response.ok) {
+        Alert.alert(t(response.status === 404 ? 'pistaAdmin.airportNotFound' : 'pistaAdmin.catalogError'));
+        return;
+      }
+      const airport: Airfield = await response.json();
+      if (controller.signal.aborted) return;
+      if (!airport.runways?.length) {
+        Alert.alert(t('pistaAdmin.noUsableRunways'));
+        return;
+      }
+      startEdit(true);
+      setModoSeteo(false);
+      setDraftAirport(airport);
+      setShowImport(false);
+    } catch {
+      if (!controller.signal.aborted) Alert.alert(t('pistaAdmin.catalogError'));
+    } finally {
+      if (importRequestRef.current === controller) importRequestRef.current = null;
+      setImporting(false);
     }
-  };
+  }
 
-  // Poné esto ARRIBA del componente (o justo antes de cambiarCabecera):
-  const BACKEND_URL =
-    (process.env.EXPO_PUBLIC_BACKEND_URL as string) ||
-    'https://air-guardian-backend.onrender.com';
+  function selectDraftRunway(id: string) {
+    if (!draftAirport || !id || id === selectedRunwayId || publishingRef.current) return;
+    const existingDraft = selectedRunwayId ? buildDraftAirfield() : draftAirport;
+    if (!existingDraft) return;
+    const next = chooseOperativeRunway(existingDraft, id);
+    if (!next) return;
+    setDraftAirport(next);
+    setSelectedRunwayId(id);
+    setApronEdit(false);
+    setTempApron(null);
+    showAirfield(next);
+  }
 
-  async function emitAirfieldUpsertReliable(af: Airfield, reuse?: ReturnType<typeof ioDefault> | null) {
-    return new Promise<void>((resolve) => {
-      if (reuse) {
-        const s = reuse;
-        const doEmit = () => {
-          try {
-            s.emit('airfield-upsert', { airfield: af });
-            setTimeout(resolve, 200);
-          } catch (_) {
+  function chooseDraftEnd(end: RunwayEndId) {
+    if (!cabeceraA || !cabeceraB || end === cabeceraActiva) return;
+    const draft = buildDraftAirfield();
+    if (!draft) return;
+    const runway = changeRunwayEnd(draft.runways[0], end);
+    const next = { ...draft, runways: [runway, ...draft.runways.slice(1)] };
+    if (draftAirport) setDraftAirport(next);
+    showAirfield(next);
+  }
+
+  function startEdit(newRunway = false, runwayId?: string) {
+    draftBaseRef.current = currentRef.current;
+    editingRef.current = true;
+    setEditing(true);
+    const currentAirport = currentRef.current;
+    const draft = newRunway ? null : currentAirport && runwayId
+      ? chooseOperativeRunway(currentAirport, runwayId) : currentAirport;
+    setDraftAirport(draft);
+    setSelectedRunwayId(draft?.runways[0]?.id ?? '');
+    setModoSeteo(newRunway);
+    setApronEdit(false);
+    setTempApron(null);
+    showAirfield(draft);
+  }
+
+  function cancelEdit() {
+    editingRef.current = false;
+    setEditing(false);
+    setDraftAirport(null);
+    setSelectedRunwayId('');
+    setModoSeteo(false);
+    setApronEdit(false);
+    setTempApron(null);
+    showAirfield(currentRef.current);
+  }
+
+  function handleMapPress(event: MapPressEvent) {
+    if (role !== 'aeroclub' || !editing || publishing) return;
+    const point = event.nativeEvent.coordinate;
+    if (apronEdit) {
+      setTempApron(point);
+      return;
+    }
+    if (!modoSeteo) return;
+    if (!cabeceraA) {
+      setCabeceraA(point);
+    } else if (!cabeceraB && (point.latitude !== cabeceraA.latitude || point.longitude !== cabeceraA.longitude)) {
+      setCabeceraB(point);
+      setCabeceraActiva('A');
+      const heading = calcularRumbo(cabeceraA, point);
+      setRumbo(heading);
+      setNumeroPista(headingToRunwayIdent(heading));
+      const { B1, B2 } = makeDefaultBeacons(cabeceraA, point, 'A');
+      setBeaconB1(B1);
+      setBeaconB2(B2);
+    }
+  }
+
+  function moveThreshold(end: RunwayEndId, point: LatLng) {
+    if (!editingRef.current || publishingRef.current || !cabeceraA || !cabeceraB || !cabeceraActiva) return;
+    const A = end === 'A' ? point : cabeceraA;
+    const B = end === 'B' ? point : cabeceraB;
+    if (A.latitude === B.latitude && A.longitude === B.longitude) return;
+    setCabeceraA(A);
+    setCabeceraB(B);
+    setRumbo((calcularRumbo(A, B) + (cabeceraActiva === 'B' ? 180 : 0)) % 360);
+  }
+
+  async function publishAirfield(next: Airfield, expected: Airfield | null) {
+    if (role !== 'aeroclub' || publishingRef.current) return;
+    const latest = currentRef.current;
+    if (latest?.id !== expected?.id || latest?.lastUpdated !== expected?.lastUpdated) {
+      Alert.alert(t('pistaAdmin.changed'));
+      return;
+    }
+    if (!socket.connected) {
+      Alert.alert(t('pistaAdmin.publishError'));
+      return;
+    }
+    publishingRef.current = true;
+    setPublishing(true);
+    const value = { ...next, lastUpdated: Math.max(Date.now(), (latest?.lastUpdated ?? 0) + 1) };
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const receive = ({ airfield }: { airfield?: Airfield }) => {
+          if (airfield?.id === value.id && airfield.lastUpdated === value.lastUpdated) {
+            clearTimeout(timeout);
+            socket.off('airfield-update', receive);
             resolve();
           }
         };
-        if (s.connected) return doEmit();
-        s.once('connect', doEmit);
-        s.connect();
-        return;
-      }
-
-      const s = ioDefault(BACKEND_URL, { transports: ['websocket'], autoConnect: false });
-      const cleanup = () => {
-        setTimeout(() => {
-          try { s.disconnect(); } catch {}
-          resolve();
-        }, 300);
-      };
-      s.on('connect', () => {
-        try { s.emit('airfield-upsert', { airfield: af }); } catch (_) {}
-        cleanup();
+        const timeout = setTimeout(() => {
+          socket.off('airfield-update', receive);
+          reject(new Error('Airfield publication was not confirmed'));
+        }, 5000);
+        socket.on('airfield-update', receive);
+        socket.emit('airfield-upsert', { airfield: value }, (result?: { error?: string }) => {
+          if (!result?.error) return;
+          clearTimeout(timeout);
+          socket.off('airfield-update', receive);
+          reject(new Error(result.error));
+        });
       });
-      s.on('connect_error', cleanup);
-      s.connect();
-    });
-  }
-
-  async function persistBeaconsAndEmit(b1: LatLng, b2: LatLng) {
-    const raw = await AsyncStorage.getItem('airfieldActive');
-    if (!raw) return;
-    const af: Airfield = JSON.parse(raw);
-    af.atcSettings ||= DEFAULT_ATC_SETTINGS;
-    (af as any).atcSettings ||= DEFAULT_ATC_SETTINGS;
-    if (!af?.runways?.[0]) return;
-
-    (af.runways[0] as any).beacons = [
-      { name: 'B1', lat: b1.latitude, lon: b1.longitude },
-      { name: 'B2', lat: b2.latitude, lon: b2.longitude },
-    ];
-    af.lastUpdated = Date.now();
-    await AsyncStorage.setItem('airfieldActive', JSON.stringify(af));
-
-    try { socket?.emit?.('airfield-upsert', { airfield: af }); } catch {}
-  }
-
-  async function persistApronAndEmit(p: LatLng) {
-    const raw = await AsyncStorage.getItem('airfieldActive');
-    if (!raw) return;
-    const af: Airfield = JSON.parse(raw);
-    af.atcSettings ||= DEFAULT_ATC_SETTINGS;
-    (af as any).atcSettings ||= DEFAULT_ATC_SETTINGS;
-    if (!af?.runways?.[0]) return;
-
-    (af as any).apron = { lat: p.latitude, lng: p.longitude };
-
-    af.lastUpdated = Date.now();
-    await AsyncStorage.setItem('airfieldActive', JSON.stringify(af));
-    try { socket?.emit?.('airfield-upsert', { airfield: af }); } catch {}
-  }
-
-  async function saveApronPoint() {
-    if (!tempApron) return;
-    setApron(tempApron);
-    await persistApronAndEmit(tempApron);
-    setApronEdit(false);
-    setTempApron(null);
-  }
-
-  function cancelApronEdit() {
-    setApronEdit(false);
-    setTempApron(null);
-  }
-
-  const cambiarCabecera = async () => {
-    if (!cabeceraActiva || !cabeceraA || !cabeceraB) return;
-
-    const nueva: 'A' | 'B' = cabeceraActiva === 'A' ? 'B' : 'A';
-    setCabeceraActiva(nueva);
-    setRumbo((prev) => (prev + 180) % 360);
-
-    try {
-      // (1) espejo legacy
-      const datosLegacy = await AsyncStorage.getItem('pistaActiva');
-      if (datosLegacy) {
-        const json = JSON.parse(datosLegacy);
-        json.defaultActiveHeading = nueva;
-        await AsyncStorage.setItem('pistaActiva', JSON.stringify(json));
-      }
-
-      // (2) actualizar airfieldActive
-      const raw = await AsyncStorage.getItem('airfieldActive');
-      if (!raw) return;
-
-      const af: Airfield = JSON.parse(raw);
-      af.atcSettings ||= DEFAULT_ATC_SETTINGS;
-      (af as any).atcSettings ||= DEFAULT_ATC_SETTINGS;
-      if (!af?.runways?.[0]) return;
-
-      af.runways[0].active_end = nueva;
-
-      // Regenerar beacons según cabecera nueva
-      try {
-        if (cabeceraA && cabeceraB) {
-          const { B1, B2 } = makeDefaultBeacons(cabeceraA, cabeceraB, nueva);
-          setBeaconB1(B1);
-          setBeaconB2(B2);
-          (af.runways[0] as any).beacons = [
-            { name: 'B1', lat: B1.latitude, lon: B1.longitude },
-            { name: 'B2', lat: B2.latitude, lon: B2.longitude },
-          ];
-        }
-      } catch {}
-
-      af.lastUpdated = Date.now();
-      await AsyncStorage.setItem('airfieldActive', JSON.stringify(af));
-
-      await emitAirfieldUpsertReliable(af, socket);
+      cancelEdit();
     } catch (error) {
-      console.error('Error al cambiar cabecera activa:', error);
+      Alert.alert(t(error instanceof Error && error.message === 'runway-busy'
+        ? 'pistaAdmin.runwayBusy' : 'pistaAdmin.publishError'));
+    } finally {
+      publishingRef.current = false;
+      setPublishing(false);
     }
-  };
+  }
 
-  const guardarPista = async () => {
-    if (!cabeceraA || !cabeceraB || !numeroPista) {
-      Alert.alert(t('pista.missingDataTitle'), t('pista.missingDataBody'));
-      return;
+  function confirmEndChange() {
+    if (!current || !currentRunway) return;
+    const end = currentRunway.active_end === 'B' ? 'A' : 'B';
+    const ident = end === 'A' ? currentRunway.identA : currentRunway.identB;
+    Alert.alert(t('pistaAdmin.activate', { ident }), t('pistaAdmin.confirmEnd'), [
+      { text: t('common.cancel'), style: 'cancel' },
+      {
+        text: t('pistaAdmin.publish'),
+        onPress: () => void publishAirfield({
+          ...current,
+          runways: [changeRunwayEnd(currentRunway, end), ...current.runways.slice(1)],
+        }, current),
+      },
+    ]);
+  }
+
+  function buildDraftAirfield(): Airfield | null {
+    if (!cabeceraA || !cabeceraB || !cabeceraActiva || !beaconB1 || !beaconB2) return null;
+    const identA = numeroPista.trim().toUpperCase().padStart(2, '0');
+    const original = draftAirport;
+    const previousRunway = original?.runways?.[0];
+    if (identA !== previousRunway?.identA && !/^(0[1-9]|[12][0-9]|3[0-6])[LCR]?$/.test(identA)) {
+      Alert.alert(t('pistaAdmin.invalidIdent'));
+      return null;
     }
-
-    const rumboAB = calcularRumbo(cabeceraA, cabeceraB);
-    setRumbo(rumboAB);
-    const activa: 'A' | 'B' = 'A';
-    setCabeceraActiva(activa);
-
-    const identA = numeroPista.trim();
-    const identB = headingToRunwayIdent((rumboAB + 180) % 360);
-
+    const identB = previousRunway?.identA === identA ? previousRunway.identB : reciprocalIdent(identA);
+    const beacons = runwayBeacons(beaconB1, beaconB2);
+    const sameThresholds = previousRunway?.thresholdA.lat === cabeceraA.latitude &&
+      previousRunway.thresholdA.lng === cabeceraA.longitude &&
+      previousRunway.thresholdB.lat === cabeceraB.latitude &&
+      previousRunway.thresholdB.lng === cabeceraB.longitude;
     const runway: Runway = {
-      id: uuid(),
-      identA,
-      identB,
+      ...previousRunway,
+      id: previousRunway?.id ?? uuid(),
+      identA, identB,
       thresholdA: { lat: cabeceraA.latitude, lng: cabeceraA.longitude },
       thresholdB: { lat: cabeceraB.latitude, lng: cabeceraB.longitude },
-      heading_true_ab: rumboAB,
-      active_end: activa,
+      heading_true_ab: sameThresholds ? previousRunway.heading_true_ab : calcularRumbo(cabeceraA, cabeceraB),
+      active_end: cabeceraActiva,
+      beacons,
+      beaconsByEnd: { ...(sameThresholds ? previousRunway?.beaconsByEnd : {}), [cabeceraActiva]: beacons },
     };
-
-    const { B1, B2 } = makeDefaultBeacons(cabeceraA, cabeceraB, activa);
-    (runway as any).beacons = [
-      { name: 'B1', lat: B1.latitude, lon: B1.longitude },
-      { name: 'B2', lat: B2.latitude, lon: B2.longitude },
-    ];
-    setBeaconB1(B1);
-    setBeaconB2(B2);
-
-    const airfield: Airfield = {
-      id: uuid(),
-      location: midpointToLoc(cabeceraA, cabeceraB),
-      runways: [runway],
+    return {
+      ...original,
+      id: original?.id ?? uuid(),
+      source: original?.source ?? 'manual',
       lastUpdated: Date.now(),
-      source: 'manual',
-      ...(apron ? { apron: { lat: apron.latitude, lng: apron.longitude } } : {}),
-      atcSettings: DEFAULT_ATC_SETTINGS,
+      location: original?.location ?? midpointToLoc(cabeceraA, cabeceraB),
+      runways: [runway, ...(original?.runways.slice(1) ?? [])],
+      apron: apron ? { lat: apron.latitude, lng: apron.longitude } : undefined,
+      atcSettings: original?.atcSettings ?? DEFAULT_ATC_SETTINGS,
     };
+  }
 
-    if (apron) (airfield as any).apron = { lat: apron.latitude, lng: apron.longitude };
-
-    try {
-      await AsyncStorage.setItem('airfieldActive', JSON.stringify(airfield));
-
-      const pistaLegacy = {
-        runway: { A: cabeceraA, B: cabeceraB },
-        defaultActiveHeading: activa,
-        numero: identA,
-      };
-      await AsyncStorage.setItem('pistaActiva', JSON.stringify(pistaLegacy));
-
-      try { socket?.emit?.('airfield-upsert', { airfield }); } catch {}
-
-      setModoSeteo(false);
-      setShowModal(false);
-
-      router.push('/AirfieldDetails');
-    } catch (e) {
-      console.error('Error guardando pista/airfield:', e);
-      Alert.alert('Error', 'No se pudo guardar la pista.');
+  function reviewDraft() {
+    const value = buildDraftAirfield();
+    if (!value) return;
+    if (value.source === 'ourairports' && !value.apron) {
+      Alert.alert(t('pistaAdmin.apronRequired'));
+      return;
     }
-  };
+    const expected = draftBaseRef.current;
+    const { identA, identB, active_end } = value.runways[0];
+    const summary = t('pistaAdmin.summary', {
+      a: identA, b: identB, active: active_end === 'B' ? identB : identA,
+    });
+    const apronSummary = t(apron ? 'pistaAdmin.apronSet' : 'pistaAdmin.apronUnset');
+    Alert.alert(t('pistaAdmin.review'), summary + '\n' + apronSummary + '\n' + t('pistaAdmin.confirmEnd'), [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('pistaAdmin.publish'), onPress: () => void publishAirfield(value, expected) },
+    ]);
+  }
 
   const onRegionChangeComplete = (region: Region) => {
     const threshold = 0.2; // ≈10 km
@@ -440,30 +530,60 @@ export default function PistaScreen() {
   return (
     <View style={{ flex: 1 }}>
       <MapView
+        ref={mapRef}
+        onMapReady={() => setMapReady(true)}
         style={{ flex: 1 }}
         initialRegion={{
-          latitude: cabeceraA?.latitude || 51.956,
-          longitude: cabeceraA?.longitude || 4.437,
+          latitude: cabeceraA?.latitude ?? 51.956,
+          longitude: cabeceraA?.longitude ?? 4.437,
           latitudeDelta: 0.01,
           longitudeDelta: 0.01,
         }}
         onPress={handleMapPress}
         onRegionChangeComplete={onRegionChangeComplete}
       >
-        {cabeceraA && showDetails && (
-          <Marker coordinate={cabeceraA} title={t('pista.thresholdA', { num: numeroPista })}>
+        {otherRunways.map(runway => {
+          const A = thresholdPosition(runway.endA ?? runway.thresholdA);
+          const B = thresholdPosition(runway.endB ?? runway.thresholdB);
+          return (
+            <React.Fragment key={runway.id}>
+              <Polyline coordinates={[A, B]} strokeColor="#607D8B" strokeWidth={2} />
+              <Marker coordinate={calcularPuntoIntermedio(A, B)}
+                title={runway.identA + '/' + runway.identB}
+                onPress={() => { if (editing && !apronEdit) selectDraftRunway(runway.id); }}>
+                <View style={[styles.marker, { backgroundColor: '#607D8B' }]}>
+                  <Text style={styles.markerText}>{runway.identA}/{runway.identB}</Text>
+                </View>
+              </Marker>
+            </React.Fragment>
+          );
+        })}
+        {editing && endA && endB && apron && (['A', 'B'] as const).map(end => (
+          <Marker key={'hold-' + end} coordinate={previewHoldShort(endA, endB, apron, end)}
+            title={t('runway.hold') + ' ' + end}>
+            <View style={[styles.marker, { backgroundColor: '#8D6015' }]}>
+              <Text style={styles.markerText}>{t('runway.hold')} {end}</Text>
+            </View>
+          </Marker>
+        ))}
+        {cabeceraA && (showDetails || editing) && (
+          <Marker coordinate={cabeceraA} title={t('pista.thresholdA', { num: numeroPista })}
+            draggable={editing && !!cabeceraB && !publishing}
+            onDragEnd={event => moveThreshold('A', event.nativeEvent.coordinate)}>
             <View style={styles.marker}><Text style={styles.markerText}>A</Text></View>
           </Marker>
         )}
 
-        {cabeceraB && showDetails && (
-          <Marker coordinate={cabeceraB} title={t('pista.thresholdB', { num: numeroPista })}>
+        {cabeceraB && (showDetails || editing) && (
+          <Marker coordinate={cabeceraB} title={t('pista.thresholdB', { num: draftAirport?.runways[0]?.identA === numeroPista ? draftAirport.runways[0].identB : !editing && currentRunway?.identA === numeroPista ? currentRunway.identB : numeroPista ? reciprocalIdent(numeroPista) : '' })}
+            draggable={editing && !publishing}
+            onDragEnd={event => moveThreshold('B', event.nativeEvent.coordinate)}>
             <View style={styles.marker}><Text style={styles.markerText}>B</Text></View>
           </Marker>
         )}
 
-        {cabeceraA && cabeceraB && (
-          <Polyline coordinates={[cabeceraA, cabeceraB]} strokeColor="black" strokeWidth={2} />
+        {endA && endB && (
+          <Polyline coordinates={[endA, endB]} strokeColor="black" strokeWidth={2} />
         )}
 
         {beaconB1 && beaconB2 && cabeceraA && cabeceraB && cabeceraActiva && (
@@ -481,12 +601,8 @@ export default function PistaScreen() {
         {beaconB2 && (
           <Marker
             coordinate={beaconB2}
-            draggable
-            onDragEnd={async (e) => {
-              const c = e.nativeEvent.coordinate;
-              setBeaconB2(c);
-              if (beaconB1) await persistBeaconsAndEmit(beaconB1, c);
-            }}
+            draggable={editing && !publishing}
+            onDragEnd={e => { if (editingRef.current && !publishingRef.current) setBeaconB2(e.nativeEvent.coordinate); }}
             title={t('pista.b2Title')}
             description={t('pista.b2Desc')}
           >
@@ -499,12 +615,8 @@ export default function PistaScreen() {
         {beaconB1 && (
           <Marker
             coordinate={beaconB1}
-            draggable
-            onDragEnd={async (e) => {
-              const c = e.nativeEvent.coordinate;
-              setBeaconB1(c);
-              if (beaconB2) await persistBeaconsAndEmit(c, beaconB2);
-            }}
+            draggable={editing && !publishing}
+            onDragEnd={e => { if (editingRef.current && !publishingRef.current) setBeaconB1(e.nativeEvent.coordinate); }}
             title={t('pista.b1Title')}
             description={t('pista.b1Desc')}
           >
@@ -549,98 +661,155 @@ export default function PistaScreen() {
         )}
       </MapView>
 
-      <Modal visible={showModal} transparent animationType="slide">
-        <View style={styles.modalContainer}>
-          <View style={styles.modalBox}>
-            <Text style={styles.text}>{t('pista.modalTitle')}</Text>
-            <TextInput
-              style={styles.input}
-              placeholder={t('pista.modalPlaceholder')}
-              value={numeroPista}
-              onChangeText={setNumeroPista}
-            />
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-              <Button title={t('pista.cancel')} onPress={() => setShowModal(false)} />
-              <Button title={t('pista.save')} onPress={guardarPista} />
-            </View>
-          </View>
-        </View>
-      </Modal>
-
       <View style={styles.panel}>
-        {cabeceraActiva && (
-          <Text style={styles.text}>
-            {t('pista.activeThreshold', { end: cabeceraActiva })}
-          </Text>
-        )}
-
-        {role === 'aeroclub' && (
+        {editing ? (
           <>
-            <Button title={t('pista.changeActiveThreshold')} onPress={cambiarCabecera} />
-
-            <Button
-              title={t('pista.autoGenerateB1B2')}
-              disabled={!cabeceraA || !cabeceraB || !cabeceraActiva}
-              onPress={async () => {
-                if (!cabeceraA || !cabeceraB || !cabeceraActiva) return;
-                const { B1, B2 } = makeDefaultBeacons(cabeceraA, cabeceraB, cabeceraActiva);
-                setBeaconB1(B1);
-                setBeaconB2(B2);
-                await persistBeaconsAndEmit(B1, B2);
-              }}
-            />
-
-            <Button
-              title={apronEdit ? t('pista.cancelMarkApron') : t('pista.markApron')}
-              onPress={() => {
-                setApronEdit(!apronEdit);
-                setTempApron(null);
-              }}
-            />
-
-            <Button
-              title="⚙️ ATC Settings"
-              onPress={() => router.push('/AirfieldDetails?tab=atc')}
-            />
-
-            <Button
-              title={modoSeteo ? t('pista.cancelRunwaySetup') : t('pista.setNewRunway')}
-              onPress={() => {
-                setCabeceraA(null);
-                setCabeceraB(null);
-                setCabeceraActiva(null);
-                setBeaconB1(null);
-                setBeaconB2(null);
-                setModoSeteo(!modoSeteo);
-                setNumeroPista('');
-              }}
-            />
+            <Text style={styles.text}>{t('pistaAdmin.draft')}{draftAirport?.name ? ' · ' + draftAirport.name : ''}</Text>
+            {draftAirport && (
+              <>
+                <Picker selectedValue={selectedRunwayId} enabled={!publishing && !apronEdit}
+                  onValueChange={value => selectDraftRunway(value)}>
+                  <Picker.Item label={t('pistaAdmin.chooseRunway')} value="" />
+                  {draftAirport.runways.map(runway => (
+                    <Picker.Item key={runway.id} label={runway.identA + '/' + runway.identB} value={runway.id} />
+                  ))}
+                </Picker>
+                {!!draftAirport.incompleteRunways && (
+                  <Text style={styles.step}>{t('pistaAdmin.incompleteRunways', { n: draftAirport.incompleteRunways })}</Text>
+                )}
+              </>
+            )}
+            {modoSeteo && (!cabeceraA || !cabeceraB) && (
+              <Text style={styles.step}>{t(cabeceraA ? 'pistaAdmin.tapB' : 'pistaAdmin.tapA')}</Text>
+            )}
+            {cabeceraA && cabeceraB && (
+              <>
+                <Text>{t('pista.modalTitle')}</Text>
+                <TextInput
+                  style={styles.input}
+                  value={numeroPista}
+                  onChangeText={setNumeroPista}
+                  autoCapitalize="characters"
+                  maxLength={3}
+                  editable={!publishing}
+                  placeholder={t('pista.modalPlaceholder')}
+                />
+                {draftAirport && cabeceraActiva && (
+                  <Button title={t('pistaAdmin.activate', {
+                    ident: cabeceraActiva === 'A' ? draftAirport.runways[0].identB : numeroPista,
+                  })} disabled={publishing || apronEdit}
+                    onPress={() => chooseDraftEnd(cabeceraActiva === 'A' ? 'B' : 'A')} />
+                )}
+                <View style={styles.actions}>
+                  <Button title={t('pista.markApron')} disabled={publishing || apronEdit} onPress={() => setApronEdit(true)} />
+                  <Button title={t('pista.autoGenerateB1B2')} disabled={publishing} onPress={() => {
+                    if (!cabeceraActiva) return;
+                    const { B1, B2 } = makeDefaultBeacons(cabeceraA, cabeceraB, cabeceraActiva);
+                    setBeaconB1(B1);
+                    setBeaconB2(B2);
+                  }} />
+                </View>
+                {apronEdit ? (
+                  <>
+                    <Text style={styles.step}>{t('pistaAdmin.tapApron')}</Text>
+                    <View style={styles.actions}>
+                      <Button title={t('common.save')} disabled={!tempApron} onPress={() => {
+                        setApron(tempApron);
+                        setTempApron(null);
+                        setApronEdit(false);
+                      }} />
+                      <Button title={t('common.cancel')} onPress={() => { setApronEdit(false); setTempApron(null); }} />
+                    </View>
+                  </>
+                ) : (
+                  <Text style={styles.step}>{t('pistaAdmin.adjustBeacons')}</Text>
+                )}
+              </>
+            )}
+            <Button title={t('pistaAdmin.review')} disabled={publishing || apronEdit || !cabeceraB} onPress={reviewDraft} />
+            <View style={styles.actions}>
+              <Button title={t('common.cancel')} disabled={publishing} onPress={cancelEdit} />
+              {!modoSeteo && <Button title={t('pista.setNewRunway')} disabled={publishing} onPress={() => startEdit(true)} />}
+            </View>
+          </>
+        ) : (
+          <>
+            <Text style={styles.text}>{t(live ? 'pistaAdmin.published' : currentRunway ? 'pistaAdmin.local' : 'pistaAdmin.empty')}</Text>
+            {current?.name && <Text style={styles.step}>{current.name} {current.icao}</Text>}
+            {currentRunway && (
+              <Text style={styles.step}>{t('pistaAdmin.summary', {
+                a: currentRunway.identA, b: currentRunway.identB,
+                active: currentRunway.active_end === 'B' ? currentRunway.identB : currentRunway.identA,
+              })}</Text>
+            )}
+            {role === 'aeroclub' && (
+              <>
+                {currentRunway && current.runways.length > 1 && (
+                  <>
+                    <Text>{t('pistaAdmin.chooseRunway')}</Text>
+                    <Picker selectedValue={currentRunway.id} enabled={!publishing}
+                      onValueChange={id => { if (id !== currentRunway.id) startEdit(false, id); }}>
+                      {current.runways.map(runway => (
+                        <Picker.Item key={runway.id} label={runway.identA + '/' + runway.identB} value={runway.id} />
+                      ))}
+                    </Picker>
+                  </>
+                )}
+                {currentRunway && (
+                  <Button title={t('pistaAdmin.activate', { ident: currentRunway.active_end === 'B' ? currentRunway.identA : currentRunway.identB })}
+                    disabled={publishing} onPress={confirmEndChange} />
+                )}
+                <View style={styles.actions}>
+                  <Button title={t('pistaAdmin.importAirport')} disabled={publishing} onPress={() => setShowImport(true)} />
+                  <Button title={t(currentRunway ? 'pistaAdmin.edit' : 'pista.setNewRunway')}
+                    disabled={publishing} onPress={() => startEdit(!currentRunway)} />
+                  {currentRunway && (
+                    <Button title={t('pistaAdmin.advanced')} disabled={publishing}
+                      onPress={() => router.push('/AirfieldDetails?tab=atc')} />
+                  )}
+                </View>
+              </>
+            )}
           </>
         )}
       </View>
-
-      {apronEdit && tempApron && (
-        <View style={styles.toolbar}>
-          <Text style={{ fontWeight: '700', marginBottom: 8 }}>
-            {t('pista.newApronSelected')}
-          </Text>
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            <Button title={t('pista.save')} onPress={saveApronPoint} />
-            <Button title={t('pista.cancel')} onPress={cancelApronEdit} />
+      <Modal visible={showImport} transparent animationType="fade"
+        onRequestClose={() => { if (!importing) setShowImport(false); }}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.text}>{t('pistaAdmin.importAirport')}</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="EHRD"
+              accessibilityLabel={t('pistaAdmin.icao')}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              maxLength={4}
+              editable={!importing}
+              value={icao}
+              onChangeText={value => setIcao(value.toUpperCase())}
+            />
+            <Button title={t(importing ? 'pistaAdmin.importing' : 'pistaAdmin.lookupAirport')}
+              disabled={importing || !/^[A-Z]{4}$/.test(icao)} onPress={() => void importAirport()} />
+            <Button title={t('common.cancel')} disabled={importing} onPress={() => setShowImport(false)} />
           </View>
         </View>
-      )}
+      </Modal>
     </View>
   );
 }
 
 // ---------------------- Styles ----------------------
 const styles = StyleSheet.create({
+  modalBackdrop: { flex: 1, justifyContent: "center", padding: 32, backgroundColor: "rgba(0,0,0,0.45)" },
+  modalCard: { padding: 20, borderRadius: 12, backgroundColor: "#fff" },
   panel: {
     padding: 10,
     paddingBottom: 30,
     backgroundColor: '#fff',
   },
+  actions: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginVertical: 6 },
+  step: { marginBottom: 8 },
   text: {
     fontWeight: 'bold',
     marginBottom: 10,
@@ -675,37 +844,5 @@ const styles = StyleSheet.create({
     color: 'white',
     fontWeight: 'bold',
     fontSize: 10,
-  },
-  runwayNumber: {
-    backgroundColor: '#2196F3',
-    padding: 4,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  modalContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)',
-  },
-  modalBox: {
-    width: '80%',
-    backgroundColor: 'white',
-    borderRadius: 10,
-    padding: 20,
-    elevation: 5,
-  },
-  toolbar: {
-    position: 'absolute',
-    left: 10,
-    right: 10,
-    bottom: 120,
-    backgroundColor: 'white',
-    borderRadius: 12,
-    padding: 10,
-    elevation: 4,
-    shadowColor: '#000',
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
   },
 });

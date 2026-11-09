@@ -16,10 +16,10 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Airfield, Runway } from '../types/airfield';
-import { useRouter } from 'expo-router';
+import { Redirect, useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { socket } from '../utils/socket';
-import { useLocalSearchParams } from 'expo-router';
+import { useUser } from '../context/UserContext';
 
 const DEFAULT_ATC_SETTINGS = {
   B1_LATCH_ON_M: 3500,
@@ -38,6 +38,7 @@ const DEFAULT_ATC_SETTINGS = {
 const ADMIN_KEY_STORAGE = 'airguardian.adminKey';
 
 export default function AirfieldDetails() {
+  const { role } = useUser();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { tab } = useLocalSearchParams<{ tab?: string }>();
@@ -48,6 +49,7 @@ export default function AirfieldDetails() {
   const [showAdminKey, setShowAdminKey] = useState(false);
 
   useEffect(() => {
+    if (role !== 'aeroclub') return;
     (async () => {
       try {
         const raw = await AsyncStorage.getItem('airfieldActive');
@@ -68,7 +70,7 @@ export default function AirfieldDetails() {
         setAdminKeyState(savedKey && savedKey.trim() ? savedKey : 'Pista');
       } catch {}
     })();
-  }, []);
+  }, [role]);
 
   const update = (patch: Partial<Airfield>) => {
     if (!airfield) return;
@@ -78,7 +80,7 @@ export default function AirfieldDetails() {
   const updateRunway = (patch: Partial<Runway>) => {
     if (!airfield) return;
     const rw = { ...airfield.runways[0], ...patch };
-    setAirfield({ ...airfield, runways: [rw], lastUpdated: Date.now() });
+    setAirfield({ ...airfield, runways: [rw, ...airfield.runways.slice(1)], lastUpdated: Date.now() });
   };
 
   // ✅ ATC settings updater (merge seguro)
@@ -106,7 +108,7 @@ export default function AirfieldDetails() {
     });
 
   const save = async () => {
-    if (!airfield) return;
+    if (!airfield || role !== 'aeroclub') return;
 
     // ✅ Guardar admin key (si queda vacía, vuelve a "Pista")
     const finalKey = adminKey && adminKey.trim() ? adminKey.trim() : 'Pista';
@@ -146,6 +148,8 @@ export default function AirfieldDetails() {
   const cancel = () => {
     router.back();
   };
+
+  if (role !== 'aeroclub') return <Redirect href="/welcome" />;
 
   if (!airfield) {
     return (

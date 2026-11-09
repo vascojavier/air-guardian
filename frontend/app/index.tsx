@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useRef } from "react";
-// app/_layout.tsx  (o index.tsx si no usás router)
-import "../src/i18n";
 
 import { Stack } from "expo-router";
 
@@ -27,21 +25,17 @@ import { iconMap } from "../utils/iconMap";
 import aircraftList from "../data/aircraftList";
 
 import { useTranslation } from "react-i18next";
-import i18n from "../src/i18n"; // si realmente exporta default i18n
-import { setAppLanguage, loadAppLanguageOnStart, AppLanguage } from "../src/i18n/language";
+import { languageOptions, AppLanguage } from "../src/i18n/language";
+import { useSettings } from "../context/SettingsContext";
 
-const ADMIN_KEY_STORAGE = "airguardian.adminKey";
+const factoryModels = new Set([
+  ...aircraftList.map(aircraft => aircraft.name),
+  "Parapente", "Paramotor", "Ala delta", "Ala delta motor",
+]);
 
-async function getAdminKey() {
-  const saved = await AsyncStorage.getItem(ADMIN_KEY_STORAGE);
-  return (saved && saved.trim()) ? saved : "Pista"; // ✅ clave inicial
+function isPersonalModel(model: string, availableModels: string[]) {
+  return model !== "otro" && availableModels.includes(model) && !factoryModels.has(model);
 }
-
-async function setAdminKey(newKey: string) {
-  await AsyncStorage.setItem(ADMIN_KEY_STORAGE, newKey);
-}
-
-
 
 const modelosDesdeLista = aircraftList.reduce(
   (acc, modelo) => {
@@ -62,7 +56,6 @@ export default function IndexScreen() {
   const [name, setName] = useState("");
   const [callsign, setCallsign] = useState("");
   const [country, setCountry] = useState("");
-  const [password, setPassword] = useState("");
   const [aircraftType, setAircraftType] = useState<"motor" | "glider" | "">("");
   const [aircraftModel, setAircraftModel] = useState("");
   const [otroModelo, setOtroModelo] = useState("");
@@ -71,39 +64,11 @@ export default function IndexScreen() {
   const [modelosMotor, setModelosMotor] = useState<string[]>(modelosDesdeLista.motor);
   const [modelosGlider, setModelosGlider] = useState<string[]>(modelosDesdeLista.glider);
   const [iconosPersonalizados, setIconosPersonalizados] = useState<Record<string, string>>({});
-  const [showPwd, setShowPwd] = useState(false);
-  const [lang, setLang] = useState<AppLanguage>("system");
+  const { settings, setSetting } = useSettings();
 
 
   const otroModeloRef = useRef<TextInput>(null);
   const scrollRef = useRef<ScrollView>(null);
-
-  // ✅ 1) Cargar idioma guardado al iniciar
-useEffect(() => {
-  const loadLang = async () => {
-    try {
-      await loadAppLanguageOnStart();
-      // reflejar en el picker lo que haya guardado indicando "system|en|es"
-      const saved = (await AsyncStorage.getItem("airguardian.language")) as AppLanguage | null;
-      setLang(saved || "system");
-    } catch (e) {
-      console.error("Error loading lang:", e);
-    }
-  };
-  loadLang();
-}, []);
-
-
-  // ✅ 2) Guardar y aplicar idioma cuando cambia
-const changeLang = async (newLang: AppLanguage) => {
-  try {
-    setLang(newLang);
-    await setAppLanguage(newLang);
-  } catch (e) {
-    console.error("Error changing lang:", e);
-  }
-};
-
 
   useEffect(() => {
     const cargarModelosGuardados = async () => {
@@ -130,12 +95,11 @@ const changeLang = async (newLang: AppLanguage) => {
       try {
         const datos = await AsyncStorage.getItem("datosUsuario");
         if (datos) {
-          const { name, callsign, password, aircraftType, aircraftModel, otroModelo, customIcon } =
+          const { name, callsign, aircraftType, aircraftModel, otroModelo, customIcon } =
             JSON.parse(datos);
 
           setName(name || "");
           setCallsign(callsign || "");
-          setPassword(password || "");
           setAircraftType(aircraftType || "");
           setAircraftModel(aircraftModel || "");
           setOtroModelo(otroModelo || "");
@@ -198,10 +162,26 @@ const changeLang = async (newLang: AppLanguage) => {
     try {
       const key = aircraftType === "motor" ? "modelosMotor" : "modelosGlider";
       const listaActual = aircraftType === "motor" ? modelosMotor : modelosGlider;
+      if (!isPersonalModel(modelo, listaActual)) return;
+
       const nuevaLista = listaActual.filter((m) => m !== modelo);
+
       await AsyncStorage.setItem(key, JSON.stringify(nuevaLista));
       if (aircraftType === "motor") setModelosMotor(nuevaLista);
       else setModelosGlider(nuevaLista);
+      setAircraftModel(current => current === modelo ? "" : current);
+
+      const saved = await AsyncStorage.getItem("datosUsuario");
+      if (saved) {
+        const data = JSON.parse(saved);
+        if (data.aircraftType === aircraftType &&
+            (data.aircraftModel === modelo || (data.aircraftModel === "otro" && data.otroModelo?.trim() === modelo))) {
+          const { password: _password, ...previous } = data;
+          await AsyncStorage.setItem("datosUsuario", JSON.stringify({
+            ...previous, aircraftModel: "", otroModelo: "", customIcon: "",
+          }));
+        }
+      }
 
       Alert.alert(t("index.modelDeletedTitle"), t("index.modelDeletedBody", { model: modelo }));
     } catch (error) {
@@ -238,14 +218,9 @@ const changeLang = async (newLang: AppLanguage) => {
       }
     }
 
-    const adminKey = await getAdminKey();
-    const isAdmin = password.trim().toLowerCase() === adminKey.toLowerCase();
-
-    const role = isAdmin ? "aeroclub" : "pilot";
-
     const finalIcon = iconMap[iconoPreview] ? iconoPreview : "2";
 
-    setUser(name.trim(), role, callsign.trim());
+    setUser(name.trim(), "pilot", callsign.trim());
     setAircraft(aircraftType, modeloFinal, finalIcon, callsign.trim());
 
     await AsyncStorage.setItem(
@@ -253,7 +228,6 @@ const changeLang = async (newLang: AppLanguage) => {
       JSON.stringify({
         name: name.trim(),
         callsign: callsign.trim(),
-        password,
         aircraftType,
         aircraftModel,
         otroModelo,
@@ -262,31 +236,6 @@ const changeLang = async (newLang: AppLanguage) => {
     );
 
     router.push("/Radar");
-  };
-
-  const goToPistaConClave = async () => {
-
-    const adminKey = await getAdminKey();
-    if (password.trim().toLowerCase() !== adminKey.toLowerCase()) {
-
-      Alert.alert(t("index.restrictedTitle"), t("index.restrictedBody"));
-      return;
-    }
-
-    const nombre = name.trim() || "Admin";
-    const matricula = callsign.trim() || "ADM";
-    setUser(nombre, "aeroclub", matricula);
-
-    const modeloFinal =
-      aircraftModel === "otro"
-        ? otroModelo.trim() || t("index.genericAircraft")
-        : aircraftModel || t("index.genericAircraft");
-
-    const tipoFinal = aircraftType || "motor";
-    const iconFinal = iconMap[iconoPreview] ? iconoPreview : "2";
-    setAircraft(tipoFinal, modeloFinal, iconFinal, matricula);
-
-    router.push("/Pista");
   };
 
   const handleCallsignChange = (text: string) => {
@@ -345,10 +294,11 @@ return (
         >
           {/* ✅ Selector de idioma */}
           <Text style={styles.label}>{t("settings.language")}:</Text>
-          <Picker selectedValue={lang} onValueChange={(v) => changeLang(v as AppLanguage)} style={styles.picker}>
+          <Picker selectedValue={settings.language} onValueChange={(v) => setSetting("language", v as AppLanguage)} style={styles.picker}>
             <Picker.Item label={t("settings.system")} value="system" />
-            <Picker.Item label={t("settings.english")} value="en" />
-            <Picker.Item label={t("settings.spanish")} value="es" />
+              {Object.entries(languageOptions).map(([code, option]) => (
+                <Picker.Item key={code} label={option.label} value={code} />
+              ))}
           </Picker>
 
 
@@ -458,35 +408,12 @@ return (
             </>
           )}
 
-<Text style={styles.label}>{t("index.adminPasswordLabel")}:</Text>
-
-<View style={{ position: "relative" }}>
-  <TextInput
-    style={[styles.input, { paddingRight: 50 }]}
-    value={password}
-    onChangeText={setPassword}
-    secureTextEntry={!showPwd}
-    placeholder={t("index.optional")}
-    onFocus={() => {
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 150);
-    }}
-  />
-
-  <TouchableOpacity
-    onPress={() => setShowPwd((v) => !v)}
-    style={{ position: "absolute", right: 12, top: 12 }}
-  >
-    <Text style={{ fontSize: 18 }}>{showPwd ? "🙈" : "👁️"}</Text>
-  </TouchableOpacity>
-</View>
-
-
           <View style={{ gap: 8, marginTop: 6 }}>
             <Button title={t("index.enter")} onPress={handleLogin} />
-            <Button title={t("index.goPistaAdmin")} onPress={goToPistaConClave} color="#6C63FF" />
+            <Button title={t("pistaAdmin.title")} onPress={() => router.push({ pathname: "/welcome", params: { admin: "1" } })} color="#6C63FF" />
           </View>
 
-          {aircraftModel && aircraftModel !== "otro" && (
+          {isPersonalModel(aircraftModel, aircraftType === "motor" ? modelosMotor : modelosGlider) && (
             <View style={{ marginTop: 10 }}>
               <Button
                 title={t("index.deleteModelBtn", { model: aircraftModel })}

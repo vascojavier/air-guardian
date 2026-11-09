@@ -8,10 +8,15 @@ import {
   TextInput,
   Alert,
 } from "react-native";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
+import { useTranslation } from "react-i18next";
+import { useUser } from "../context/UserContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export default function WelcomeScreen() {
+  const { t } = useTranslation();
+  const { admin } = useLocalSearchParams<{ admin?: string }>();
+  const { setUser, setAircraft, username, callsign, aircraftType, aircraftModel, aircraftIcon } = useUser();
   const bullets = useMemo(
     () => [
       "Radar + alerts estilo TCAS para aviación general y planeadores",
@@ -21,49 +26,36 @@ export default function WelcomeScreen() {
     []
   );
 
-  const [adminMode, setAdminMode] = useState(false);
+  const [adminMode, setAdminMode] = useState(admin === "1");
   const [adminPass, setAdminPass] = useState("");
 
-  const goPilot = async () => {
-    try {
-      await AsyncStorage.setItem("welcomeRole", "pilot");
-    } catch {}
-    router.replace("/"); // tu index.tsx actual
-  };
+  const goPilot = () => router.replace("/");
 
-  // Al tocar "Aeroclub Admin" solo desplegamos el campo de clave
-  const openAdmin = async () => {
-    try {
-      await AsyncStorage.setItem("welcomeRole", "aeroclub");
-    } catch {}
-    setAdminMode(true);
-  };
-
-  // Continuar como admin -> valida clave -> Pista
   const continueAdmin = async () => {
-    const pass = adminPass.trim();
-
-    if (!pass) {
-      Alert.alert("Clave requerida", "Ingresá la clave de Aeroclub Admin.");
-      return;
-    }
-
-    if (pass !== "aeroclub123") {
-      Alert.alert("Clave incorrecta", "La clave de administrador no es correcta.");
-      return;
-    }
-
-    // OK: guardo rol y voy a Pista
+    let configuredKey: string | undefined;
     try {
-      await AsyncStorage.setItem("welcomeRole", "aeroclub");
-    } catch {}
+      configuredKey = (await AsyncStorage.getItem("airguardian.adminKey"))?.trim().toLowerCase();
+    } catch {
+      Alert.alert(t("index.restrictedTitle"), t("index.restrictedBody"));
+      return;
+    }
+    const pass = adminPass.trim().toLowerCase();
+    const valid = configuredKey ? pass === configuredKey : pass === "pista" || pass === "aeroclub123";
+    if (!valid) {
+      Alert.alert(t("auth.wrongPasswordTitle"), t("auth.wrongPasswordBody"));
+      return;
+    }
 
+    setAdminPass("");
+    setUser(username || "Admin", "aeroclub", callsign || "ADM");
+    setAircraft(aircraftType || "motor", aircraftModel || t("index.genericAircraft"), aircraftIcon || "2", callsign || "ADM");
     router.replace("/Pista");
   };
 
   const cancelAdmin = () => {
     setAdminMode(false);
     setAdminPass("");
+    if (admin === "1" && router.canGoBack()) router.back();
   };
 
   return (
@@ -96,18 +88,18 @@ export default function WelcomeScreen() {
           </TouchableOpacity>
 
           {!adminMode ? (
-            <TouchableOpacity onPress={openAdmin} style={styles.secondaryBtn}>
-              <Text style={styles.secondaryBtnText}>Aeroclub Admin</Text>
+            <TouchableOpacity onPress={() => setAdminMode(true)} style={styles.secondaryBtn}>
+              <Text style={styles.secondaryBtnText}>{t("pistaAdmin.title")}</Text>
             </TouchableOpacity>
           ) : (
             <View style={styles.adminBox}>
-              <Text style={styles.adminLabel}>Admin password</Text>
+              <Text style={styles.adminLabel}>{t("auth.adminPassword")}</Text>
 
               <TextInput
                 value={adminPass}
                 onChangeText={setAdminPass}
                 secureTextEntry
-                placeholder="Ingresar clave"
+                placeholder={t("auth.passwordPlaceholder")}
                 placeholderTextColor="rgba(255,255,255,0.45)"
                 style={styles.adminInput}
                 autoCapitalize="none"
@@ -116,11 +108,11 @@ export default function WelcomeScreen() {
 
               <View style={styles.adminButtonsRow}>
                 <TouchableOpacity onPress={continueAdmin} style={styles.adminGoBtn}>
-                  <Text style={styles.adminGoText}>Continuar</Text>
+                  <Text style={styles.adminGoText}>{t("welcome.continueAsAdmin")}</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity onPress={cancelAdmin} style={styles.adminCancelBtn}>
-                  <Text style={styles.adminCancelText}>Cancelar</Text>
+                  <Text style={styles.adminCancelText}>{t("common.cancel")}</Text>
                 </TouchableOpacity>
               </View>
             </View>

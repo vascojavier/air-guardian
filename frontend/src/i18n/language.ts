@@ -1,46 +1,40 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Localization from "expo-localization";
-import i18n from "./index";
 
-export type AppLanguage = "system" | "en" | "es";
+export const languageOptions = {
+  en: { label: "English", voice: "en-US" },
+  es: { label: "Español", voice: "es-ES" },
+  de: { label: "Deutsch", voice: "de-DE" },
+  nl: { label: "Nederlands", voice: "nl-NL" },
+  fr: { label: "Français", voice: "fr-FR" },
+  pt: { label: "Português", voice: "pt-PT" },
+  it: { label: "Italiano", voice: "it-IT" },
+} as const;
 
-const STORAGE_KEY = "airguardian.language";
+export type SupportedLanguage = keyof typeof languageOptions;
+export type AppLanguage = "system" | SupportedLanguage;
 
-/**
- * Obtiene el idioma efectivo según el sistema,
- * limitado a los idiomas soportados por la app.
- */
-function getSystemLanguage(): "en" | "es" {
-  const raw = Localization.getLocales()?.[0]?.languageCode ?? "en";
-  return raw.toLowerCase().startsWith("es") ? "es" : "en";
+function isSupported(code: string): code is SupportedLanguage {
+  return Object.prototype.hasOwnProperty.call(languageOptions, code);
 }
 
-/**
- * Cambia el idioma de la app y lo persiste.
- */
-export async function setAppLanguage(lang: AppLanguage) {
-  await AsyncStorage.setItem(STORAGE_KEY, lang);
+export function resolveLanguage(preference: unknown): SupportedLanguage {
+  if (typeof preference === "string" && isSupported(preference)) return preference;
 
-  if (lang === "system") {
-    const deviceLang = getSystemLanguage();
-    await i18n.changeLanguage(deviceLang);
-  } else {
-    await i18n.changeLanguage(lang);
+  for (const locale of Localization.getLocales()) {
+    const code = locale.languageCode?.toLowerCase();
+    if (code && isSupported(code)) return code;
   }
+  return "en";
 }
 
-/**
- * Carga el idioma guardado al iniciar la app.
- * Se llama UNA sola vez al arrancar.
- */
-export async function loadAppLanguageOnStart() {
-  const saved = (await AsyncStorage.getItem(STORAGE_KEY)) as AppLanguage | null;
-  if (!saved) return;
+export function readLanguagePreference(value: unknown): AppLanguage | undefined {
+  if (typeof value !== "string") return undefined;
+  return value === "system" || isSupported(value) ? value : undefined;
+}
 
-  if (saved === "system") {
-    const deviceLang = getSystemLanguage();
-    await i18n.changeLanguage(deviceLang);
-  } else {
-    await i18n.changeLanguage(saved);
-  }
+export function resolveVoiceLanguage(language: SupportedLanguage): string {
+  const matchingLocale = Localization.getLocales().find(
+    locale => locale.languageCode?.toLowerCase() === language
+  );
+  return matchingLocale?.languageTag || languageOptions[language].voice;
 }

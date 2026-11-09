@@ -1,4 +1,5 @@
 const express = require('express');
+const { lookupAirport } = require('./airportCatalog');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -630,9 +631,15 @@ const lastInstr = new Map();      // name -> { phase:'B2'|'B1'|'CLRD', ts:number
 // ========= Geometría de pista activa + beacons =========
 function activeRunwayGeom() {
   const rw = lastAirfield?.runways?.[0];
-  if (!rw) return null;
+  if (!rw || ![rw.thresholdA, rw.thresholdB].every(
+    point => Number.isFinite(point?.lat) && Number.isFinite(point?.lng)
+  )) return null;
   const A = { lat: rw.thresholdA.lat, lon: rw.thresholdA.lng };
   const B = { lat: rw.thresholdB.lat, lon: rw.thresholdB.lng };
+  const runwayEnd = (point, fallback) => Number.isFinite(point?.lat) && Number.isFinite(point?.lng)
+    ? { lat: point.lat, lon: point.lng } : fallback;
+  const endA = runwayEnd(rw.endA, A);
+  const endB = runwayEnd(rw.endB, B);
   const active = rw.active_end === 'B' ? 'B' : 'A';
   const thr = active === 'A' ? A : B;
   const opp = active === 'A' ? B : A;
@@ -658,7 +665,7 @@ function activeRunwayGeom() {
     B1 = destinationPoint(thr.lat, thr.lon, app_brg, B1_DIST_NM*NM_TO_M);
     B2 = destinationPoint(thr.lat, thr.lon, app_brg, B2_DIST_NM*NM_TO_M);
   }
-  return { rw, active, A, B, thr, opp, app_brg, B1, B2 };
+  return { rw, active, A, B, endA, endB, departureStart: active === 'A' ? endA : endB, thr, opp, app_brg, B1, B2 };
 }
 
 function assignBeaconsFor(name) {
@@ -1326,6 +1333,40 @@ function maybeSendInstruction(opId, opsById) {
 
 
 // ========= Publicación de estado =========
+function getApronPointFromAirfield(g = activeRunwayGeom()) {
+  const airfield = lastAirfield;
+  const candidates = [
+    airfield?.apron, airfield?.parking, airfield?.stands, airfield?.stand, airfield?.ramp,
+    airfield?.runways?.[0]?.apron, airfield?.runways?.[0]?.parking,
+  ];
+
+  for (const point of candidates) {
+    const lon = point?.lon ?? point?.lng;
+    if (Number.isFinite(point?.lat) && Number.isFinite(lon)) {
+      return { lat: point.lat, lon };
+    }
+  }
+
+  if (!g) return null;
+  // Referencia A → B para mantener el mismo lado físico al invertir la cabecera.
+  const axis = bearingDeg(g.endA.lat, g.endA.lon, g.endB.lat, g.endB.lon);
+  return destinationPoint(g.departureStart.lat, g.departureStart.lon, (axis + 90) % 360, 180);
+}
+
+function getHoldShortPointFromAirfield() {
+  const g = activeRunwayGeom();
+  if (!g) return null;
+
+  const axis = bearingDeg(g.endA.lat, g.endA.lon, g.endB.lat, g.endB.lon);
+  const apron = getApronPointFromAirfield(g);
+  const apronBearing = bearingDeg(g.endA.lat, g.endA.lon, apron.lat, apron.lon);
+  const offsetFromAxis = getDistance(g.endA.lat, g.endA.lon, apron.lat, apron.lon) *
+    Math.sin((apronBearing - axis) * Math.PI / 180);
+  const side = (axis + (offsetFromAxis < -1 ? -90 : 90) + 360) % 360;
+  const beforeThreshold = destinationPoint(g.departureStart.lat, g.departureStart.lon, g.app_brg, 80);
+  return destinationPoint(beforeThreshold.lat, beforeThreshold.lon, side, 80);
+}
+
 function publishRunwayState() {
   pruneStaleOps();   // ✅ PRIMERO
   const now = Date.now();
@@ -1526,62 +1567,6 @@ if (leaderInFinalStrict && secondNow && name === secondNow) {
     }
   }
 
-    function getHoldShortPointFromAirfield() {
-    const g = activeRunwayGeom();
-    if (!g?.thr || !g?.opp) return null;
-
-    // Eje de pista thr->opp
-    const rwyBrg = bearingDeg(g.thr.lat, g.thr.lon, g.opp.lat, g.opp.lon);
-
-    // Punto "antes" del umbral, sobre el eje (80 m hacia afuera en la aproximación)
-    // app_brg es "hacia afuera" del umbral (tu definición), así que esto lo deja "antes" de entrar a pista
-    const preThr = destinationPoint(g.thr.lat, g.thr.lon, g.app_brg, 80);
-
-    // Lateral 90° a la derecha de la pista, 80 m (quedás al costado, no sobre pista)
-    const lateral = (rwyBrg + 90) % 360;
-    const hs = destinationPoint(preThr.lat, preThr.lon, lateral, 80);
-
-    return { lat: hs.lat, lon: hs.lon };
-  } 
-
-  // === Ground guidance: TAXI_APRON ===
-  function getApronPointFromAirfield() {
-    const a = lastAirfield;
-
-    // Buscá en varios nombres típicos (sin inventar estructura)
-    const candidates = [
-      a?.apron,
-      a?.parking,
-      a?.stands,
-      a?.stand,
-      a?.ramp,
-      a?.runways?.[0]?.apron,
-      a?.runways?.[0]?.parking,
-    ];
-
-    for (const p of candidates) {
-      if (p && typeof p.lat === 'number' && typeof p.lon === 'number') {
-        return { lat: p.lat, lon: p.lon };
-      }
-      // si viene como {lng:...}
-      if (p && typeof p.lat === 'number' && typeof p.lng === 'number') {
-        return { lat: p.lat, lon: p.lng };
-      }
-    }
-
-    // Fallback geométrico (si no hay apron explícito):
-    // punto cercano al umbral activo pero “fuera” de la pista (muy simple)
-  const g = activeRunwayGeom();
-  if (g?.thr) {
-    // lateral 90° respecto al eje de pista
-    const lateral = (bearingDeg(g.thr.lat, g.thr.lon, g.opp.lat, g.opp.lon) + 90) % 360;
-    const pt = destinationPoint(g.thr.lat, g.thr.lon, lateral, 180); // 180m al costado
-    return { lat: pt.lat, lon: pt.lon };
-  }
-
-    return null;
-  }
-
   // ======================
   // GROUND GUIDANCE (APRON)
   // Backend manda targets; frontend confirma OPS.
@@ -1733,8 +1718,8 @@ if (holdShortPt && gTk?.thr) {
         assignedOps[name] = 'A_TO_RWY';
         opsTargets[name] = {
           fix: 'RWY',
-          lat: gTk.thr.lat,
-          lon: gTk.thr.lon,
+          lat: gTk.departureStart.lat,
+          lon: gTk.departureStart.lon,
         };
       } else {
         assignedOps[name] = 'A_TO_HOLD_SHORT';
@@ -2263,6 +2248,14 @@ socket.on('ops/state', (msg) => {
     if (!FRONTEND_ALLOWED_OPS.has(state)) return;
     if (!name || !state) return;
 
+    // Ignorar una confirmación enviada justo antes de cambiar la cabecera.
+    if (state === 'HOLD_SHORT' && aux?.holdShortTarget) {
+      const target = getHoldShortPointFromAirfield();
+      const { lat, lon } = aux.holdShortTarget;
+      if (!target || !Number.isFinite(lat) || !Number.isFinite(lon) ||
+          getDistance(lat, lon, target.lat, target.lon) > 1) return;
+    }
+
     const acceptedState = state;
 
     // ✅ FINAL sticky server-side
@@ -2466,10 +2459,36 @@ if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
   });
 
     // === Airfield: upsert y get ===
-  socket.on('airfield-upsert', ({ airfield }) => {
+  socket.on('airfield-upsert', ({ airfield }, acknowledge) => {
     try {
       if (!airfield || typeof airfield !== 'object') return;
+      const previousRunway = lastAirfield?.runways?.[0];
+      const nextRunway = airfield.runways?.[0];
+      const changesRunway = previousRunway && (!nextRunway ||
+        ['thresholdA', 'thresholdB', 'endA', 'endB'].some(end =>
+          previousRunway[end]?.lat !== nextRunway[end]?.lat ||
+          previousRunway[end]?.lng !== nextRunway[end]?.lng
+        ));
+      if (changesRunway && (runwayState.inUse || runwayState.landings.length || runwayState.takeoffs.length)) {
+        if (typeof acknowledge === 'function') acknowledge({ error: 'runway-busy' });
+        return;
+      }
+      const previousHold = getHoldShortPointFromAirfield();
       lastAirfield = airfield;
+      const nextHold = getHoldShortPointFromAirfield();
+      const holdMoved = previousHold && nextHold
+        ? getDistance(previousHold.lat, previousHold.lon, nextHold.lat, nextHold.lon) > 1
+        : Boolean(previousHold || nextHold);
+      const resetDepartures = [];
+      if (holdMoved) {
+        for (const { name } of runwayState.takeoffs) {
+          if (getReportedOpsState(name) !== 'HOLD_SHORT') continue;
+          const update = { name, state: 'TAXI_TO_RWY', ts: Date.now(), aux: null };
+          opsReportedByName.set(name, update);
+          lastOpsStateByName.set(name, update.state);
+          resetDepartures.push(update);
+        }
+      }
       io.emit('airfield-update', { airfield: lastAirfield }); // broadcast a todos
       console.log('🛬 airfield-upsert recibido y broadcast airfield-update');
 
@@ -2478,6 +2497,8 @@ if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
         planRunwaySequence();
         publishRunwayState();
       }
+      for (const update of resetDepartures) io.emit('ops/state', update);
+      if (typeof acknowledge === 'function') acknowledge({ ok: true });
     } catch (e) {
       console.error('airfield-upsert error:', e);
     }
@@ -2940,6 +2961,19 @@ app.get('/api/locations', (req, res) => {
 app.get('/api/airfield', (req, res) => {
   if (!lastAirfield) return res.status(404).json({ error: 'No airfield set' });
   res.json(lastAirfield);
+});
+
+app.get('/api/airports/:icao', async (req, res) => {
+  const icao = String(req.params.icao).trim().toUpperCase();
+  if (!/^[A-Z]{4}$/.test(icao)) return res.status(400).json({ error: 'invalid-icao' });
+  try {
+    const airport = await lookupAirport(icao);
+    if (!airport) return res.status(404).json({ error: 'airport-not-found' });
+    return res.json(airport);
+  } catch (error) {
+    console.error('Airport catalog lookup failed:', error);
+    return res.status(503).json({ error: 'catalog-unavailable' });
+  }
 });
 
 

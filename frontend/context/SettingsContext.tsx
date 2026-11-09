@@ -1,10 +1,9 @@
 // frontend/context/SettingsContext.tsx
-import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { AppState } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import i18n from "i18next";
-import * as Localization from "expo-localization";
-
-export type AppLanguage = "system" | "en" | "es";
+import i18n from "../src/i18n";
+import { AppLanguage, readLanguagePreference, resolveLanguage } from "../src/i18n/language";
 export type DistanceUnit = "m" | "km" | "nm" | "mi";
 export type AltitudeUnit = "m" | "ft";
 export type SpeedUnit = "kmh" | "kt" | "mph";
@@ -62,6 +61,7 @@ const SettingsContext = createContext<SettingsContextValue | null>(null);
 
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const settingsRef = useRef(defaultSettings);
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -69,37 +69,38 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
       try {
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
 
-        if (raw) {
-          const parsed = JSON.parse(raw) as Partial<AppSettings>;
+        const parsed = raw ? JSON.parse(raw) as Partial<AppSettings> : {};
+        const legacy = await AsyncStorage.getItem("airguardian.language");
 
-          const merged: AppSettings = { ...defaultSettings, ...parsed };
+        const merged: AppSettings = {
+          ...defaultSettings,
+          ...parsed,
+          language: readLanguagePreference(parsed.language) ?? readLanguagePreference(legacy) ?? "system",
+        };
 
-          // Sanitizar números mínimos
-          merged.nearbyTrafficMeters = clampNum(
-            merged.nearbyTrafficMeters,
-            50,
-            50000,
-            defaultSettings.nearbyTrafficMeters
-          );
-          merged.taTimeSec = clampNum(merged.taTimeSec, 5, 3600, defaultSettings.taTimeSec);
-          merged.ra3TimeSec = clampNum(merged.ra3TimeSec, 5, 3600, defaultSettings.ra3TimeSec);
-          merged.ra1TimeSec = clampNum(merged.ra1TimeSec, 5, 3600, defaultSettings.ra1TimeSec);
+        // Sanitizar números mínimos
+        merged.nearbyTrafficMeters = clampNum(
+          merged.nearbyTrafficMeters,
+          50,
+          50000,
+          defaultSettings.nearbyTrafficMeters
+        );
+        merged.taTimeSec = clampNum(merged.taTimeSec, 5, 3600, defaultSettings.taTimeSec);
+        merged.ra3TimeSec = clampNum(merged.ra3TimeSec, 5, 3600, defaultSettings.ra3TimeSec);
+        merged.ra1TimeSec = clampNum(merged.ra1TimeSec, 5, 3600, defaultSettings.ra1TimeSec);
 
-          merged.raMinDistMeters = clampNum(
-            merged.raMinDistMeters,
-            100,
-            50000,
-            defaultSettings.raMinDistMeters
-          );
+        merged.raMinDistMeters = clampNum(
+          merged.raMinDistMeters,
+          100,
+          50000,
+          defaultSettings.raMinDistMeters
+        );
 
-          setSettings(merged);
+        settingsRef.current = merged;
+        setSettings(merged);
 
-          // ✅ Aplicar idioma (incluyendo system)
-          await applyLanguage(merged.language);
-        } else {
-          // ✅ Primer arranque: si default es system, aplicamos locale del device igual
-          await applyLanguage(defaultSettings.language);
-        }
+        // ✅ Aplicar idioma (incluyendo system)
+        await applyLanguage(merged.language);
       } catch (e) {
         console.warn("Settings load error:", e);
         // Incluso si hay error, intentá aplicar system al menos
@@ -112,31 +113,33 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     })();
   }, []);
 
-  const setSetting = async <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
-    // ✅ evita stale state
-    let next: AppSettings | null = null;
+  useEffect(() => {
+    if (!isLoaded || settings.language !== "system") return;
 
-    setSettings((prev) => {
-      next = { ...prev, [key]: value } as AppSettings;
-      return next!;
+    const subscription = AppState.addEventListener("change", state => {
+      if (state === "active" && i18n.resolvedLanguage !== resolveLanguage("system")) {
+        void applyLanguage("system").catch(console.warn);
+      }
     });
+    return () => subscription.remove();
+  }, [isLoaded, settings.language]);
+
+  const setSetting = async <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
+    const next = { ...settingsRef.current, [key]: value };
+    settingsRef.current = next;
+    setSettings(next);
 
     try {
-      // Si cambia idioma, aplicarlo en vivo (incluye system)
-      if (key === "language") {
-        await applyLanguage(value as AppLanguage);
-      }
-
-      // Persistir
-      if (next) {
-        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-      }
+      const save = AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      if (key === "language") await Promise.all([save, applyLanguage(next.language)]);
+      else await save;
     } catch (e) {
       console.warn("Settings save/apply error:", e);
     }
   };
 
   const resetSettings = async () => {
+    settingsRef.current = defaultSettings;
     setSettings(defaultSettings);
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(defaultSettings));
@@ -168,33 +171,6 @@ function clampNum(v: any, min: number, max: number, fallback: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-function resolveDeviceLanguage(): "en" | "es" {
-  const locales = Localization.getLocales?.() ?? [];
-  const first = locales[0];
-
-  // Preferimos languageTag si existe (ej: "es-AR", "en-US")
-  const tag = (first?.languageTag || "").toLowerCase();
-  if (tag.startsWith("es")) return "es";
-  if (tag.startsWith("en")) return "en";
-
-  // Fallback: languageCode (ej: "es", "en")
-  const code = (first?.languageCode || "").toLowerCase();
-  if (code === "es") return "es";
-  if (code === "en") return "en";
-
-  // Último fallback
-  return "en";
-}
-
-async function applyLanguage(lang: AppLanguage) {
-  try {
-    if (lang === "system") {
-      const deviceLang = resolveDeviceLanguage();
-      await i18n.changeLanguage(deviceLang);
-    } else {
-      await i18n.changeLanguage(lang);
-    }
-  } catch {
-    // no-op
-  }
+function applyLanguage(language: AppLanguage) {
+  return i18n.changeLanguage(resolveLanguage(language));
 }

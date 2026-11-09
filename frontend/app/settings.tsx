@@ -10,12 +10,12 @@ import {
   ScrollView,
 } from "react-native";
 import { Picker } from "@react-native-picker/picker";
+import { languageOptions, AppLanguage } from "../src/i18n/language";
 import { useTranslation } from "react-i18next";
 import { router } from "expo-router";
 
 import {
   useSettings,
-  AppLanguage,
   DistanceUnit,
   AltitudeUnit,
   SpeedUnit,
@@ -90,8 +90,9 @@ export default function SettingsScreen() {
           onValueChange={(v) => setSetting("language", v as AppLanguage)}
         >
           <Picker.Item label={t("settings.system")} value="system" />
-          <Picker.Item label={t("settings.english")} value="en" />
-          <Picker.Item label={t("settings.spanish")} value="es" />
+          {Object.entries(languageOptions).map(([code, option]) => (
+            <Picker.Item key={code} label={option.label} value={code} />
+          ))}
         </Picker>
       </View>
 

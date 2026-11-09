@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react';
 import type { Socket } from "socket.io-client";
 import { useTranslation } from "react-i18next";
+import { resolveLanguage, resolveVoiceLanguage } from "../src/i18n/language";
+import type { SupportedLanguage } from "../src/i18n/language";
 
 import { useSettings } from "../context/SettingsContext";
 import { router } from "expo-router";
@@ -20,6 +22,7 @@ import {
 } from 'react-native';
 
 import MapView, { Marker, PROVIDER_GOOGLE, Polyline } from 'react-native-maps';
+import type { Region } from 'react-native-maps';
 import Slider from '@react-native-community/slider';
 import * as Location from 'expo-location';
 import { useUser } from '../context/UserContext';
@@ -293,6 +296,7 @@ const Radar = () => {
   const [selected, setSelected] = useState<Plane | null>(null);
   const [conflict, setConflict] = useState<Plane | null>(null);
   const [followMe, setFollowMe] = useState(true);
+  const [cameraWarning, setCameraWarning] = useState<Warning | Plane | null>(null);
   const hideSelectedTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Guarda la última vez (ms) que enviamos un warning por avión
   const lastWarningTimeRef = useRef<Record<string, number>>({});
@@ -311,17 +315,41 @@ const Radar = () => {
   const ARRIVE_R_M = 500;       // radio para "llegué" (ajustable)
   const B_STATES = Array.from({ length: 30 }, (_, i) => `B${i + 1}` as OpsState);
   const { t, i18n } = useTranslation();
-  const lang = (i18n.language || "en").toLowerCase();
-  const ttsLang =
-    lang.startsWith("es") ? "es-ES" :
-    lang.startsWith("en") ? "en-US" :
-    // fallback: dejá que el sistema elija
-    undefined;
+  const language = resolveLanguage(i18n.resolvedLanguage || i18n.language);
   const { settings } = useSettings();
-  const zoomDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const speechEnabledRef = useRef(settings.ttsEnabled);
+  const speechRevisionRef = useRef(0);
+  const voicesRef = useRef<ReturnType<typeof Speech.getAvailableVoicesAsync> | null>(null);
+
+  useEffect(() => {
+    speechEnabledRef.current = settings.ttsEnabled;
+    return () => {
+      speechRevisionRef.current++;
+      void Speech.stop().catch(() => {});
+    };
+  }, [language, settings.ttsEnabled]);
+
+  async function speakRadarMessage(text: string, messageLanguage: SupportedLanguage) {
+    if (!speechEnabledRef.current || !text.trim()) return;
+    const revision = ++speechRevisionRef.current;
+    try {
+      const locale = resolveVoiceLanguage(messageLanguage);
+      voicesRef.current ??= Speech.getAvailableVoicesAsync();
+      const matchingVoices = (await voicesRef.current).filter(
+        voice => voice.language.toLowerCase().split(/[-_]/)[0] === messageLanguage
+      );
+      const voice = matchingVoices.find(v => v.language.toLowerCase() === locale.toLowerCase()) ??
+        matchingVoices[0];
+      if (!voice || revision !== speechRevisionRef.current) return;
+      await Speech.stop();
+      if (revision !== speechRevisionRef.current) return;
+      Speech.speak(text, { language: voice.language, voice: voice.identifier });
+    } catch {
+      voicesRef.current = null;
+    }
+  }
   const gpsWatchRef = useRef<Location.LocationSubscription | null>(null);
   const gpsBusyRef = useRef(false);
-  const isProgrammaticMoveRef = useRef(false);
   const lastCenterAtRef = useRef(0);
   const lastCenterPosRef = useRef<{lat:number; lon:number} | null>(null);
   // ✅ evita setState repetidos cuando el “winner” es el mismo
@@ -571,6 +599,7 @@ function maybeConfirmHoldShort() {
     socket.emit('ops/state', {
       name: me.name,
       state: 'HOLD_SHORT',
+      aux: { holdShortTarget: { lat: t.lat, lon: t.lon } },
     });
   }
 }
@@ -908,7 +937,7 @@ useFocusEffect(
     });
 
     // 2) podar selected/conflict si desaparecieron
-    setSelected(prev => (prev && !ids.has(prev.id) ? null : prev));
+    setSelected(prev => (prev && prev.id !== myPlaneRef.current?.id && !ids.has(prev.id) ? null : prev));
     setConflict(prev => (prev && !ids.has(prev.id) ? null : prev));
 
     // 3) podar warnings que ya no correspondan
@@ -938,7 +967,8 @@ useEffect(() => {
   // Target de navegación que llega por ATC (o por tu lógica local)
   const [navTarget, setNavTarget] = useState<LatLon | null>(null);
   const mapRef = useRef<MapView | null>(null);
-  const [navPath, setNavPath] = useState<LatLon[]>([]);
+  const [navPlan, setNavPlan] = useState<NavPlan>({ path: [] });
+  const { path: navPath, holdingLabel } = navPlan;
  
   // ======================
 // Emisor único de updates
@@ -1026,6 +1056,25 @@ function setNavTargetSafe(next: { latitude: number; longitude: number } | null) 
 }
 
 type NavLL = { latitude: number; longitude: number };
+type NavPlan = { path: NavLL[]; holdingLabel?: { fix: string; position: NavLL } };
+
+function assignedBeaconLabels(
+  targets: Record<string, { fix?: string; lat: number; lon: number }> | undefined,
+  holdingLabel: NavPlan['holdingLabel']
+) {
+  const labels = new Map<string, NavLL>();
+  for (const target of Object.values(targets ?? {})) {
+    const fix = target?.fix;
+    if (!fix || !/^B[1-9]\d*$/.test(fix) || labels.has(fix) ||
+        !Number.isFinite(target.lat) || !Number.isFinite(target.lon)) continue;
+    labels.set(fix, { latitude: target.lat, longitude: target.lon });
+  }
+
+  if (holdingLabel && labels.has(holdingLabel.fix)) {
+    labels.set(holdingLabel.fix, holdingLabel.position);
+  }
+  return Array.from(labels, ([fix, position]) => ({ fix, position }));
+}
 
 function normalizeHeadingDeg(h?: number): number {
   const v = Number(h ?? 0);
@@ -1105,7 +1154,7 @@ function buildRacetrackHold(
   legLengthM: number,
   radiusM: number,
   clockwise = true
-): NavLL[] {
+): { path: NavLL[]; labelPosition: NavLL } {
   const inbound = normalizeHeadingDeg(inboundCourseDeg);
   const outbound = normalizeHeadingDeg(inbound + 180);
 
@@ -1171,14 +1220,10 @@ function buildRacetrackHold(
     clockwise
   );
 
-  return [
-    inboundStart,
-    inboundEnd,
-    ...arc1,
-    outboundEnd,
-    ...arc2,
-    inboundStart,
-  ];
+  return {
+    path: [inboundStart, inboundEnd, ...arc1, outboundEnd, ...arc2, inboundStart],
+    labelPosition: movePoint(center.latitude, center.longitude, side, radiusM),
+  };
 }
 
 function buildApproachToHoldEntry(
@@ -1331,7 +1376,7 @@ function buildAdvancedNavPathForMeV3(args: {
   activeThreshold: NavLL | null;
   rw: any;
   fallbackNavTarget: NavLL | null;
-}): NavLL[] {
+}): NavPlan {
   const {
     myPlane,
     assigned,
@@ -1356,13 +1401,13 @@ function buildAdvancedNavPathForMeV3(args: {
         ? (rw.heading_true_ab + 180) % 360
         : rw.heading_true_ab;
 
-    return buildFinalTransitionPath(
+    return { path: buildFinalTransitionPath(
       mePos,
       myPlane.heading || 0,
       activeThreshold,
       runwayCourseDeg,
       radius
-    );
+    ) };
   }
 
   const target = resolveAssignedBeaconTarget(
@@ -1421,22 +1466,48 @@ function buildAdvancedNavPathForMeV3(args: {
         radius,
         true
       );
-      return [...approach, ...hold];
+      const fix = backendTarget?.fix ?? assigned?.replace(/^A_TO_/, '');
+      return {
+        path: [...approach, ...hold.path],
+        holdingLabel: fix ? {
+          fix,
+          position: hold.labelPosition,
+        } : undefined,
+      };
     }
 
-    return [mePos, target];
+    return { path: [mePos, target] };
   }
 
   if (fallbackNavTarget) {
-    return [mePos, fallbackNavTarget];
+    return { path: [mePos, fallbackNavTarget] };
   }
 
-  return [];
+  return { path: [] };
 }
 
 
 // === Airfield (pista) ===
 const [airfield, setAirfield] = useState<Airfield | null>(null);
+const publishedAirfieldJsonRef = useRef<string | null>(null);
+const PUBLISHED_AIRFIELD_KEY = 'radarPublishedAirfield';
+
+function isRadarAirfield(value: Airfield | null | undefined): value is Airfield {
+  const runway = value?.runways?.[0];
+  return !!runway && [runway.thresholdA, runway.thresholdB].every(
+    threshold => Number.isFinite(threshold?.lat) && Number.isFinite(getLon(threshold))
+  );
+}
+
+function applyPublishedAirfield(value: Airfield | null | undefined) {
+  if (!isRadarAirfield(value)) return;
+
+  const serialized = JSON.stringify(value);
+  if (publishedAirfieldJsonRef.current === serialized) return;
+  publishedAirfieldJsonRef.current = serialized;
+  setAirfield(value);
+  void AsyncStorage.setItem(PUBLISHED_AIRFIELD_KEY, serialized).catch(() => {});
+}
 
 // Derivados de la runway activa (si existe)
 const rw = airfield?.runways?.[0];
@@ -1484,6 +1555,9 @@ const B_runway = useMemo(() => {
     ? { latitude: thr.lat, longitude: lon }
     : null;
 }, [rw]);
+
+const runwayEndA = rw?.endA ? { latitude: rw.endA.lat, longitude: rw.endA.lng } : A_runway;
+const runwayEndB = rw?.endB ? { latitude: rw.endB.lat, longitude: rw.endB.lng } : B_runway;
 
 const activeIdent = useMemo<string | null>(() => {
   if (!rw) return null;
@@ -1829,11 +1903,11 @@ function distancePointToSegmentM(
 }
 
 function isOnRunwayStrip(): boolean {
-  if (!A_runway || !B_runway) return false;
+  if (!runwayEndA || !runwayEndB) return false;
   const d = distancePointToSegmentM(
     { lat: myPlane.lat, lon: myPlane.lon },
-    { lat: A_runway.latitude, lon: A_runway.longitude },
-    { lat: B_runway.latitude, lon: B_runway.longitude }
+    { lat: runwayEndA.latitude, lon: runwayEndA.longitude },
+    { lat: runwayEndB.latitude, lon: runwayEndB.longitude }
   );
   // ancho de pista + margen (aprox 40m)
 // ancho de pista + margen (ajustado a 30 m para menos falsos positivos)
@@ -2108,7 +2182,7 @@ function getOpsTargetOfPlane(p: Plane): AtcTarget {
 
 
 function inferOpsForDisplay(p: Plane): OpsState | null {
-  const fieldElev = (airfield as any)?.elevation ?? (runwayState?.airfield?.elevation ?? 0);
+  const fieldElev = getFieldElevationM() ?? 0;
   const aglP = Math.max(0, (p.alt ?? 0) - fieldElev);
   const nearApron = apronDistanceM({ lat: p.lat, lon: p.lon }) <= 30;
 
@@ -2127,9 +2201,7 @@ function inferOpsForDisplay(p: Plane): OpsState | null {
 // Usamos function declaration para que se hoistee y pueda usarse antes.
 function defaultActionForMe(): 'land' | 'takeoff' {
   const planeAlt = myPlane?.alt ?? 0;
-  const fieldElev =
-    (airfield as any)?.elevation ??
-    (runwayState?.airfield?.elevation ?? 0); // si no hay, usamos 0
+  const fieldElev = getFieldElevationM() ?? 0;
   const altRel = Math.max(0, planeAlt - fieldElev);
   return altRel > 10 ? 'land' : 'takeoff';
 }
@@ -2339,35 +2411,35 @@ useFocusEffect(
 );
 
 
-// ---- Focus hook #2: leer airfieldActive (pista) al enfocar Radar
+// Mostrar la última pista conocida mientras llega la respuesta del servidor.
 useFocusEffect(
   React.useCallback(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const raw = await AsyncStorage.getItem('airfieldActive');
-        if (!cancelled && raw) {
-          const af: Airfield = JSON.parse(raw);
-          setAirfield(af);
-          // 👇 reenvía la pista activa al backend si hay socket conectado
-          const s = socketRef.current;
-          if (s && (s as any).connected) {
-            s.emit('airfield-upsert', { airfield: af });
-          }
-
-        }
-      } catch {}
-    })();
+    void AsyncStorage.multiGet([PUBLISHED_AIRFIELD_KEY, 'airfieldActive']).then(entries => {
+      if (cancelled || publishedAirfieldJsonRef.current) return;
+      for (const [, raw] of entries) {
+        if (!raw) continue;
+        try {
+          const value: Airfield = JSON.parse(raw);
+          if (!isRadarAirfield(value)) continue;
+          setAirfield(value);
+          break;
+        } catch {}
+      }
+    }).catch(() => {});
     return () => { cancelled = true; };
   }, [])
 );
 
+const toggleFollowMe = () => {
+  finishCameraPreview(true);
+  pauseTrackedRouteCamera();
+  lastCenterPosRef.current = null;
+  setFollowMe(prev => !prev);
+};
+const hasWarning = !!(prioritizedWarning || cameraWarning || selected || conflict);
 
-
-const toggleFollowMe = () => setFollowMe(prev => !prev);
-const hasWarning = !!(prioritizedWarning || selected || conflict);
-
-const getDistanceTo = (plane: Plane): number => {
+const getDistanceTo = (plane: Pick<Plane, 'lat' | 'lon'>): number => {
   if (
     plane?.lat == null || plane?.lon == null ||
     myPlane?.lat == null || myPlane?.lon == null
@@ -2968,9 +3040,6 @@ useEffect(() => {
   socketRef.current = socket;
   const s = socketRef.current;
 
-  // Si el socket está desconectado (porque saliste de Radar antes), reconectalo
-  if (s && !s.connected) s.connect();
-
   // ✅ Evitar duplicación: antes de registrar, apagamos y volvemos a prender
   s.off('connect');
   s.off('conflicto');
@@ -2985,23 +3054,15 @@ useEffect(() => {
   s.off('sequence-update');
   s.off('atc-instruction');
 
-  // ✅ CONNECT
-  s.on('connect', async () => {
-    console.log('🔌 Conectado al servidor WebSocket');
+  const requestRadarData = () => {
     s.emit('get-traffic');
     s.emit('airfield-get');
     s.emit('runway-get');
+  };
 
-
-
-    // 👇 si el server no tiene pista cargada, reinyectala desde AsyncStorage
-    try {
-      const raw = await AsyncStorage.getItem('airfieldActive');
-      if (raw) {
-        const af = JSON.parse(raw);
-        s.emit('airfield-upsert', { airfield: af });
-      }
-    } catch {}
+  s.on('connect', requestRadarData);
+  s.on('airfield-update', (payload: { airfield?: Airfield }) => {
+    applyPublishedAirfield(payload?.airfield);
   });
 
       // === NUEVO: secuencia y beacons desde el backend
@@ -3016,20 +3077,16 @@ s.on('atc-instruction', (instr: any) => {
   (serverATCRef.current ||= true);
   if (!instr?.type) return;
 
-  const asString = (v: any) => (typeof v === 'string' ? v : (v == null ? '' : String(v)));
-
-  // Helpers: si viene key/params, usamos i18n; si no, usamos text; si no, fallback
-  const resolveText = (fallbackKey: string, fallbackParams: any = {}): string => {
-    if (instr?.key) return asString(t(String(instr.key), instr.params || {}));
-    if (typeof instr?.text === 'string' && instr.text.trim()) return instr.text;
-    return asString(t(fallbackKey, fallbackParams));
-  };
-
-  const resolveSpoken = (fallbackKey: string, fallbackParams: any = {}): string => {
-    if (instr?.spokenKey) return asString(t(String(instr.spokenKey), instr.spokenParams || instr.params || {}));
-    if (typeof instr?.spoken === 'string' && instr.spoken.trim()) return instr.spoken;
-    return asString(t(fallbackKey, fallbackParams));
-  };
+  const messageLanguage = resolveLanguage(i18n.resolvedLanguage || i18n.language);
+  const translate = i18n.getFixedT(messageLanguage);
+  const params = instr.params || {};
+  const spokenParams = instr.spokenParams || params;
+  const hasTranslation = (key: unknown): key is string =>
+    typeof key === 'string' && typeof i18n.getResource(messageLanguage, 'translation', key) === 'string';
+  const resolveText = (fallbackKey: string) =>
+    String(translate(hasTranslation(instr.key) ? instr.key : fallbackKey, params));
+  const resolveSpoken = (fallbackKey: string) =>
+    String(translate(hasTranslation(instr.spokenKey) ? instr.spokenKey : fallbackKey, spokenParams));
 
   if (instr.type === 'goto-beacon' && typeof instr.lat === 'number' && typeof instr.lon === 'number') {
     if (finalLockedRef.current) return;  // ✅ no pisar FINAL
@@ -3039,7 +3096,7 @@ s.on('atc-instruction', (instr: any) => {
     const spokenText = resolveSpoken('nav.proceedToBeaconGenericSpoken');
 
     flashBanner(bannerText, 'atc-goto');
-    try { Speech.stop(); Speech.speak(String(spokenText), { language: String(ttsLang) }); } catch {}
+    void speakRadarMessage(spokenText, messageLanguage);
   }
 
   if (instr.type === 'turn-to-B1') {
@@ -3047,17 +3104,15 @@ s.on('atc-instruction', (instr: any) => {
     const spokenText = resolveSpoken('nav.turnToB1Spoken');
 
     flashBanner(bannerText, 'atc-b1');
-    try { Speech.stop(); Speech.speak(String(spokenText), { language: String(ttsLang) }); } catch {}
+    void speakRadarMessage(spokenText, messageLanguage);
   }
 
   if (instr.type === 'cleared-to-land') {
-    const bannerBase = resolveText('runway.clearedToLand', { rwy: instr.rwy || '' });
-    const bannerText = bannerBase + (instr.rwy ? ` pista ${instr.rwy}` : '');
-
-    const spokenText =
-      instr?.spokenKey
-        ? asString(t(String(instr.spokenKey), instr.spokenParams || instr.params || {}))
-        : asString(t('runway.clearedToLandSpoken', { rwy: instr.rwy || '' }));
+    const rwy = instr.rwy || '';
+    const bannerText = rwy
+      ? translate('runway.clearedToLandRunway', { rwy })
+      : translate('runway.clearedToLand');
+    const spokenText = rwy ? translate('runway.clearedToLandSpoken', { rwy }) : bannerText;
 
     // ✅ NO tocar OPS aquí
     // ✅ NO setNavTarget aquí
@@ -3065,7 +3120,7 @@ s.on('atc-instruction', (instr: any) => {
     finalLockedRef.current = true;
 
     flashBanner(bannerText, 'atc-clr');
-    try { Speech.stop(); Speech.speak(String(spokenText), { language: String(ttsLang) }); } catch {}
+    void speakRadarMessage(spokenText, messageLanguage);
   }
 
 });
@@ -3173,6 +3228,7 @@ s.on('atc-instruction', (instr: any) => {
   s.on('conflicto-clear', (msg: any) => {
     const id = String(msg?.id || '');
     if (!id) return;
+    if (cameraPreviewRef.current?.warning?.id === id) finishCameraPreview(true);
     clearWarningFor(id);
     setBackendWarning(prev => (prev && prev.id === id) ? null : prev);
     setPrioritizedWarning(prev => (prev && prev.id === id) ? null : prev);
@@ -3222,7 +3278,7 @@ s.on('ops/state', (msg: any) => {
       takeoffRequestedRef.current = false;
       navGuidanceEndedRef.current = true;
       setNavTargetSafe(null);
-      setNavPath([]);
+      setNavPlan({ path: [] });
     }
   }
 
@@ -3281,9 +3337,13 @@ function normalizeKinematics(info: any): Omit<Plane, 'ops'> & { lastSeenTs: numb
   };
 }
 
+const pendingTraffic = new Map<string, Plane>();
+let trafficFlush: ReturnType<typeof setTimeout> | undefined;
+
 // ---- initial-traffic ----
 s.on('initial-traffic', (data: any) => {
   if (!Array.isArray(data)) return;
+  pendingTraffic.clear();
 
   const normalized = data
     .map(normalizeKinematics)
@@ -3293,71 +3353,35 @@ s.on('initial-traffic', (data: any) => {
   setTraffic(normalized as any); // si Plane no tiene lastSeenTs, cambia el type o casteá
 });
 
-// ---- traffic-update ----
 s.on('traffic-update', (data: any) => {
   if (!Array.isArray(data)) return;
 
-  const now = Date.now();
+  for (const info of data) {
+    if (!info?.name) continue;
+    const plane = normalizeKinematics(info);
+    if (plane) pendingTraffic.set(plane.id, plane);
+  }
+  if (pendingTraffic.size === 0 || trafficFlush != null) return;
 
-  const normalized = data
-    .map((info: any) => {
-      const lat =
-        typeof info.lat === 'number'
-          ? info.lat
-          : typeof info.latitude === 'number'
-          ? info.latitude
-          : null;
-
-      const lon =
-        typeof info.lon === 'number'
-          ? info.lon
-          : typeof info.longitude === 'number'
-          ? info.longitude
-          : typeof info.lng === 'number'
-          ? info.lng
-          : null;
-
-      if (lat == null || lon == null) return null;
-
-      const p: Plane = {
-        id: String(info.name),
-        name: String(info.name),
-        lat,
-        lon,
-        alt: typeof info.alt === 'number' ? info.alt : 0,
-        heading: typeof info.heading === 'number' ? info.heading : 0,
-        speed: typeof info.speed === 'number' ? info.speed : 0,
-        type: info.type,
-        callsign: info.callsign,
-        aircraftIcon: info.aircraftIcon || '2.png',
-        lastSeenTs: now, // ✅ nuevo
-      };
-
-      return p;
-    })
-    .filter((p): p is Plane => p !== null);
-
-  const STALE_MS = 10_000;
-
-  setTraffic(prev => {
-    const byId = new Map(prev.map(p => [p.id, p]));
-
-    for (const p of normalized) {
-      const prevP = byId.get(p.id);
-      byId.set(p.id, { ...prevP, ...p }); // ✅ mantiene fields que no vienen por traffic-update
+  trafficFlush = setTimeout(() => {
+    trafficFlush = undefined;
+    if (!isFocusedRef.current || pendingTraffic.size === 0) {
+      pendingTraffic.clear();
+      return;
     }
 
-    const merged = Array.from(byId.values());
-
-    // ✅ limpia los congelados
-    return merged.filter(p => (now - (p.lastSeenTs ?? 0)) <= STALE_MS);
-  });
+    const batch = Array.from(pendingTraffic.values());
+    pendingTraffic.clear();
+    const now = Date.now();
+    setTraffic(prev => {
+      const byId = new Map(prev.map(plane => [plane.id, plane]));
+      for (const plane of batch) {
+        byId.set(plane.id, { ...byId.get(plane.id), ...plane });
+      }
+      return Array.from(byId.values()).filter(plane => now - (plane.lastSeenTs ?? 0) <= 10_000);
+    });
+  }, 100);
 });
-
-
-
-
-
 
 // ✅ runway-state
 // ✅ runway-state
@@ -3365,8 +3389,7 @@ s.on('traffic-update', (data: any) => {
 
 
 s.on('runway-state', (payload: any) => {
-  try { console.log('[RUNWAY] state ←', JSON.stringify(payload)); } catch {}
-
+  if (!publishedAirfieldJsonRef.current) applyPublishedAirfield(payload?.airfield);
   setRunwayState(payload);
 
   try {
@@ -3416,35 +3439,47 @@ s.on('runway-state', (payload: any) => {
     navPhaseRef.current = null;
     prevIdxRef.current = null;
     setNavTargetSafe(null);
-    setNavPath([]);
+    setNavPlan({ path: [] });
   }
 
-  // 1) Resolver texto (i18n si viene key, si no texto plano)
-  const bannerText =
-    m?.key
-      ? t(landingTimedOut ? 'runway.landingTimeout' : String(m.key), m.params || {})
-      : (typeof m?.text === 'string' ? m.text : '');
+  const messageLanguage = resolveLanguage(i18n.resolvedLanguage || i18n.language);
+  const translate = i18n.getFixedT(messageLanguage);
+  const legacyKeys: Record<string, string> = {
+    'landing-timeout': 'runway.landingTimeout',
+    'landing-out': 'runway.landingOut',
+    'landing-drift': 'runway.landingDrift',
+    'landing-turn-lost': 'runway.landingTurnLost',
+    'auto-go-around': 'runway.autoGoAround',
+    'turn-tk': 'runway.yourTakeoffTurnIsNumber',
+  };
+  const key = legacyKeys[m?.key] ?? m?.key;
+  const params = { ...m?.params };
+  if (m?.key === 'turn-tk') {
+    params.n ??= typeof m.text === 'string' ? m.text.match(/#(\d+)/)?.[1] : undefined;
+    if (params.n == null) return;
+  }
 
+  const translated = typeof key === 'string' && typeof i18n.getResource(messageLanguage, 'translation', key) === 'string';
+  const bannerText = translated ? translate(key, params) : typeof m?.text === 'string' ? m.text : '';
   if (!bannerText) return;
 
-  flashBanner(bannerText, `srv:${m.key || bannerText}`);
-
-  // 2) Resolver voz (si viene spokenKey, usarlo; si no, usar bannerText tal cual)
-  try {
-    const spoken =
-      m?.spokenKey
-        ? t(String(m.spokenKey), m.spokenParams || m.params || {})
-        : bannerText;
-
-    Speech.stop();
-    Speech.speak(spoken, { language: ttsLang, rate: 1.0, pitch: 1.0 });
-  } catch {}
+  flashBanner(bannerText, `srv:${key || bannerText}`);
+  if (translated) {
+    const spokenKey = landingTimedOut ? 'runway.landingTimeoutSpoken' : m?.spokenKey;
+    const spoken = typeof spokenKey === 'string' &&
+      typeof i18n.getResource(messageLanguage, 'translation', spokenKey) === 'string'
+      ? translate(spokenKey, { ...params, ...m?.spokenParams })
+      : bannerText;
+    void speakRadarMessage(spoken, messageLanguage);
+  }
 });
 
 
   // ✅ user-removed
 // ✅ user-removed (DEBE ESTAR ACÁ, junto con el resto de s.on)
 s.on('user-removed', (name: string) => {
+  pendingTraffic.delete(String(name));
+  if (cameraPreviewRef.current?.warning?.id === String(name)) finishCameraPreview(true);
   console.log('🗑️ user-removed:', name);
 
   setTraffic(prev => prev.filter(p => p.name !== name && p.id !== String(name)));
@@ -3470,8 +3505,15 @@ s.on('user-removed', (name: string) => {
     serverATCRef.current = false;
   });
 
+  // Pedir los datos después de instalar los listeners, incluso con el socket ya conectado.
+  if (s.connected) requestRadarData();
+  else s.connect();
+
   // ✅ FIN: setup de listeners del socket
   return () => {
+    if (trafficFlush != null) clearTimeout(trafficFlush);
+    pendingTraffic.clear();
+
     // ✅ avisar salida (sin romper compatibilidad)
     try { s.emit('leave', { name: username }); } catch {}
     try { s.emit('remove-user', username); } catch {}
@@ -3645,7 +3687,7 @@ const centerMap = (lat = myPlane.lat, lon = myPlane.lon) => {
   const now = Date.now();
 
   // throttle: no más de 2 veces por segundo
-  if (now - lastCenterAtRef.current < 500) return;
+  if (cameraPreviewRef.current || mapGestureRef.current || now - lastCenterAtRef.current < 500) return;
 
   // no recentrar si no te moviste "nada" (ej. < 15m)
   const last = lastCenterPosRef.current;
@@ -3657,18 +3699,12 @@ const centerMap = (lat = myPlane.lat, lon = myPlane.lon) => {
   lastCenterAtRef.current = now;
   lastCenterPosRef.current = { lat, lon };
 
-  if (mapRef.current) {
-    isProgrammaticMoveRef.current = true;
-    mapRef.current.animateToRegion({
-      latitude: lat,
-      longitude: lon,
-      latitudeDelta: zoom.latitudeDelta,
-      longitudeDelta: zoom.longitudeDelta,
-    });
-
-    // liberar flag después de un ratito
-    setTimeout(() => { isProgrammaticMoveRef.current = false; }, 350);
-  }
+  mapRef.current?.animateToRegion({
+    latitude: lat,
+    longitude: lon,
+    latitudeDelta: mapRegionRef.current?.latitudeDelta ?? zoom.latitudeDelta,
+    longitudeDelta: mapRegionRef.current?.longitudeDelta ?? zoom.longitudeDelta,
+  });
 };
 
 useEffect(() => {
@@ -3731,7 +3767,7 @@ useEffect(() => {
   });
 
   // 2) podar selected/conflict si desaparecieron
-  setSelected(prev => (prev && !ids.has(prev.id) ? null : prev));
+  setSelected(prev => (prev && prev.id !== myPlaneRef.current?.id && !ids.has(prev.id) ? null : prev));
   setConflict(prev => (prev && !ids.has(prev.id) ? null : prev));
 
   // 3) podar warnings que ya no correspondan
@@ -3830,23 +3866,17 @@ useEffect(() => {
 
   const remind = () => flashBanner(holdShortText, 'hold-short-wait');
   remind();
-  try {
-    Speech.stop();
-    Speech.speak(holdShortText, { language: ttsLang });
-  } catch {}
+  void speakRadarMessage(holdShortText, language);
   const reminder = setInterval(remind, 2 * 60 * 1000);
   return () => clearInterval(reminder);
-}, [waitingAtHoldShort, holdShortAssigned, holdShortText, ttsLang]);
+}, [waitingAtHoldShort, holdShortAssigned, holdShortText, language]);
 
 useEffect(() => {
   if (!clearedForTakeoff) return;
 
   const text = t('runway.clearedToTakeoff');
   flashBanner(text, 'cleared-tko');
-  try {
-    Speech.stop();
-    Speech.speak(text, { language: ttsLang });
-  } catch {}
+  void speakRadarMessage(text, language);
 }, [clearedForTakeoff]);
 
 
@@ -3858,8 +3888,6 @@ useEffect(() => {
   const speedKmh =
     (myPlane && typeof myPlane.speed === 'number') ? myPlane.speed : 0;
 
-  const backendTarget = getBackendTargetForMe();
-  const backendFix = backendTarget?.fix ?? null;
   const assignedNow = getBackendAssignedForMe();
 
   const onRunway = isOnRunwayStrip();
@@ -3894,14 +3922,6 @@ useEffect(() => {
   const me = myPlane?.id || username;
   const st = (runwayState as any)?.state as any;
 
-  console.log('[DYN]', {
-    me,
-    assigned: st?.assignedOps?.[me],
-    target: st?.opsTargets?.[me],
-    reported: st?.reportedOpsStates?.[me],
-    backendFix,
-  });
-
   if (!st) return;
 
   // Avisar cuando el backend autoriza FINAL con la pista libre.
@@ -3911,10 +3931,7 @@ useEffect(() => {
       landClearShownRef.current = true;
       const text = t('runway.clearedToLand');
       flashBanner(text, 'clr-land');
-      try {
-        Speech.stop();
-        Speech.speak(text, { language: ttsLang });
-      } catch {}
+      void speakRadarMessage(text, language);
     }
     finalLockedRef.current = true;
   } else {
@@ -3976,7 +3993,7 @@ setNavTargetSafe(null);
       iAmOccupyingRef.current = null;
       navGuidanceEndedRef.current = true;
       setNavTargetSafe(null);
-      setNavPath([]);
+      setNavPlan({ path: [] });
       takeoffRequestedRef.current = false;
       takeoffEntryLatchedRef.current = false;
       intentRef.current = null;
@@ -4083,14 +4100,14 @@ setNavTargetSafe(null);
 
 useEffect(() => {
   if (navGuidanceEndedRef.current) {
-    setNavPath([]);
+    setNavPlan({ path: [] });
     return;
   }
 
   if (iAmOccupyingRef.current === 'takeoff') {
-    const oppositeThreshold = rw?.active_end === 'B' ? A_runway : B_runway;
+    const oppositeThreshold = rw?.active_end === 'B' ? runwayEndA : runwayEndB;
     const position = { latitude: myPlane.lat, longitude: myPlane.lon };
-    setNavPath(oppositeThreshold ? [position, oppositeThreshold] : []);
+    setNavPlan({ path: oppositeThreshold ? [position, oppositeThreshold] : [] });
     return;
   }
 
@@ -4103,11 +4120,11 @@ useEffect(() => {
       ? { latitude: backendTarget.lat, longitude: backendTarget.lon }
       : getApronPoint();
     const position = { latitude: myPlane.lat, longitude: myPlane.lon };
-    setNavPath(apron && myPlane.speed < LANDING_TAXI_SPEED_KMH ? [position, apron] : []);
+    setNavPlan({ path: apron && myPlane.speed < LANDING_TAXI_SPEED_KMH ? [position, apron] : [] });
     return;
   }
 
-  const path = buildAdvancedNavPathForMeV3({
+  const plan = buildAdvancedNavPathForMeV3({
     myPlane,
     assigned,
     currentOps,
@@ -4120,7 +4137,7 @@ useEffect(() => {
     fallbackNavTarget: navTarget,
   });
 
-  setNavPath(path);
+  setNavPlan(plan);
 }, [
   myPlane,
   navTarget,
@@ -4131,6 +4148,238 @@ useEffect(() => {
   activeThreshold,
   rw,
   aircraftModel,
+]);
+
+const [mapReady, setMapReady] = useState(false);
+const [cameraTick, setCameraTick] = useState(0);
+const mapRegionRef = useRef<Region | null>(null);
+const mapGestureRef = useRef(false);
+const cameraPreviewRef = useRef<{
+  kind: 'warning' | 'route' | 'aircraft';
+  restoreRegion: Region;
+  timer: ReturnType<typeof setTimeout>;
+  warning?: { id: string; priority: number };
+  aircraft?: { id: string; position: LatLon; updatedAt: number };
+} | null>(null);
+const lastCameraWarningRef = useRef<{ key: string; seenAt: number } | null>(null);
+const lastCameraRouteRef = useRef<string | null>(null);
+const trackedRouteCameraRef = useRef<{ key: string; position: LatLon; updatedAt: number } | null>(null);
+const pausedTrackedRouteKeyRef = useRef<string | null>(null);
+
+function pauseTrackedRouteCamera() {
+  const target = getBackendTargetForMe();
+  if (target?.fix === 'FINAL' || target?.fix === 'HOLD_SHORT') {
+    pausedTrackedRouteKeyRef.current = [target.fix, target.lat, target.lon].join(':');
+  }
+  trackedRouteCameraRef.current = null;
+}
+
+function finishCameraPreview(restore: boolean) {
+  const preview = cameraPreviewRef.current;
+  if (!preview) return;
+  clearTimeout(preview.timer);
+  cameraPreviewRef.current = null;
+  setCameraWarning(null);
+  if (restore) {
+    mapRegionRef.current = preview.restoreRegion;
+    lastCenterPosRef.current = null;
+    mapRef.current?.animateToRegion(preview.restoreRegion, 350);
+  }
+}
+
+function previewCamera(
+  kind: 'warning' | 'route' | 'aircraft',
+  coordinates: LatLon[],
+  duration: number,
+  warning?: { id: string; priority: number },
+  aircraftId?: string
+) {
+  const map = mapRef.current;
+  if (!map || coordinates.length < (kind === 'aircraft' ? 1 : 2) ||
+      coordinates.some(point => !Number.isFinite(point.latitude) || !Number.isFinite(point.longitude))) return false;
+
+  const previous = cameraPreviewRef.current;
+  const restoreRegion = previous?.restoreRegion ?? mapRegionRef.current ?? {
+    latitude: myPlane.lat,
+    longitude: myPlane.lon,
+    ...zoom,
+  };
+  if (previous) clearTimeout(previous.timer);
+  const timer = setTimeout(() => {
+    finishCameraPreview(true);
+    setCameraTick(tick => tick + 1);
+  }, duration);
+  const aircraft = aircraftId
+    ? { id: aircraftId, position: coordinates[0], updatedAt: Date.now() }
+    : undefined;
+  cameraPreviewRef.current = { kind, restoreRegion, timer, warning, aircraft };
+  if (aircraft) {
+    map.animateToRegion({ ...restoreRegion, ...aircraft.position }, 350);
+  } else {
+    map.fitToCoordinates(coordinates, {
+      edgePadding: { top: 80, bottom: kind === 'warning' ? 190 : 110, left: 42, right: 42 },
+      animated: true,
+    });
+  }
+  return true;
+}
+
+function handleMapGesture() {
+  if (mapGestureRef.current) return;
+  mapGestureRef.current = true;
+  finishCameraPreview(false);
+  pauseTrackedRouteCamera();
+  setFollowMe(false);
+}
+
+function focusTappedAircraft(plane: Plane) {
+  if (cameraPreviewRef.current?.kind === 'warning' || prioritizedWarning || conflict) return;
+  previewCamera('aircraft', [{ latitude: plane.lat, longitude: plane.lon }], 5000, undefined, plane.id);
+}
+
+function holdAircraftLabel(duration: number) {
+  selectedHoldUntilRef.current = Date.now() + duration;
+  if (hideSelectedTimeout.current) clearTimeout(hideSelectedTimeout.current);
+  hideSelectedTimeout.current = setTimeout(() => {
+    setSelected(null);
+    selectedHoldUntilRef.current = 0;
+    hideSelectedTimeout.current = null;
+  }, duration);
+}
+
+function cameraContains(point: LatLon) {
+  const region = mapRegionRef.current;
+  if (!region) return false;
+  const longitudeOffset = ((point.longitude - region.longitude + 540) % 360) - 180;
+  return Math.abs(point.latitude - region.latitude) <= region.latitudeDelta * 0.4 &&
+    Math.abs(longitudeOffset) <= region.longitudeDelta * 0.4;
+}
+
+useFocusEffect(React.useCallback(() => () => {
+  finishCameraPreview(true);
+  trackedRouteCameraRef.current = null;
+  pausedTrackedRouteKeyRef.current = null;
+  lastCameraWarningRef.current = null;
+  lastCameraRouteRef.current = null;
+  mapGestureRef.current = false;
+}, []));
+
+useEffect(() => {
+  if (!mapReady || !isFocusedRef.current || mapGestureRef.current) return;
+
+  const position = { latitude: myPlane.lat, longitude: myPlane.lon };
+  const warning = prioritizedWarning ?? conflict;
+  const warningPriority = ['TA', 'RA_LOW', 'RA_HIGH'].indexOf(warning?.alertLevel ?? '');
+  const now = Date.now();
+  if (warning && warningPriority >= 0) {
+    const key = warning.id + ':' + warning.alertLevel;
+    const last = lastCameraWarningRef.current;
+    if (last?.key === key) last.seenAt = now;
+    const activePriority = cameraPreviewRef.current?.warning?.priority ?? -1;
+    if (warningPriority > activePriority && (last?.key !== key || now - last.seenAt >= 15_000)) {
+      const currentPlane = traffic.find(plane => plane.id === warning.id) ?? warning;
+      const remote = { latitude: currentPlane.lat, longitude: currentPlane.lon };
+      const bounds = [
+        position,
+        remote,
+        movePoint(position.latitude, position.longitude, 45, 150),
+        movePoint(position.latitude, position.longitude, 225, 150),
+      ];
+      if (previewCamera('warning', bounds, 15_000, { id: warning.id, priority: warningPriority })) {
+        lastCameraWarningRef.current = { key, seenAt: now };
+        setCameraWarning(warning);
+      }
+    }
+  }
+
+  const target = getBackendTargetForMe();
+  const fix = target?.fix;
+  const tracksRoute = fix === 'FINAL' || fix === 'HOLD_SHORT';
+  const routeKey = target && fix && (/^B\d+$/.test(fix) || tracksRoute)
+    ? [fix, target.lat, target.lon].join(':')
+    : null;
+  const preview = cameraPreviewRef.current;
+  if (preview?.aircraft) {
+    const tracked = preview.aircraft.id === myPlane.id
+      ? myPlane
+      : traffic.find(plane => plane.id === preview.aircraft?.id);
+    if (tracked && now - preview.aircraft.updatedAt >= 750) {
+      const previous = preview.aircraft.position;
+      const moved = getDistance(previous.latitude, previous.longitude, tracked.lat, tracked.lon);
+      if (moved >= 8) {
+        preview.aircraft.position = { latitude: tracked.lat, longitude: tracked.lon };
+        preview.aircraft.updatedAt = now;
+        mapRef.current?.animateToRegion({ ...preview.restoreRegion, ...preview.aircraft.position }, 350);
+      }
+    }
+  }
+
+  if (!tracksRoute || !routeKey || navGuidanceEndedRef.current || iAmOccupyingRef.current) {
+    trackedRouteCameraRef.current = null;
+    pausedTrackedRouteKeyRef.current = null;
+  }
+
+  if (!routeKey || !target || navGuidanceEndedRef.current || iAmOccupyingRef.current) {
+    lastCameraRouteRef.current = null;
+    if (preview?.kind === 'route') finishCameraPreview(true);
+    return;
+  }
+
+  const changingRoute = preview?.kind === 'route' && lastCameraRouteRef.current !== routeKey;
+  if ((preview && !changingRoute) || warningPriority >= 0 ||
+      (runwayTapEnd && now < runwayLabelUntil)) return;
+
+  if (tracksRoute) {
+    if (pausedTrackedRouteKeyRef.current === routeKey) return;
+    const destination = { latitude: target.lat, longitude: target.lon };
+    if (fix === 'FINAL' && (!runwayEndA || !runwayEndB)) return;
+    const coordinates = fix === 'FINAL' && runwayEndA && runwayEndB
+      ? [position, runwayEndA, runwayEndB]
+      : [position, destination, ...(activeThreshold ? [activeThreshold] : [])];
+    const minMovement = fix === 'HOLD_SHORT' ? 8 : 25;
+    const previous = trackedRouteCameraRef.current;
+    if (previous?.key === routeKey &&
+        (now - previous.updatedAt < 750 ||
+         getDistance(previous.position.latitude, previous.position.longitude, position.latitude, position.longitude) < minMovement)) return;
+
+    if (changingRoute) finishCameraPreview(false);
+    trackedRouteCameraRef.current = { key: routeKey, position, updatedAt: now };
+    lastCameraRouteRef.current = routeKey;
+    if (previous?.key !== routeKey) setFollowMe(false);
+    mapRef.current?.fitToCoordinates(coordinates, {
+      edgePadding: { top: 80, bottom: 110, left: 42, right: 42 },
+      animated: true,
+    });
+    return;
+  }
+
+  if (lastCameraRouteRef.current === routeKey) return;
+  const destination = { latitude: target.lat, longitude: target.lon };
+  if (cameraContains(destination) && cameraContains(position)) {
+    if (changingRoute) finishCameraPreview(true);
+    lastCameraRouteRef.current = routeKey;
+    return;
+  }
+
+  const { path } = buildAdvancedNavPathForMeV3({
+    myPlane,
+    assigned: getBackendAssignedForMe2(),
+    currentOps: lastOpsStateRef.current,
+    backendTarget: target,
+    beaconB1,
+    beaconB2,
+    extraBeacons,
+    activeThreshold,
+    rw,
+    fallbackNavTarget: null,
+  });
+  if (path.length < 2) return;
+  if (previewCamera('route', [...path, destination], 10_000)) {
+    lastCameraRouteRef.current = routeKey;
+  }
+}, [
+  mapReady, cameraTick, myPlane, traffic, prioritizedWarning, conflict, runwayState,
+  runwayTapEnd, runwayLabelUntil, beaconB1, beaconB2, extraBeacons, activeThreshold, rw,
 ]);
 
   useEffect(() => {
@@ -4183,13 +4432,17 @@ useEffect(() => {
         }}
         
 
-        onRegionChangeComplete={(region) => {
-          if (isProgrammaticMoveRef.current) return; // ✅ clave
-
-          if (zoomDebounceRef.current) clearTimeout(zoomDebounceRef.current);
-          zoomDebounceRef.current = setTimeout(() => {
+        onMapReady={() => setMapReady(true)}
+        onRegionChange={(_, details) => {
+          if (details?.isGesture) handleMapGesture();
+        }}
+        onRegionChangeComplete={(region, details) => {
+          if (details?.isGesture) {
+            handleMapGesture();
             setZoom({ latitudeDelta: region.latitudeDelta, longitudeDelta: region.longitudeDelta });
-          }, 250);
+            mapGestureRef.current = false;
+          }
+          if (!mapGestureRef.current && !cameraPreviewRef.current) mapRegionRef.current = region;
         }}
 
         onPress={() => {
@@ -4211,6 +4464,11 @@ useEffect(() => {
   flat                                     // pega el ícono al mapa
   rotation={myPlane.heading || 0}          // rotación nativa (sin View)
   image={getOwnPlaneIcon(aircraftIcon)}    // PNG nativo con require()
+  onPress={() => {
+    setSelected({ ...myPlane, ops: lastOpsStateRef.current });
+    holdAircraftLabel(5000);
+    focusTappedAircraft(myPlane);
+  }}
   tracksViewChanges={false}                // performance óptima
 />
 
@@ -4266,7 +4524,8 @@ useEffect(() => {
             !warning &&
             (plane.alertLevel === 'none' || !plane.alertLevel);
           const labelDurationMs = isPureInfo ? 5000 : 6000;
-          selectedHoldUntilRef.current = Date.now() + labelDurationMs;
+          holdAircraftLabel(labelDurationMs);
+          focusTappedAircraft(plane);
           if (warning) {
             const w = { ...warning, ops, atcAssigned, atcTarget } as any;
             priorizarWarningManual(w);
@@ -4295,14 +4554,6 @@ useEffect(() => {
               atcTarget,
             } as any);
           }
-          if (hideSelectedTimeout.current) {
-            clearTimeout(hideSelectedTimeout.current);
-          }
-          hideSelectedTimeout.current = setTimeout(() => {
-            setSelected(null);
-            selectedHoldUntilRef.current = 0;
-            hideSelectedTimeout.current = null;
-          }, labelDurationMs);
         }}
       />
     );
@@ -4310,9 +4561,27 @@ useEffect(() => {
 
 
 
+        {airfield?.runways.slice(1).map(runway => {
+          const endA = runway.endA ?? runway.thresholdA;
+          const endB = runway.endB ?? runway.thresholdB;
+          const A = { latitude: endA.lat, longitude: endA.lng };
+          const B = { latitude: endB.lat, longitude: endB.lng };
+          const center = { latitude: (A.latitude + B.latitude) / 2, longitude: (A.longitude + B.longitude) / 2 };
+          return (
+            <React.Fragment key={runway.id}>
+              <Polyline coordinates={[A, B]} strokeColor="#607D8B" strokeWidth={2} />
+              <Marker coordinate={center} title={runway.identA + '/' + runway.identB} tracksViewChanges={false}>
+                <View style={{ backgroundColor: '#607D8B', borderRadius: 5, padding: 2 }}>
+                  <Text style={{ color: '#fff', fontSize: 10 }}>{runway.identA}/{runway.identB}</Text>
+                </View>
+              </Marker>
+            </React.Fragment>
+          );
+        })}
+
                   {/* === RUNWAY (Airfield) === */}
-          {A_runway && B_runway && (
-            <Polyline coordinates={[A_runway, B_runway]} strokeColor="black" strokeWidth={3} />
+          {runwayEndA && runwayEndB && (
+            <Polyline coordinates={[runwayEndA, runwayEndB]} strokeColor="black" strokeWidth={3} />
           )}
           {A_runway && (
             <Marker coordinate={A_runway} title={`${t("runway.threshold")} A ${rw?.identA || ""}`} onPress={() => showRunwayLabel('A')}>
@@ -4384,39 +4653,19 @@ useEffect(() => {
           />
         )}
 
-        {/* B2 */}
-        {beaconB2 && (
-          <Marker coordinate={beaconB2} title="B2">
-            <View style={{ backgroundColor: '#673AB7', padding: 2, borderRadius: 10, minWidth: 24, alignItems: 'center' }}>
-              <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 10 }}>B2</Text>
+        {assignedBeaconLabels(runwayState?.state?.opsTargets, holdingLabel).map(({ fix, position }) => (
+          <Marker key={fix} coordinate={position} title={fix} anchor={{ x: 0.5, y: 0.5 }}>
+            <View style={{
+              backgroundColor: fix === 'B1' ? '#4CAF50' : fix === 'B2' ? '#673AB7' : '#214F86',
+              padding: 3,
+              borderRadius: 10,
+              minWidth: 24,
+              alignItems: 'center',
+            }}>
+              <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 10 }}>{fix}</Text>
             </View>
           </Marker>
-        )}
-
-        {/* B1 */}
-        {beaconB1 && (
-          <Marker coordinate={beaconB1} title="B1">
-            <View style={{ backgroundColor: '#4CAF50', padding: 2, borderRadius: 10, minWidth: 24, alignItems: 'center' }}>
-              <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 10 }}>B1</Text>
-            </View>
-          </Marker>
-        )}
-
-        {/* B3, B4... (beacons extra) */}
-        {extraBeacons.map((b, index) => {
-          const label = `B${index + 3}`; // B3, B4...
-          const bg = index === 0 ? '#3F51B5' : '#1E88E5';
-
-          return (
-            <Marker key={label} coordinate={b} title={label}>
-              <View style={{ backgroundColor: bg, padding: 2, borderRadius: 10, minWidth: 24, alignItems: 'center' }}>
-                <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 10 }}>{label}</Text>
-              </View>
-            </Marker>
-          );
-        })}
-
-
+        ))}
 
         {/* Mi pierna hacia el target (B2/B1/Umbral) */}
         {/* Ruta avanzada visual: holding / órbita / interceptación a final */}
@@ -4462,6 +4711,11 @@ useEffect(() => {
         <TrafficWarningCard
           aircraft={prioritizedWarning}
           distance={prioritizedWarning.distanceMeters}
+        />
+      ) : cameraWarning ? (
+        <TrafficWarningCard
+          aircraft={cameraWarning}
+          distance={getDistanceTo(cameraWarning)}
         />
       ) : conflict ? (
         // conflict es Plane: calculá on-the-fly

@@ -1,4 +1,38 @@
 {
+  "pistaAdmin": {
+    "importAirport": "Import airport",
+    "icao": "ICAO code",
+    "lookupAirport": "Find airport",
+    "importing": "Loading airport…",
+    "airportNotFound": "Airport not found.",
+    "catalogError": "The airport catalog is unavailable.",
+    "noUsableRunways": "The catalog has no open runways with complete coordinates for this airport.",
+    "chooseRunway": "Choose the operational runway",
+    "incompleteRunways": "Open runways with incomplete data: {{n}}.",
+    "apronRequired": "Mark the apron and review both holding points before publishing.",
+    "runwayBusy": "Wait for the runway to clear and pending requests to finish before changing the operational runway.",
+    "title": "Manage runway",
+    "published": "Published runway",
+    "local": "Runway saved on this device",
+    "empty": "No runway configured",
+    "summary": "Runway {{a}}/{{b}} · Active threshold {{active}}",
+    "activate": "Activate threshold {{ident}}",
+    "confirmEnd": "The change will be sent to connected pilots.",
+    "publish": "Publish changes",
+    "edit": "Edit runway",
+    "draft": "Runway draft",
+    "tapA": "Tap the map to mark threshold A.",
+    "tapB": "Tap the map to mark threshold B.",
+    "tapApron": "Tap the map to mark the apron.",
+    "adjustBeacons": "Drag B1 and B2 to adjust their positions.",
+    "review": "Review and publish",
+    "invalidIdent": "Enter 01 to 36, with L, C or R where applicable.",
+    "changed": "The runway changed on the server. Close this draft and edit the current runway again.",
+    "publishError": "Publication could not be confirmed. Check the connection and try again.",
+    "apronSet": "Apron marked.",
+    "apronUnset": "Apron not marked.",
+    "advanced": "ATC settings"
+  },
   "app": {
     "name": "AirGuardian"
   },
@@ -63,6 +97,10 @@
   },
 
   "runway": {
+    "goToHoldShort": "Taxi to the holding point",
+    "landingTimeoutSpoken": "Landing slot expired. Request landing again.",
+    "autoGoAround": "Go-around. Rejoining the sequence.",
+    "clearedToLandRunway": "Cleared to land on runway {{rwy}}",
     "threshold": "Threshold",
     "apron": "APRON",
     "apronShort": "APRON",
@@ -100,9 +138,9 @@
     "yourTakeoffTurnIsNumber": "Your takeoff turn is number {{n}}.",
     "yourLandingTurnIsNumber": "Your landing turn is number {{n}}.",
     "landingOut": "OUT: landing slot lost. Request landing again if desired.",
-    "landingTurnLost": "TURN LOST: landing priority lost ({{reason}}). Request landing again if desired.",
+    "landingTurnLost": "Landing slot lost. Request landing again if desired.",
     "landingTimeout": "Your landing slot has expired. Request landing again if you wish to land.",
-    "landingDrift": "DRIFT: landing slot lost due to deviation ({{reason}}). Request landing again if desired."
+    "landingDrift": "Landing slot lost due to deviation. Request landing again if desired."
   },
 
   "nav": {
