@@ -19,6 +19,7 @@ import {
   Platform,
   AppState,
   ScrollView,
+  Linking,
 } from 'react-native';
 
 import MapView, { Marker, PROVIDER_GOOGLE, Polyline } from 'react-native-maps';
@@ -4679,6 +4680,12 @@ useEffect(() => {
 
       </MapView>
 
+        {airfield?.apronSource === 'openstreetmap' && (
+          <Text accessibilityRole="link" style={styles.apronAttribution}
+            onPress={() => { void Linking.openURL('https://www.openstreetmap.org/copyright').catch(() => {}); }}>
+            © OpenStreetMap contributors
+          </Text>
+        )}
         <View style={styles.controlsBox}>
           <Text style={styles.label}>✈️ {t("radar.heading")}: {myPlane.heading.toFixed(0)}°</Text>
           <Slider minimumValue={0} maximumValue={359} step={1} value={myPlane.heading} onValueChange={val => setMyPlane(prev => ({ ...prev, heading: val }))} />
@@ -5029,6 +5036,13 @@ const styles = StyleSheet.create({
   },
   map: {
     flex: 1,
+  },
+  apronAttribution: {
+    alignSelf: 'flex-end',
+    color: '#35465C',
+    fontSize: 10,
+    paddingHorizontal: 6,
+    backgroundColor: '#FFFFFF',
   },
   controlsBox: {
     backgroundColor: 'white',

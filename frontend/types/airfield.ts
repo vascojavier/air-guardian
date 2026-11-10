@@ -45,6 +45,7 @@ export type Runway = {
   thresholdB: { lat: number; lng: number };
   endA?: { lat: number; lng: number };
   endB?: { lat: number; lng: number };
+  apronSuggestion?: { lat: number; lng: number };
   heading_true_ab: number;  // grados (A → B)
   length_m?: number;
   width_m?: number;
@@ -67,6 +68,7 @@ export type Airfield = {
   incompleteRunways?: number;
   meteo?: Meteo;
   apron?: { lat: number; lng: number };
+  apronSource?: 'openstreetmap';
   lastUpdated: number;
   source: 'manual' | 'ourairports' | 'mixed' | 'openaip';
 

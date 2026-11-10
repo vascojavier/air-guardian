@@ -7,11 +7,15 @@ import {
   Image,
   TextInput,
   Alert,
+  KeyboardAvoidingView,
+  ScrollView,
+  Platform,
 } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
 import { useTranslation } from "react-i18next";
 import { useUser } from "../context/UserContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { ADMIN_KEY_STORAGE, resolveAdminKey } from "../utils/adminKey";
 
 export default function WelcomeScreen() {
   const { t } = useTranslation();
@@ -32,15 +36,15 @@ export default function WelcomeScreen() {
   const goPilot = () => router.replace("/");
 
   const continueAdmin = async () => {
-    let configuredKey: string | undefined;
+    let configuredKey: string;
     try {
-      configuredKey = (await AsyncStorage.getItem("airguardian.adminKey"))?.trim().toLowerCase();
+      configuredKey = resolveAdminKey(await AsyncStorage.getItem(ADMIN_KEY_STORAGE)).toLowerCase();
     } catch {
       Alert.alert(t("index.restrictedTitle"), t("index.restrictedBody"));
       return;
     }
     const pass = adminPass.trim().toLowerCase();
-    const valid = configuredKey ? pass === configuredKey : pass === "pista" || pass === "aeroclub123";
+    const valid = pass === configuredKey;
     if (!valid) {
       Alert.alert(t("auth.wrongPasswordTitle"), t("auth.wrongPasswordBody"));
       return;
@@ -57,6 +61,44 @@ export default function WelcomeScreen() {
     setAdminPass("");
     if (admin === "1" && router.canGoBack()) router.back();
   };
+
+  if (adminMode) {
+    return (
+      <KeyboardAvoidingView
+        style={styles.container}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+      >
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.adminPage}>
+          <View style={styles.adminBox}>
+            <Text style={styles.adminTitle}>{t("pistaAdmin.title")}</Text>
+            <Text style={styles.adminLabel}>{t("auth.adminPassword")}</Text>
+            <TextInput
+              value={adminPass}
+              onChangeText={setAdminPass}
+              accessibilityLabel={t("auth.adminPassword")}
+              placeholder={t("auth.passwordPlaceholder")}
+              placeholderTextColor="rgba(255,255,255,0.45)"
+              style={styles.adminInput}
+              secureTextEntry
+              autoFocus
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="go"
+              onSubmitEditing={() => void continueAdmin()}
+            />
+            <View style={styles.adminButtonsRow}>
+              <TouchableOpacity onPress={continueAdmin} style={styles.adminGoBtn}>
+                <Text style={styles.adminGoText}>{t("welcome.continueAsAdmin")}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={cancelAdmin} style={styles.adminCancelBtn}>
+                <Text style={styles.adminCancelText}>{t("common.cancel")}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -87,36 +129,9 @@ export default function WelcomeScreen() {
             <Text style={styles.primaryBtnText}>Pilot</Text>
           </TouchableOpacity>
 
-          {!adminMode ? (
-            <TouchableOpacity onPress={() => setAdminMode(true)} style={styles.secondaryBtn}>
-              <Text style={styles.secondaryBtnText}>{t("pistaAdmin.title")}</Text>
-            </TouchableOpacity>
-          ) : (
-            <View style={styles.adminBox}>
-              <Text style={styles.adminLabel}>{t("auth.adminPassword")}</Text>
-
-              <TextInput
-                value={adminPass}
-                onChangeText={setAdminPass}
-                secureTextEntry
-                placeholder={t("auth.passwordPlaceholder")}
-                placeholderTextColor="rgba(255,255,255,0.45)"
-                style={styles.adminInput}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-
-              <View style={styles.adminButtonsRow}>
-                <TouchableOpacity onPress={continueAdmin} style={styles.adminGoBtn}>
-                  <Text style={styles.adminGoText}>{t("welcome.continueAsAdmin")}</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity onPress={cancelAdmin} style={styles.adminCancelBtn}>
-                  <Text style={styles.adminCancelText}>{t("common.cancel")}</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
+          <TouchableOpacity onPress={() => setAdminMode(true)} style={styles.secondaryBtn}>
+            <Text style={styles.secondaryBtnText}>{t("pistaAdmin.title")}</Text>
+          </TouchableOpacity>
         </View>
 
         <Text style={styles.footer}>
@@ -191,6 +206,8 @@ const styles = StyleSheet.create({
   },
   secondaryBtnText: { color: "white", fontWeight: "800", fontSize: 16 },
 
+  adminPage: { flexGrow: 1, justifyContent: "center", padding: 16 },
+  adminTitle: { color: "white", fontSize: 20, fontWeight: "800" },
   adminBox: {
     backgroundColor: "rgba(255,255,255,0.07)",
     borderWidth: 1,

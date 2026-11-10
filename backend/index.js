@@ -1,5 +1,6 @@
 const express = require('express');
 const { lookupAirport } = require('./airportCatalog');
+const { suggestAirportAprons } = require('./apronCatalog');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -2969,7 +2970,7 @@ app.get('/api/airports/:icao', async (req, res) => {
   try {
     const airport = await lookupAirport(icao);
     if (!airport) return res.status(404).json({ error: 'airport-not-found' });
-    return res.json(airport);
+    return res.json(await suggestAirportAprons(airport));
   } catch (error) {
     console.error('Airport catalog lookup failed:', error);
     return res.status(503).json({ error: 'catalog-unavailable' });

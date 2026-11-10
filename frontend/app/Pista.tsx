@@ -1,6 +1,6 @@
 // C:\air-guardian\frontend\app\Pista.tsx
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, Button, StyleSheet, Alert, TextInput, Modal } from 'react-native';
+import { View, Text, Pressable, StyleSheet, Alert, TextInput, Modal, Linking } from 'react-native';
 import MapView, { Marker, Polyline, MapPressEvent, Region } from 'react-native-maps';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useUser } from '../context/UserContext';
@@ -129,7 +129,13 @@ function changeRunwayEnd(runway: Runway, end: RunwayEndId): Runway {
 function chooseOperativeRunway(airport: Airfield, id: string): Airfield | null {
   const runway = airport.runways.find(item => item.id === id);
   if (!runway) return null;
-  return { ...airport, runways: [runway, ...airport.runways.filter(item => item.id !== id)] };
+  const useSuggestion = !airport.apron || airport.apronSource === 'openstreetmap';
+  return {
+    ...airport,
+    runways: [runway, ...airport.runways.filter(item => item.id !== id)],
+    apron: useSuggestion ? runway.apronSuggestion : airport.apron,
+    apronSource: useSuggestion && runway.apronSuggestion ? 'openstreetmap' : undefined,
+  };
 }
 
 function thresholdPosition(point: Runway['thresholdA']): LatLng {
@@ -144,6 +150,34 @@ function previewHoldShort(A: LatLng, B: LatLng, apron: LatLng, end: RunwayEndId)
   const side = axis + (lateral < -1 ? -90 : 90);
   const approach = computeApproachBearing(A, B, end);
   return destinationPoint(destinationPoint(end === 'A' ? A : B, approach, 80), side, 80);
+}
+
+function RunwayButton({ title, onPress, disabled = false, primary = false }: {
+  title: string;
+  onPress: () => void;
+  disabled?: boolean;
+  primary?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.button,
+        primary && styles.buttonPrimary,
+        pressed && (primary ? styles.buttonPrimaryPressed : styles.buttonPressed),
+        disabled && styles.buttonDisabled,
+      ]}
+    >
+      <Text style={[
+        styles.buttonLabel,
+        primary && styles.buttonPrimaryLabel,
+        disabled && styles.buttonDisabledLabel,
+      ]}>{title}</Text>
+    </Pressable>
+  );
 }
 
 export default function PistaScreen() {
@@ -163,6 +197,7 @@ export default function PistaScreen() {
 
   // APRON (guardado y edición)
   const [apron, setApron] = useState<LatLng | null>(null); // pin guardado
+  const [apronSource, setApronSource] = useState<Airfield['apronSource']>();
   const [apronEdit, setApronEdit] = useState(false); // modo edición
   const [tempApron, setTempApron] = useState<LatLng | null>(null); // pin temporal
 
@@ -170,6 +205,12 @@ export default function PistaScreen() {
   const [draftAirport, setDraftAirport] = useState<Airfield | null>(null);
   const [selectedRunwayId, setSelectedRunwayId] = useState('');
   const [showImport, setShowImport] = useState(false);
+  const [confirmation, setConfirmation] = useState<{
+    title: string;
+    message: string;
+    airfield: Airfield;
+    expected: Airfield | null;
+  } | null>(null);
   const [icao, setIcao] = useState('');
   const [importing, setImporting] = useState(false);
   const importRequestRef = useRef<AbortController | null>(null);
@@ -193,6 +234,7 @@ export default function PistaScreen() {
       setBeaconB1(null);
       setBeaconB2(null);
       setApron(null);
+      setApronSource(undefined);
       return;
     }
     const A = { latitude: runway.thresholdA.lat, longitude: runway.thresholdA.lng };
@@ -209,6 +251,7 @@ export default function PistaScreen() {
     setBeaconB1(b1 ? { latitude: b1.lat, longitude: b1.lon } : points.B1);
     setBeaconB2(b2 ? { latitude: b2.lat, longitude: b2.lon } : points.B2);
     setApron(airfield?.apron ? { latitude: airfield.apron.lat, longitude: airfield.apron.lng } : null);
+    setApronSource(airfield?.apronSource);
   }
 
   useFocusEffect(React.useCallback(() => {
@@ -452,16 +495,15 @@ export default function PistaScreen() {
     if (!current || !currentRunway) return;
     const end = currentRunway.active_end === 'B' ? 'A' : 'B';
     const ident = end === 'A' ? currentRunway.identA : currentRunway.identB;
-    Alert.alert(t('pistaAdmin.activate', { ident }), t('pistaAdmin.confirmEnd'), [
-      { text: t('common.cancel'), style: 'cancel' },
-      {
-        text: t('pistaAdmin.publish'),
-        onPress: () => void publishAirfield({
-          ...current,
-          runways: [changeRunwayEnd(currentRunway, end), ...current.runways.slice(1)],
-        }, current),
+    setConfirmation({
+      title: t('pistaAdmin.activate', { ident }),
+      message: t('pistaAdmin.confirmEnd'),
+      airfield: {
+        ...current,
+        runways: [changeRunwayEnd(currentRunway, end), ...current.runways.slice(1)],
       },
-    ]);
+      expected: current,
+    });
   }
 
   function buildDraftAirfield(): Airfield | null {
@@ -498,6 +540,7 @@ export default function PistaScreen() {
       location: original?.location ?? midpointToLoc(cabeceraA, cabeceraB),
       runways: [runway, ...(original?.runways.slice(1) ?? [])],
       apron: apron ? { lat: apron.latitude, lng: apron.longitude } : undefined,
+      apronSource: apron ? apronSource : undefined,
       atcSettings: original?.atcSettings ?? DEFAULT_ATC_SETTINGS,
     };
   }
@@ -515,10 +558,12 @@ export default function PistaScreen() {
       a: identA, b: identB, active: active_end === 'B' ? identB : identA,
     });
     const apronSummary = t(apron ? 'pistaAdmin.apronSet' : 'pistaAdmin.apronUnset');
-    Alert.alert(t('pistaAdmin.review'), summary + '\n' + apronSummary + '\n' + t('pistaAdmin.confirmEnd'), [
-      { text: t('common.cancel'), style: 'cancel' },
-      { text: t('pistaAdmin.publish'), onPress: () => void publishAirfield(value, expected) },
-    ]);
+    setConfirmation({
+      title: t('pistaAdmin.review'),
+      message: [summary, apronSummary, t('pistaAdmin.confirmEnd')].join('\n'),
+      airfield: value,
+      expected,
+    });
   }
 
   const onRegionChangeComplete = (region: Region) => {
@@ -695,14 +740,14 @@ export default function PistaScreen() {
                   placeholder={t('pista.modalPlaceholder')}
                 />
                 {draftAirport && cabeceraActiva && (
-                  <Button title={t('pistaAdmin.activate', {
+                  <RunwayButton primary title={t('pistaAdmin.activate', {
                     ident: cabeceraActiva === 'A' ? draftAirport.runways[0].identB : numeroPista,
                   })} disabled={publishing || apronEdit}
                     onPress={() => chooseDraftEnd(cabeceraActiva === 'A' ? 'B' : 'A')} />
                 )}
                 <View style={styles.actions}>
-                  <Button title={t('pista.markApron')} disabled={publishing || apronEdit} onPress={() => setApronEdit(true)} />
-                  <Button title={t('pista.autoGenerateB1B2')} disabled={publishing} onPress={() => {
+                  <RunwayButton title={t('pista.markApron')} disabled={publishing || apronEdit} onPress={() => setApronEdit(true)} />
+                  <RunwayButton title={t('pista.autoGenerateB1B2')} disabled={publishing} onPress={() => {
                     if (!cabeceraActiva) return;
                     const { B1, B2 } = makeDefaultBeacons(cabeceraA, cabeceraB, cabeceraActiva);
                     setBeaconB1(B1);
@@ -713,12 +758,13 @@ export default function PistaScreen() {
                   <>
                     <Text style={styles.step}>{t('pistaAdmin.tapApron')}</Text>
                     <View style={styles.actions}>
-                      <Button title={t('common.save')} disabled={!tempApron} onPress={() => {
+                      <RunwayButton primary title={t('common.save')} disabled={!tempApron} onPress={() => {
                         setApron(tempApron);
+                        setApronSource(undefined);
                         setTempApron(null);
                         setApronEdit(false);
                       }} />
-                      <Button title={t('common.cancel')} onPress={() => { setApronEdit(false); setTempApron(null); }} />
+                      <RunwayButton title={t('common.cancel')} onPress={() => { setApronEdit(false); setTempApron(null); }} />
                     </View>
                   </>
                 ) : (
@@ -726,10 +772,10 @@ export default function PistaScreen() {
                 )}
               </>
             )}
-            <Button title={t('pistaAdmin.review')} disabled={publishing || apronEdit || !cabeceraB} onPress={reviewDraft} />
+            <RunwayButton primary title={t('pistaAdmin.review')} disabled={publishing || apronEdit || !cabeceraB} onPress={reviewDraft} />
             <View style={styles.actions}>
-              <Button title={t('common.cancel')} disabled={publishing} onPress={cancelEdit} />
-              {!modoSeteo && <Button title={t('pista.setNewRunway')} disabled={publishing} onPress={() => startEdit(true)} />}
+              <RunwayButton title={t('common.cancel')} disabled={publishing} onPress={cancelEdit} />
+              {!modoSeteo && <RunwayButton primary title={t('pista.setNewRunway')} disabled={publishing} onPress={() => startEdit(true)} />}
             </View>
           </>
         ) : (
@@ -756,21 +802,27 @@ export default function PistaScreen() {
                   </>
                 )}
                 {currentRunway && (
-                  <Button title={t('pistaAdmin.activate', { ident: currentRunway.active_end === 'B' ? currentRunway.identA : currentRunway.identB })}
+                  <RunwayButton primary title={t('pistaAdmin.activate', { ident: currentRunway.active_end === 'B' ? currentRunway.identA : currentRunway.identB })}
                     disabled={publishing} onPress={confirmEndChange} />
                 )}
                 <View style={styles.actions}>
-                  <Button title={t('pistaAdmin.importAirport')} disabled={publishing} onPress={() => setShowImport(true)} />
-                  <Button title={t(currentRunway ? 'pistaAdmin.edit' : 'pista.setNewRunway')}
+                  <RunwayButton primary title={t('pistaAdmin.importAirport')} disabled={publishing} onPress={() => setShowImport(true)} />
+                  <RunwayButton primary title={t(currentRunway ? 'pistaAdmin.edit' : 'pista.setNewRunway')}
                     disabled={publishing} onPress={() => startEdit(!currentRunway)} />
                   {currentRunway && (
-                    <Button title={t('pistaAdmin.advanced')} disabled={publishing}
+                    <RunwayButton title={t('pistaAdmin.advanced')} disabled={publishing}
                       onPress={() => router.push('/AirfieldDetails?tab=atc')} />
                   )}
                 </View>
               </>
             )}
           </>
+        )}
+        {apronSource === 'openstreetmap' && (
+          <Text accessibilityRole="link" style={styles.apronAttribution}
+            onPress={() => { void Linking.openURL('https://www.openstreetmap.org/copyright').catch(() => {}); }}>
+            © OpenStreetMap contributors
+          </Text>
         )}
       </View>
       <Modal visible={showImport} transparent animationType="fade"
@@ -789,11 +841,31 @@ export default function PistaScreen() {
               value={icao}
               onChangeText={value => setIcao(value.toUpperCase())}
             />
-            <Button title={t(importing ? 'pistaAdmin.importing' : 'pistaAdmin.lookupAirport')}
-              disabled={importing || !/^[A-Z]{4}$/.test(icao)} onPress={() => void importAirport()} />
-            <Button title={t('common.cancel')} disabled={importing} onPress={() => setShowImport(false)} />
+            <View style={styles.modalActions}>
+              <RunwayButton primary title={t(importing ? 'pistaAdmin.importing' : 'pistaAdmin.lookupAirport')}
+                disabled={importing || !/^[A-Z]{4}$/.test(icao)} onPress={() => void importAirport()} />
+              <RunwayButton title={t('common.cancel')} disabled={importing} onPress={() => setShowImport(false)} />
+            </View>
           </View>
         </View>
+      </Modal>
+      <Modal visible={!!confirmation} transparent animationType="fade"
+        onRequestClose={() => setConfirmation(null)}>
+        {confirmation && (
+          <View style={styles.modalBackdrop}>
+            <View style={styles.modalCard} accessibilityViewIsModal>
+              <Text style={styles.text}>{confirmation.title}</Text>
+              <Text style={styles.step}>{confirmation.message}</Text>
+              <View style={styles.modalActions}>
+                <RunwayButton primary title={t('pistaAdmin.publish')} onPress={() => {
+                  setConfirmation(null);
+                  void publishAirfield(confirmation.airfield, confirmation.expected);
+                }} />
+                <RunwayButton title={t('common.cancel')} onPress={() => setConfirmation(null)} />
+              </View>
+            </View>
+          </View>
+        )}
       </Modal>
     </View>
   );
@@ -803,14 +875,37 @@ export default function PistaScreen() {
 const styles = StyleSheet.create({
   modalBackdrop: { flex: 1, justifyContent: "center", padding: 32, backgroundColor: "rgba(0,0,0,0.45)" },
   modalCard: { padding: 20, borderRadius: 12, backgroundColor: "#fff" },
+  modalActions: { gap: 8 },
+  apronAttribution: { color: '#35465C', fontSize: 11, textDecorationLine: 'underline' },
+  button: {
+    minHeight: 48,
+    flexShrink: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#21242A',
+    borderWidth: 1,
+    borderRadius: 9,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  buttonLabel: { color: '#17191E', fontWeight: '700', textAlign: 'center' },
+  buttonPrimary: { backgroundColor: '#111318', borderColor: '#111318' },
+  buttonPrimaryLabel: { color: '#FF777E' },
+  buttonPressed: { backgroundColor: '#E8EEFA' },
+  buttonPrimaryPressed: { backgroundColor: '#322127', borderColor: '#322127' },
+  buttonDisabled: { backgroundColor: '#EFF0F2', borderColor: '#D5D8DE' },
+  buttonDisabledLabel: { color: '#626974' },
   panel: {
     padding: 10,
+    gap: 6,
     paddingBottom: 30,
     backgroundColor: '#fff',
   },
   actions: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginVertical: 6 },
   step: { marginBottom: 8 },
   text: {
+    color: '#17191E',
     fontWeight: 'bold',
     marginBottom: 10,
   },

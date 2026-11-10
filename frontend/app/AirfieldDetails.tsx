@@ -20,6 +20,7 @@ import { Redirect, useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { socket } from '../utils/socket';
 import { useUser } from '../context/UserContext';
+import { ADMIN_KEY_STORAGE, DEFAULT_ADMIN_KEY, resolveAdminKey } from '../utils/adminKey';
 
 const DEFAULT_ATC_SETTINGS = {
   B1_LATCH_ON_M: 3500,
@@ -35,7 +36,7 @@ const DEFAULT_ATC_SETTINGS = {
   FINAL_DRIFT_MAX_M: 2500,
 };
 
-const ADMIN_KEY_STORAGE = 'airguardian.adminKey';
+
 
 export default function AirfieldDetails() {
   const { role } = useUser();
@@ -45,7 +46,7 @@ export default function AirfieldDetails() {
   const startOnATC = tab === 'atc'; // (por ahora no se usa en UI, pero queda listo)
 
   const [airfield, setAirfield] = useState<Airfield | null>(null);
-  const [adminKey, setAdminKeyState] = useState<string>('Pista');
+  const [adminKey, setAdminKeyState] = useState(DEFAULT_ADMIN_KEY);
   const [showAdminKey, setShowAdminKey] = useState(false);
 
   useEffect(() => {
@@ -67,7 +68,7 @@ export default function AirfieldDetails() {
 
       try {
         const savedKey = await AsyncStorage.getItem(ADMIN_KEY_STORAGE);
-        setAdminKeyState(savedKey && savedKey.trim() ? savedKey : 'Pista');
+        setAdminKeyState(resolveAdminKey(savedKey));
       } catch {}
     })();
   }, [role]);
@@ -110,8 +111,8 @@ export default function AirfieldDetails() {
   const save = async () => {
     if (!airfield || role !== 'aeroclub') return;
 
-    // ✅ Guardar admin key (si queda vacía, vuelve a "Pista")
-    const finalKey = adminKey && adminKey.trim() ? adminKey.trim() : 'Pista';
+    // ✅ Guardar admin key (si queda vacía, vuelve a la clave predeterminada)
+    const finalKey = adminKey && adminKey.trim() ? adminKey.trim() : DEFAULT_ADMIN_KEY;
     try {
       await AsyncStorage.setItem(ADMIN_KEY_STORAGE, finalKey);
     } catch {}
