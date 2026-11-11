@@ -1,5 +1,7 @@
 {
   "pistaAdmin": {
+    "editBeacons": "Ajustar B1 y B2",
+    "tapRunwayLabel": "Tocá el cartel de una pista en el mapa.",
     "assignedRunway": "Pista asignada · Cabecera {{ident}}",
     "multiTitle": "Pistas activas",
     "serverKey": "Clave de administración del servidor",

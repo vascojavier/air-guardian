@@ -1,5 +1,7 @@
 {
   "pistaAdmin": {
+    "editBeacons": "Ajustar B1 e B2",
+    "tapRunwayLabel": "Toque no identificador da pista no mapa.",
     "airportSearch": "Nome, cidade ou código (ICAO/IATA)",
     "importAirport": "Importar aeródromo",
     "icao": "Código ICAO",

@@ -1,5 +1,7 @@
 {
   "pistaAdmin": {
+    "editBeacons": "Adjust B1 and B2",
+    "tapRunwayLabel": "Tap a runway label on the map.",
     "assignedRunway": "Assigned runway · Threshold {{ident}}",
     "multiTitle": "Active runways",
     "serverKey": "Server administrator key",

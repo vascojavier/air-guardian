@@ -463,7 +463,7 @@ const refreshPinnedDistance = () => {
 
       // ✅ NUEVO (backend truth)
       assignedOps?: Record<string, string>;
-      opsTargets?: Record<string, { fix?: string; lat: number; lon: number }>;
+      opsTargets?: Record<string, { fix?: string; lat: number; lon: number; runwayId?: string }>;
     };
   }>(null);
 
@@ -1064,21 +1064,22 @@ type NavLL = { latitude: number; longitude: number };
 type NavPlan = { path: NavLL[]; holdingLabel?: { fix: string; position: NavLL } };
 
 function assignedBeaconLabels(
-  targets: Record<string, { fix?: string; lat: number; lon: number }> | undefined,
-  holdingLabel: NavPlan['holdingLabel']
+  targets: Record<string, { fix?: string; lat: number; lon: number; runwayId?: string }> | undefined,
+  holdingLabel: NavPlan['holdingLabel'],
+  runwayId?: string
 ) {
-  const labels = new Map<string, NavLL>();
+  const labels = new Map<string, { fix: string; position: NavLL }>();
   for (const target of Object.values(targets ?? {})) {
     const fix = target?.fix;
-    if (!fix || !/^B[1-9]\d*$/.test(fix) || labels.has(fix) ||
+    if (!fix || !/^B[1-9]\d*$/.test(fix) ||
         !Number.isFinite(target.lat) || !Number.isFinite(target.lon)) continue;
-    labels.set(fix, { latitude: target.lat, longitude: target.lon });
+    const key = (target.runwayId ?? '') + ':' + fix;
+    if (labels.has(key)) continue;
+    const position = holdingLabel?.fix === fix && target.runwayId === runwayId
+      ? holdingLabel.position : { latitude: target.lat, longitude: target.lon };
+    labels.set(key, { fix, position });
   }
-
-  if (holdingLabel && labels.has(holdingLabel.fix)) {
-    labels.set(holdingLabel.fix, holdingLabel.position);
-  }
-  return Array.from(labels, ([fix, position]) => ({ fix, position }));
+  return Array.from(labels, ([key, label]) => ({ key, ...label }));
 }
 
 function normalizeHeadingDeg(h?: number): number {
@@ -1250,10 +1251,16 @@ function buildApproachToHoldEntry(
   return [from, entryPoint];
 }
 
-function hasReachedFinalThreshold(position: NavLL, threshold: NavLL, runwayCourseDeg: number): boolean {
+function hasReachedFinalThreshold(
+  position: NavLL,
+  threshold: NavLL,
+  runwayCourseDeg: number,
+  maxLateralDistanceM = Infinity
+): boolean {
   const distance = getDistance(threshold.latitude, threshold.longitude, position.latitude, position.longitude);
   const bearing = bearingDeg(threshold.latitude, threshold.longitude, position.latitude, position.longitude);
-  return distance * Math.cos(toRad(bearing - runwayCourseDeg)) >= 0;
+  const angle = toRad(bearing - runwayCourseDeg);
+  return distance * Math.cos(angle) >= 0 && Math.abs(distance * Math.sin(angle)) <= maxLateralDistanceM;
 }
 
 function buildFinalTransitionPath(
@@ -1263,7 +1270,7 @@ function buildFinalTransitionPath(
   runwayCourseDeg: number,
   radiusM: number
 ): NavLL[] {
-  if (hasReachedFinalThreshold(from, threshold, runwayCourseDeg)) return [];
+  if (hasReachedFinalThreshold(from, threshold, runwayCourseDeg, 30)) return [];
 
   const hdg = normalizeHeadingDeg(currentHeadingDeg);
   const finalCourse = normalizeHeadingDeg(runwayCourseDeg);
@@ -1292,7 +1299,9 @@ function buildFinalTransitionPath(
     interceptPoint.latitude,
     interceptPoint.longitude
   ) * Math.cos(toRad(toIntercept - finalCourse));
-  if (interceptAheadM <= 1) return [from, threshold];
+  if (interceptAheadM <= 1 && !hasReachedFinalThreshold(from, threshold, finalCourse)) {
+    return [from, threshold];
+  }
 
   const turnDeg = normalizeHeadingDeg(toIntercept - hdg + 180) - 180;
   const firstTurnClockwise = turnDeg >= 0;
@@ -2031,7 +2040,9 @@ function iAmGroundish(): boolean {
   return false;
 }
 
-function isPlaneInAssignedOps(p: Plane): boolean {
+type PlaneIdentity = Pick<Plane, 'id' | 'name' | 'callsign'>;
+
+function isPlaneInAssignedOps(p: PlaneIdentity): boolean {
   const st: any = runwayState?.state;
   const map = st?.assignedOps as Record<string, string> | undefined;
   if (!map) return false;
@@ -2042,8 +2053,9 @@ function isPlaneInAssignedOps(p: Plane): boolean {
   return false;
 }
 
-function isPlaneInQueues(p: Plane): boolean {
+function isPlaneInQueues(p: PlaneIdentity): boolean {
   const st: any = runwayState?.state;
+  if (Array.isArray(st?.queuedNames)) return keysForPlane(p).some(key => st.queuedNames.includes(key));
   const land = Array.isArray(st?.landings) ? st.landings : [];
   const tk   = Array.isArray(st?.takeoffs) ? st.takeoffs : [];
 
@@ -2113,7 +2125,7 @@ function getBackendAssignedForMe2(): string | null {
 }
 
 
-function keysForPlane(p: Plane): string[] {
+function keysForPlane(p: PlaneIdentity): string[] {
   const keys = [p.id, p.name, p.callsign].filter(Boolean) as string[];
   // único + estable
   return Array.from(new Set(keys.map(String)));
@@ -2159,7 +2171,7 @@ function shouldShowNavForPlane(p: Plane): boolean {
 
 
 // ATC (backend) asignación A_TO_Bx / FINAL
-function getAssignedOpsOfPlane(p: Plane): AtcAssigned {
+function getAssignedOpsOfPlane(p: PlaneIdentity): AtcAssigned {
   const st: any = runwayState?.state;
   const map = st?.assignedOps as Record<string, string> | undefined;
   if (!map) return null;
@@ -2172,7 +2184,7 @@ function getAssignedOpsOfPlane(p: Plane): AtcAssigned {
 }
 
 // Target (backend) fix + lat/lon
-function getOpsTargetOfPlane(p: Plane): AtcTarget {
+function getOpsTargetOfPlane(p: PlaneIdentity): AtcTarget {
   const st: any = runwayState?.state;
   const map = st?.opsTargets as Record<string, any> | undefined;
   if (!map) return null;
@@ -2192,6 +2204,14 @@ function getOpsTargetOfPlane(p: Plane): AtcTarget {
   return null;
 }
 
+
+function withCurrentAssignment<T extends PlaneIdentity>(plane: T) {
+  return {
+    ...plane,
+    atcAssigned: getAssignedOpsOfPlane(plane),
+    atcTarget: isPlaneInAssignedOps(plane) && isPlaneInQueues(plane) ? getOpsTargetOfPlane(plane) : null,
+  };
+}
 
 function inferOpsForDisplay(p: Plane): OpsState | null {
   const fieldElev = getFieldElevationM() ?? 0;
@@ -4140,7 +4160,10 @@ useEffect(() => {
   const backendTarget = getBackendTargetForMe();
   const currentOps = lastOpsStateRef.current as OpsState | null;
 
-  if (iAmOccupyingRef.current === 'landing' || currentOps === 'RUNWAY_CLEAR' || backendTarget?.fix === 'APRON') {
+  const hasLandingTarget = landingRequestedRef.current &&
+    (backendTarget?.fix === 'FINAL' || /^B\d+$/.test(backendTarget?.fix ?? ''));
+  if (iAmOccupyingRef.current === 'landing' ||
+      (currentOps === 'RUNWAY_CLEAR' && !hasLandingTarget) || backendTarget?.fix === 'APRON') {
     const apron = backendTarget?.fix === 'APRON'
       ? { latitude: backendTarget.lat, longitude: backendTarget.lon }
       : getApronPoint();
@@ -4320,6 +4343,7 @@ useEffect(() => {
   const target = getBackendTargetForMe();
   const fix = target?.fix;
   const tracksRoute = fix === 'FINAL' || fix === 'HOLD_SHORT';
+  const hasLandingTarget = landingRequestedRef.current && (fix === 'FINAL' || /^B\d+$/.test(fix ?? ''));
   const routeKey = target && fix && (/^B\d+$/.test(fix) || tracksRoute)
     ? [fix, target.lat, target.lon].join(':')
     : null;
@@ -4352,7 +4376,7 @@ useEffect(() => {
 
   const changingRoute = preview?.kind === 'route' && lastCameraRouteRef.current !== routeKey;
   if ((preview && !changingRoute) || warningPriority >= 0 ||
-      (runwayTapEnd && now < runwayLabelUntil)) return;
+      (!hasLandingTarget && runwayTapEnd && now < runwayLabelUntil)) return;
 
   if (tracksRoute) {
     if (pausedTrackedRouteKeyRef.current === routeKey) return;
@@ -4380,12 +4404,6 @@ useEffect(() => {
 
   if (lastCameraRouteRef.current === routeKey) return;
   const destination = { latitude: target.lat, longitude: target.lon };
-  if (cameraContains(destination) && cameraContains(position)) {
-    if (changingRoute) finishCameraPreview(true);
-    lastCameraRouteRef.current = routeKey;
-    return;
-  }
-
   const { path } = buildAdvancedNavPathForMeV3({
     myPlane,
     assigned: getBackendAssignedForMe2(),
@@ -4399,7 +4417,15 @@ useEffect(() => {
     fallbackNavTarget: null,
   });
   if (path.length < 2) return;
-  if (previewCamera('route', [...path, destination], 10_000)) {
+  const coordinates = hasLandingTarget && runwayEndA && runwayEndB
+    ? [...path, destination, runwayEndA, runwayEndB]
+    : [...path, destination];
+  if (coordinates.every(cameraContains)) {
+    if (changingRoute) finishCameraPreview(true);
+    lastCameraRouteRef.current = routeKey;
+    return;
+  }
+  if (previewCamera('route', coordinates, 10_000)) {
     lastCameraRouteRef.current = routeKey;
   }
 }, [
@@ -4678,8 +4704,8 @@ useEffect(() => {
           />
         )}
 
-        {assignedBeaconLabels(runwayState?.state?.opsTargets, holdingLabel).map(({ fix, position }) => (
-          <Marker key={fix} coordinate={position} title={fix} anchor={{ x: 0.5, y: 0.5 }}>
+        {assignedBeaconLabels(runwayState?.state?.opsTargets, holdingLabel, assignedRunwayId).map(({ key, fix, position }) => (
+          <Marker key={key} coordinate={position} title={fix} anchor={{ x: 0.5, y: 0.5 }}>
             <View style={{
               backgroundColor: fix === 'B1' ? '#4CAF50' : fix === 'B2' ? '#673AB7' : '#214F86',
               padding: 3,
@@ -4746,24 +4772,24 @@ useEffect(() => {
       {prioritizedWarning ? (
         // prioritizedWarning es Warning: tiene distanceMeters ✅
         <TrafficWarningCard
-          aircraft={prioritizedWarning}
+          aircraft={withCurrentAssignment(prioritizedWarning)}
           distance={prioritizedWarning.distanceMeters}
         />
       ) : cameraWarning ? (
         <TrafficWarningCard
-          aircraft={cameraWarning}
+          aircraft={withCurrentAssignment(cameraWarning)}
           distance={getDistanceTo(cameraWarning)}
         />
       ) : conflict ? (
         // conflict es Plane: calculá on-the-fly
         <TrafficWarningCard
-          aircraft={conflict}
+          aircraft={withCurrentAssignment(conflict)}
           distance={getDistanceTo(conflict)}
         />
       ) : selected ? (
         // selected es Plane: calculá on-the-fly
         <TrafficWarningCard
-          aircraft={selected}
+          aircraft={withCurrentAssignment(selected)}
           distance={getDistanceTo(selected)}
         />
       ) : null}

@@ -201,13 +201,13 @@ export default function PistaScreen() {
   const [apron, setApron] = useState<LatLng | null>(null); // pin guardado
   const [apronSource, setApronSource] = useState<Airfield['apronSource']>();
   const [apronEdit, setApronEdit] = useState(false); // modo edición
-  const [tempApron, setTempApron] = useState<LatLng | null>(null); // pin temporal
+  const [beaconEdit, setBeaconEdit] = useState(false);
 
   const [editing, setEditing] = useState(false);
   const [draftAirport, setDraftAirport] = useState<Airfield | null>(null);
   const [selectedRunwayId, setSelectedRunwayId] = useState('');
   const [showImport, setShowImport] = useState(false);
-  const [showRunwayPicker, setShowRunwayPicker] = useState(false);
+  const [choosingRunwayOnMap, setChoosingRunwayOnMap] = useState(false);
   const [multiConfig, setMultiConfig] = useState<{ value: Airfield; expected: Airfield } | null>(null);
   const [multiAdminKey, setMultiAdminKey] = useState('');
   const [multiUnlocked, setMultiUnlocked] = useState(false);
@@ -238,7 +238,8 @@ export default function PistaScreen() {
   const mapRef = useRef<MapView | null>(null);
   const [mapReady, setMapReady] = useState(false);
 
-  function showAirfield(airfield: Airfield | null) {
+  function showAirfield(airfield: Airfield | null, keepApron = false) {
+    setBeaconEdit(false);
     const runway = airfield?.runways?.[0];
     if (!runway) {
       setCabeceraA(null);
@@ -247,8 +248,10 @@ export default function PistaScreen() {
       setNumeroPista('');
       setBeaconB1(null);
       setBeaconB2(null);
-      setApron(null);
-      setApronSource(undefined);
+      if (!keepApron) {
+        setApron(null);
+        setApronSource(undefined);
+      }
       return;
     }
     const A = { latitude: runway.thresholdA.lat, longitude: runway.thresholdA.lng };
@@ -345,6 +348,9 @@ export default function PistaScreen() {
   const currentRunway = current?.runways?.[0];
   const mapAirport = editing ? draftAirport : current;
   const mapRunway = editing ? draftAirport?.runways.find(runway => runway.id === selectedRunwayId) : currentRunway;
+  const identInput = numeroPista.trim().toUpperCase().padStart(2, '0');
+  const visibleIdentB = mapRunway?.identA === numeroPista ? mapRunway.identB
+    : /^(0[1-9]|[12][0-9]|3[0-6])[LCR]?$/.test(identInput) ? reciprocalIdent(identInput) : '';
   const endA = mapRunway?.endA ? thresholdPosition(mapRunway.endA) : cabeceraA;
   const endB = mapRunway?.endB ? thresholdPosition(mapRunway.endB) : cabeceraB;
   const otherRunways = (mapAirport?.runways ?? []).filter(runway =>
@@ -428,7 +434,6 @@ export default function PistaScreen() {
     setDraftAirport(next);
     setSelectedRunwayId(id);
     setApronEdit(false);
-    setTempApron(null);
     showAirfield(next);
   }
 
@@ -436,6 +441,11 @@ export default function PistaScreen() {
     if (!cabeceraA || !cabeceraB || end === cabeceraActiva) return;
     const draft = buildDraftAirfield();
     if (!draft) return;
+    if (modoSeteo) {
+      const runway = changeRunwayEnd(draft.runways[draft.runways.length - 1], end);
+      showAirfield({ ...draft, runways: [runway] });
+      return;
+    }
     const runway = changeRunwayEnd(draft.runways[0], end);
     const next = { ...draft, runways: [runway, ...draft.runways.slice(1)] };
     if (draftAirport) setDraftAirport(next);
@@ -446,6 +456,7 @@ export default function PistaScreen() {
     draftBaseRef.current = currentRef.current;
     editingRef.current = true;
     setEditing(true);
+    setChoosingRunwayOnMap(false);
     const currentAirport = currentRef.current;
     const draft = newRunway ? null : currentAirport && runwayId
       ? chooseOperativeRunway(currentAirport, runwayId) : currentAirport;
@@ -453,26 +464,64 @@ export default function PistaScreen() {
     setSelectedRunwayId(draft?.runways[0]?.id ?? '');
     setModoSeteo(newRunway);
     setApronEdit(false);
-    setTempApron(null);
     showAirfield(draft);
+  }
+
+  function addDraftRunway() {
+    const draft = buildDraftAirfield();
+    if (!draft) return;
+    setDraftAirport(draft);
+    setSelectedRunwayId('');
+    setChoosingRunwayOnMap(false);
+    setModoSeteo(true);
+    setApronEdit(false);
+    showAirfield(null, true);
+  }
+
+  function chooseRunwayOnMap(id: string) {
+    if (!choosingRunwayOnMap || publishing || apronEdit || modoSeteo) return;
+    setChoosingRunwayOnMap(false);
+    if (editing) selectDraftRunway(id);
+    else if (id !== currentRunway?.id) startEdit(false, id);
   }
 
   function cancelEdit() {
     editingRef.current = false;
     setEditing(false);
+    setChoosingRunwayOnMap(false);
     setDraftAirport(null);
     setSelectedRunwayId('');
     setModoSeteo(false);
     setApronEdit(false);
-    setTempApron(null);
     showAirfield(currentRef.current);
+  }
+
+  function selectApron(point: LatLng) {
+    if (!apron || apron.latitude !== point.latitude || apron.longitude !== point.longitude) {
+      setApron(point);
+      setApronSource(undefined);
+    }
+    setApronEdit(false);
+  }
+
+  function toggleBeaconEdit() {
+    if (beaconEdit) {
+      setBeaconEdit(false);
+      return;
+    }
+    if (!beaconB1 || !beaconB2) return;
+    setBeaconEdit(true);
+    mapRef.current?.fitToCoordinates([beaconB1, beaconB2], {
+      edgePadding: { top: 45, left: 45, bottom: 45, right: 45 },
+      animated: true,
+    });
   }
 
   function handleMapPress(event: MapPressEvent) {
     if (role !== 'aeroclub' || !editing || publishing) return;
     const point = event.nativeEvent.coordinate;
     if (apronEdit) {
-      setTempApron(point);
+      selectApron(point);
       return;
     }
     if (!modoSeteo) return;
@@ -634,7 +683,7 @@ export default function PistaScreen() {
     if (!cabeceraA || !cabeceraB || !cabeceraActiva || !beaconB1 || !beaconB2) return null;
     const identA = numeroPista.trim().toUpperCase().padStart(2, '0');
     const original = draftAirport;
-    const previousRunway = original?.runways?.[0];
+    const previousRunway = modoSeteo ? undefined : original?.runways?.[0];
     if (identA !== previousRunway?.identA && !/^(0[1-9]|[12][0-9]|3[0-6])[LCR]?$/.test(identA)) {
       Alert.alert(t('pistaAdmin.invalidIdent'));
       return null;
@@ -653,6 +702,7 @@ export default function PistaScreen() {
       thresholdB: { lat: cabeceraB.latitude, lng: cabeceraB.longitude },
       heading_true_ab: sameThresholds ? previousRunway.heading_true_ab : calcularRumbo(cabeceraA, cabeceraB),
       active_end: cabeceraActiva,
+      operationUse: previousRunway?.operationUse ?? (original?.multiRunway ? 'closed' : undefined),
       beacons,
       beaconsByEnd: { ...(sameThresholds ? previousRunway?.beaconsByEnd : {}), [cabeceraActiva]: beacons },
     };
@@ -662,7 +712,9 @@ export default function PistaScreen() {
       source: original?.source ?? 'manual',
       lastUpdated: Date.now(),
       location: original?.location ?? midpointToLoc(cabeceraA, cabeceraB),
-      runways: [runway, ...(original?.runways.slice(1) ?? [])],
+      runways: modoSeteo
+        ? [...(original?.runways ?? []), runway]
+        : [runway, ...(original?.runways.slice(1) ?? [])],
       apron: apron ? { lat: apron.latitude, lng: apron.longitude } : undefined,
       apronSource: apron ? apronSource : undefined,
       atcSettings: original?.atcSettings ?? DEFAULT_ATC_SETTINGS,
@@ -677,7 +729,7 @@ export default function PistaScreen() {
       return;
     }
     const expected = draftBaseRef.current;
-    const { identA, identB, active_end } = value.runways[0];
+    const { identA, identB, active_end } = value.runways[modoSeteo ? value.runways.length - 1 : 0];
     const summary = t('pistaAdmin.summary', {
       a: identA, b: identB, active: active_end === 'B' ? identB : identA,
     });
@@ -719,7 +771,7 @@ export default function PistaScreen() {
               <Polyline coordinates={[A, B]} strokeColor="#607D8B" strokeWidth={2} />
               <Marker coordinate={calcularPuntoIntermedio(A, B)}
                 title={runway.identA + '/' + runway.identB}
-                onPress={() => { if (editing && !apronEdit) selectDraftRunway(runway.id); }}>
+                onPress={event => { event.stopPropagation(); chooseRunwayOnMap(runway.id); }}>
                 <View style={[styles.marker, { backgroundColor: '#607D8B' }]}>
                   <Text style={styles.markerText}>{runway.identA}/{runway.identB}</Text>
                 </View>
@@ -744,7 +796,7 @@ export default function PistaScreen() {
         )}
 
         {cabeceraB && (showDetails || editing) && (
-          <Marker coordinate={cabeceraB} title={t('pista.thresholdB', { num: draftAirport?.runways[0]?.identA === numeroPista ? draftAirport.runways[0].identB : !editing && currentRunway?.identA === numeroPista ? currentRunway.identB : numeroPista ? reciprocalIdent(numeroPista) : '' })}
+          <Marker coordinate={cabeceraB} title={t('pista.thresholdB', { num: visibleIdentB })}
             draggable={editing && !publishing}
             onDragEnd={event => moveThreshold('B', event.nativeEvent.coordinate)}>
             <View style={styles.marker}><Text style={styles.markerText}>B</Text></View>
@@ -770,8 +822,8 @@ export default function PistaScreen() {
         {beaconB2 && (
           <Marker
             coordinate={beaconB2}
-            draggable={editing && !publishing}
-            onDragEnd={e => { if (editingRef.current && !publishingRef.current) setBeaconB2(e.nativeEvent.coordinate); }}
+            draggable={editing && beaconEdit && !apronEdit && !publishing}
+            onDragEnd={e => { if (editingRef.current && beaconEdit && !apronEdit && !publishingRef.current) setBeaconB2(e.nativeEvent.coordinate); }}
             title={t('pista.b2Title')}
             description={t('pista.b2Desc')}
           >
@@ -784,8 +836,8 @@ export default function PistaScreen() {
         {beaconB1 && (
           <Marker
             coordinate={beaconB1}
-            draggable={editing && !publishing}
-            onDragEnd={e => { if (editingRef.current && !publishingRef.current) setBeaconB1(e.nativeEvent.coordinate); }}
+            draggable={editing && beaconEdit && !apronEdit && !publishing}
+            onDragEnd={e => { if (editingRef.current && beaconEdit && !apronEdit && !publishingRef.current) setBeaconB1(e.nativeEvent.coordinate); }}
             title={t('pista.b1Title')}
             description={t('pista.b1Desc')}
           >
@@ -796,7 +848,11 @@ export default function PistaScreen() {
         )}
 
         {apron && (
-          <Marker coordinate={apron} title={t('pista.apron')}>
+          <Marker coordinate={apron} title={t('pista.apron')} onPress={event => {
+            if (!editing || !apronEdit || publishingRef.current) return;
+            event.stopPropagation();
+            selectApron(apron);
+          }}>
             <View style={{ backgroundColor: '#FF9800', padding: 4, borderRadius: 10 }}>
               <Text style={{ color: '#fff', fontWeight: '700', fontSize: 10 }}>
                 {t('pista.apron')}
@@ -805,16 +861,18 @@ export default function PistaScreen() {
           </Marker>
         )}
 
-        {apronEdit && tempApron && (
-          <Marker coordinate={tempApron} title={t('pista.apronNew')}>
-            <View style={{ backgroundColor: '#FFC107', padding: 4, borderRadius: 10 }}>
-              <Text style={{ color: '#333', fontWeight: '700', fontSize: 10 }}>
-                {t('pista.apronTemp')}
-              </Text>
+        {cabeceraA && cabeceraB && visibleIdentB && (
+          <Marker coordinate={calcularPuntoIntermedio(cabeceraA, cabeceraB)}
+            title={numeroPista + '/' + visibleIdentB}
+            anchor={{ x: 0.5, y: 1 }}
+            onPress={event => { event.stopPropagation(); if (mapRunway) chooseRunwayOnMap(mapRunway.id); }}>
+            <View style={styles.runwayNameMarker}>
+              <View style={styles.marker}>
+                <Text style={styles.markerText}>{numeroPista}/{visibleIdentB}</Text>
+              </View>
             </View>
           </Marker>
         )}
-
         {cabeceraA && cabeceraB && cabeceraActiva && (
           <Marker
             coordinate={calcularPuntoIntermedio(cabeceraA, cabeceraB)}
@@ -831,19 +889,25 @@ export default function PistaScreen() {
       </MapView>
 
       <View style={styles.panel}>
+        {choosingRunwayOnMap && (
+          <View style={styles.actions}>
+            <Text style={styles.step}>{t('pistaAdmin.tapRunwayLabel')}</Text>
+            <RunwayButton title={t('common.cancel')} onPress={() => setChoosingRunwayOnMap(false)} />
+          </View>
+        )}
         {editing ? (
           <>
             <Text style={styles.text}>{t('pistaAdmin.draft')}{draftAirport?.name ? ' · ' + draftAirport.name : ''}</Text>
             {draftAirport && (
               <>
-                <Text style={styles.step}>{t('pistaAdmin.summary', {
+                {!modoSeteo && <Text style={styles.step}>{t('pistaAdmin.summary', {
                   a: draftAirport.runways[0].identA,
                   b: draftAirport.runways[0].identB,
                   active: cabeceraActiva === 'B' ? draftAirport.runways[0].identB : draftAirport.runways[0].identA,
-                })}</Text>
-                {draftAirport.runways.length > 1 && (
+                })}</Text>}
+                {!modoSeteo && draftAirport.runways.length > 1 && (
                   <RunwayButton title={t(draftAirport.multiRunway ? 'pistaAdmin.edit' : 'pistaAdmin.chooseRunway')} disabled={publishing || apronEdit}
-                    onPress={() => setShowRunwayPicker(true)} />
+                    onPress={() => setChoosingRunwayOnMap(true)} />
                 )}
                 {!!draftAirport.incompleteRunways && (
                   <Text style={styles.step}>{t('pistaAdmin.incompleteRunways', { n: draftAirport.incompleteRunways })}</Text>
@@ -865,35 +929,25 @@ export default function PistaScreen() {
                   editable={!publishing}
                   placeholder={t('pista.modalPlaceholder')}
                 />
-                {draftAirport && cabeceraActiva && (
+                {cabeceraActiva && (
                   <RunwayButton primary title={t('pistaAdmin.activate', {
-                    ident: cabeceraActiva === 'A' ? draftAirport.runways[0].identB : numeroPista,
+                    ident: cabeceraActiva === 'A' ? visibleIdentB : numeroPista,
                   })} disabled={publishing || apronEdit}
                     onPress={() => chooseDraftEnd(cabeceraActiva === 'A' ? 'B' : 'A')} />
                 )}
                 <View style={styles.actions}>
                   <RunwayButton title={t('pista.markApron')} disabled={publishing || apronEdit} onPress={() => setApronEdit(true)} />
-                  <RunwayButton title={t('pista.autoGenerateB1B2')} disabled={publishing} onPress={() => {
-                    if (!cabeceraActiva) return;
-                    const { B1, B2 } = makeDefaultBeacons(cabeceraA, cabeceraB, cabeceraActiva);
-                    setBeaconB1(B1);
-                    setBeaconB2(B2);
-                  }} />
+                  <RunwayButton title={t(beaconEdit ? 'common.save' : 'pistaAdmin.editBeacons')}
+                    disabled={publishing || apronEdit || !beaconB1 || !beaconB2}
+                    onPress={toggleBeaconEdit} />
                 </View>
-                {apronEdit ? (
+                {apronEdit && (
                   <>
                     <Text style={styles.step}>{t('pistaAdmin.tapApron')}</Text>
-                    <View style={styles.actions}>
-                      <RunwayButton primary title={t('common.save')} disabled={!tempApron} onPress={() => {
-                        setApron(tempApron);
-                        setApronSource(undefined);
-                        setTempApron(null);
-                        setApronEdit(false);
-                      }} />
-                      <RunwayButton title={t('common.cancel')} onPress={() => { setApronEdit(false); setTempApron(null); }} />
-                    </View>
+                    <RunwayButton title={t('common.cancel')} onPress={() => setApronEdit(false)} />
                   </>
-                ) : (
+                )}
+                {beaconEdit && !apronEdit && (
                   <Text style={styles.step}>{t('pistaAdmin.adjustBeacons')}</Text>
                 )}
               </>
@@ -901,7 +955,7 @@ export default function PistaScreen() {
             <RunwayButton primary title={t('pistaAdmin.review')} disabled={publishing || apronEdit || !cabeceraB} onPress={reviewDraft} />
             <View style={styles.actions}>
               <RunwayButton title={t('common.cancel')} disabled={publishing} onPress={cancelEdit} />
-              {!modoSeteo && <RunwayButton primary title={t('pista.setNewRunway')} disabled={publishing} onPress={() => startEdit(true)} />}
+              {!modoSeteo && <RunwayButton primary title={t('pista.setNewRunway')} disabled={publishing || apronEdit || !cabeceraB} onPress={addDraftRunway} />}
             </View>
           </>
         ) : (
@@ -918,7 +972,7 @@ export default function PistaScreen() {
               <>
                 {currentRunway && !current.multiRunway && current.runways.length > 1 && (
                   <RunwayButton title={t('pistaAdmin.chooseRunway')} disabled={publishing}
-                    onPress={() => setShowRunwayPicker(true)} />
+                    onPress={() => setChoosingRunwayOnMap(true)} />
                 )}
                 {current && (
                   <RunwayButton title={t('pistaAdmin.multiTitle')} disabled={publishing} onPress={openMultiConfig} />
@@ -1060,29 +1114,6 @@ export default function PistaScreen() {
           </View>
         </View>
       </Modal>
-      <Modal visible={showRunwayPicker} transparent animationType="fade"
-        onRequestClose={() => setShowRunwayPicker(false)}>
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard} accessibilityViewIsModal>
-            <Text style={styles.text}>{t(draftAirport?.multiRunway ? 'pistaAdmin.edit' : 'pistaAdmin.chooseRunway')}</Text>
-            <ScrollView style={styles.runwayOptions} contentContainerStyle={styles.modalActions}>
-              {(mapAirport?.runways ?? []).map(runway => {
-                const selected = runway.id === (editing ? selectedRunwayId : currentRunway?.id);
-                return (
-                  <RunwayButton key={runway.id} primary={selected}
-                    title={runway.identA + '/' + runway.identB} onPress={() => {
-                      setShowRunwayPicker(false);
-                      if (selected) return;
-                      if (editing) selectDraftRunway(runway.id);
-                      else startEdit(false, runway.id);
-                    }} />
-                );
-              })}
-            </ScrollView>
-            <RunwayButton title={t('common.cancel')} onPress={() => setShowRunwayPicker(false)} />
-          </View>
-        </View>
-      </Modal>
       <Modal visible={showImport} transparent animationType="fade"
         onRequestClose={() => { if (!importing) setShowImport(false); }}>
         <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
@@ -1216,6 +1247,7 @@ const styles = StyleSheet.create({
     minWidth: 20,
     alignItems: 'center',
   },
+  runwayNameMarker: { paddingBottom: 14 },
   markerText: {
     color: 'white',
     fontWeight: 'bold',

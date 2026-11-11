@@ -1377,6 +1377,13 @@ const multiRunway = createMultiRunway({
   holdShort: getHoldShortPointFromAirfield,
   apron: getApronPointFromAirfield,
   distance: getDistance,
+  etaToPoint: computeETAtoPointSeconds,
+  beaconPoint: (geom, ordinal) => {
+    if (ordinal === 1) return geom.B1;
+    if (ordinal === 2) return geom.B2;
+    return destinationPoint(geom.B2.lat, geom.B2.lon, geom.app_brg,
+      (ordinal - 2) * STACK_SPACING_NM * NM_TO_M);
+  },
   now: () => Date.now(),
 });
 
@@ -2072,7 +2079,8 @@ runwayState.lastOrder.takeoffs = newTk;
 setInterval(() => {
   try {
     if (multiRunwayEnabled()) {
-      if (multiRunway.expire(name => Date.now() - (userLocations[name]?.timestamp ?? 0) < 60_000)) {
+      const expired = multiRunway.expire(name => Date.now() - (userLocations[name]?.timestamp ?? 0) < 60_000);
+      if (multiRunway.advance() || expired) {
         publishMultiRunwayState();
       }
       return;

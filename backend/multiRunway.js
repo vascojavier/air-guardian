@@ -49,7 +49,7 @@ function assignedRunway(runway, end) {
   return { ...runway, active_end: end, beacons: runway.beaconsByEnd?.[end] };
 }
 
-function createMultiRunway({ airfield, geometry, holdShort, apron, distance, now = Date.now }) {
+function createMultiRunway({ airfield, geometry, holdShort, apron, distance, etaToPoint, beaconPoint, now = Date.now }) {
   const requests = new Map();
   const getRunway = id => airfield().runways.find(runway => runway.id === id);
 
@@ -86,9 +86,11 @@ function createMultiRunway({ airfield, geometry, holdShort, apron, distance, now
   }
 
   function advance() {
+    let changed = false;
     for (const item of requests.values()) {
       if (item.status === 'pending' && airfield().multiRunway[item.operation] === 'automatic') {
         assignAutomatically(item);
+        if (item.status !== 'pending') changed = true;
       }
     }
 
@@ -101,8 +103,33 @@ function createMultiRunway({ airfield, geometry, holdShort, apron, distance, now
         RESERVED.has(other.status) &&
         (other.runway.id === item.runway.id || intersects(other.runway, item.runway))
       );
-      if (!blocked) item.status = 'cleared';
+      if (!blocked) {
+        item.status = 'cleared';
+        changed = true;
+      }
     }
+
+    const arrivalsByRunway = new Map();
+    for (const item of requests.values()) {
+      if (item.operation !== 'arrival' || !['assigned', 'ready'].includes(item.status)) continue;
+      const arrivals = arrivalsByRunway.get(item.runway.id) ?? [];
+      arrivals.push({ item, eta: etaToPoint(item.name, item.geom.B1) ?? Infinity });
+      arrivalsByRunway.set(item.runway.id, arrivals);
+    }
+    for (const arrivals of arrivalsByRunway.values()) {
+      arrivals.sort((a, b) => Number(b.item.status === 'ready') - Number(a.item.status === 'ready') ||
+        Number(b.item.emergency) - Number(a.item.emergency) ||
+        a.eta - b.eta || a.item.requestedAt - b.item.requestedAt);
+      for (const [index, { item }] of arrivals.entries()) {
+        const beacon = index < 30 ? 'B' + (index + 1) : undefined;
+        if (item.beacon !== beacon) {
+          item.beacon = beacon;
+          item.reportedBeacon = undefined;
+          changed = true;
+        }
+      }
+    }
+    return changed;
   }
 
   function report(name, state, position, aux) {
@@ -111,13 +138,18 @@ function createMultiRunway({ airfield, geometry, holdShort, apron, distance, now
 
     if (item.status === 'assigned') {
       const arriving = item.operation === 'arrival';
-      const target = arriving ? item.geom.B1 : item.hold;
-      if (state !== (arriving ? 'B1' : 'HOLD_SHORT') ||
+      const target = arriving ? item.beacon && beaconPoint(item.geom, Number(item.beacon.slice(1))) : item.hold;
+      if (!target || state !== (arriving ? item.beacon : 'HOLD_SHORT') ||
           !Number.isFinite(position?.latitude) || !Number.isFinite(position?.longitude) ||
           distance(position.latitude, position.longitude, target.lat, target.lon) > (arriving ? 600 : 90) ||
           (!arriving && aux?.holdShortTarget &&
             (!Number.isFinite(aux.holdShortTarget.lat) || !Number.isFinite(aux.holdShortTarget.lon) ||
              distance(aux.holdShortTarget.lat, aux.holdShortTarget.lon, target.lat, target.lon) > 1))) return false;
+      if (arriving && state !== 'B1') {
+        if (item.reportedBeacon === state) return false;
+        item.reportedBeacon = state;
+        return true;
+      }
       item.status = 'ready';
       item.readyAt = now();
     } else if (item.status === 'cleared' && state === 'RUNWAY_OCCUPIED') {
@@ -162,16 +194,19 @@ function createMultiRunway({ airfield, geometry, holdShort, apron, distance, now
     const opsTargets = {};
     const landings = [];
     const takeoffs = [];
+    const queuedNames = [];
     let inUse = null;
     for (const item of requests.values()) {
-      if (!item.runway || item.runway.id !== runwayId) continue;
+      if (!item.runway) continue;
+      const sameRunway = item.runway.id === runwayId;
       const arriving = item.operation === 'arrival';
       if (item.status !== 'occupied' && item.status !== 'vacated') {
-        (arriving ? landings : takeoffs).push(item);
+        queuedNames.push(item.name);
+        if (sameRunway) (arriving ? landings : takeoffs).push(item);
       }
       let fix;
       let point;
-      if (item.status === 'occupied') {
+      if (sameRunway && item.status === 'occupied') {
         inUse = { name: item.name, action: arriving ? 'landing' : 'takeoff' };
       }
       if (arriving && (item.status === 'occupied' || item.status === 'vacated')) {
@@ -181,15 +216,17 @@ function createMultiRunway({ airfield, geometry, holdShort, apron, distance, now
         fix = arriving ? 'FINAL' : 'RWY';
         point = arriving ? item.geom.thr : item.geom.departureStart;
       } else if (item.status === 'assigned' || item.status === 'ready') {
-        fix = arriving ? 'B1' : 'HOLD_SHORT';
-        point = arriving ? item.geom.B1 : item.hold;
+        fix = arriving ? item.beacon : 'HOLD_SHORT';
+        point = arriving ? fix && beaconPoint(item.geom, Number(fix.slice(1))) : item.hold;
       }
       if (fix && point) {
         assignedOps[item.name] = fix === 'FINAL' ? fix : 'A_TO_' + fix;
-        opsTargets[item.name] = { fix, ...point };
+        opsTargets[item.name] = { fix, ...point, runwayId: item.runway.id };
       }
     }
     const firstCleared = (a, b) => Number(b.status === 'cleared') - Number(a.status === 'cleared');
+    const arrivalOrder = (a, b) => firstCleared(a, b) ||
+      Number(a.beacon?.slice(1) ?? Infinity) - Number(b.beacon?.slice(1) ?? Infinity);
     const publicRequest = ({ name, callsign }) => ({ name, callsign });
     return {
       runwayId,
@@ -198,8 +235,9 @@ function createMultiRunway({ airfield, geometry, holdShort, apron, distance, now
       awaitingRunway: own?.status === 'pending',
       assignedOps,
       opsTargets,
-      landings: landings.sort(firstCleared).map(publicRequest),
+      landings: landings.sort(arrivalOrder).map(publicRequest),
       takeoffs: takeoffs.sort(firstCleared).map(publicRequest),
+      queuedNames,
       inUse,
     };
   }
