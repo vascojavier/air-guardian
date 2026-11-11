@@ -1,5 +1,6 @@
 {
   "pistaAdmin": {
+    "airportSearch": "Nom, ville ou code (OACI/IATA)",
     "importAirport": "Importer un aérodrome",
     "icao": "Code OACI",
     "lookupAirport": "Rechercher un aérodrome",
@@ -154,6 +155,8 @@
     "continueAsAdmin": "Continuer comme administrateur"
   },
   "index": {
+    "searchAircraft": "Rechercher un modèle",
+    "noAircraftMatches": "Aucun modèle correspondant.",
     "select": "Sélectionner…",
     "enter": "Entrer",
     "goPistaAdmin": "Ouvrir la gestion de piste",

@@ -1,6 +1,6 @@
 // C:\air-guardian\frontend\app\Pista.tsx
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, Pressable, StyleSheet, Alert, TextInput, Modal, Linking } from 'react-native';
+import { View, Text, Pressable, StyleSheet, Alert, TextInput, Modal, Linking, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
 import MapView, { Marker, Polyline, MapPressEvent, Region } from 'react-native-maps';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useUser } from '../context/UserContext';
@@ -8,7 +8,6 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import type { Airfield, Runway, RunwayBeacon, RunwayEndId } from '../types/airfield';
 import { socket } from '../utils/socket';
 import { BACKEND_URL } from '../utils/config';
-import { Picker } from '@react-native-picker/picker';
 import { useTranslation } from 'react-i18next';
 
 // ---------------------- Tipos locales ----------------------
@@ -205,13 +204,19 @@ export default function PistaScreen() {
   const [draftAirport, setDraftAirport] = useState<Airfield | null>(null);
   const [selectedRunwayId, setSelectedRunwayId] = useState('');
   const [showImport, setShowImport] = useState(false);
+  const [showRunwayPicker, setShowRunwayPicker] = useState(false);
   const [confirmation, setConfirmation] = useState<{
     title: string;
     message: string;
     airfield: Airfield;
     expected: Airfield | null;
   } | null>(null);
-  const [icao, setIcao] = useState('');
+  const [airportQuery, setAirportQuery] = useState('');
+  const [airportSearch, setAirportSearch] = useState<{
+    query: string;
+    matches: { icao: string; iata?: string; name: string; city?: string }[];
+    failed?: boolean;
+  } | null>(null);
   const [importing, setImporting] = useState(false);
   const importRequestRef = useRef<AbortController | null>(null);
   const [live, setLive] = useState(false);
@@ -335,7 +340,31 @@ export default function PistaScreen() {
     );
   }, [mapReady, mapAirport?.id, mapAirport?.runways.length]);
 
-  async function importAirport() {
+  const searchQuery = airportQuery.trim();
+  const searchResult = airportSearch?.query === searchQuery ? airportSearch : null;
+  const exactIcao = /^[A-Z]{4}$/i.test(searchQuery);
+
+  useEffect(() => {
+    if (!showImport || importing || !searchQuery) return;
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch(BACKEND_URL + '/api/airports?query=' + encodeURIComponent(searchQuery),
+          { signal: controller.signal });
+        if (!response.ok) throw new Error('Airport search failed');
+        const matches = await response.json();
+        if (!controller.signal.aborted) setAirportSearch({ query: searchQuery, matches });
+      } catch {
+        if (!controller.signal.aborted) setAirportSearch({ query: searchQuery, matches: [], failed: true });
+      }
+    }, 250);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [showImport, importing, searchQuery]);
+
+  async function importAirport(icao: string) {
     const code = icao.trim().toUpperCase();
     if (!/^[A-Z]{4}$/.test(code) || role !== 'aeroclub' || importRequestRef.current) return;
     const controller = new AbortController();
@@ -349,13 +378,17 @@ export default function PistaScreen() {
       }
       const airport: Airfield = await response.json();
       if (controller.signal.aborted) return;
-      if (!airport.runways?.length) {
+      const firstRunway = airport.runways?.[0];
+      const draft = firstRunway ? chooseOperativeRunway(airport, firstRunway.id) : null;
+      if (!draft || !firstRunway) {
         Alert.alert(t('pistaAdmin.noUsableRunways'));
         return;
       }
       startEdit(true);
       setModoSeteo(false);
-      setDraftAirport(airport);
+      setDraftAirport(draft);
+      setSelectedRunwayId(firstRunway.id);
+      showAirfield(draft);
       setShowImport(false);
     } catch {
       if (!controller.signal.aborted) Alert.alert(t('pistaAdmin.catalogError'));
@@ -712,13 +745,15 @@ export default function PistaScreen() {
             <Text style={styles.text}>{t('pistaAdmin.draft')}{draftAirport?.name ? ' · ' + draftAirport.name : ''}</Text>
             {draftAirport && (
               <>
-                <Picker selectedValue={selectedRunwayId} enabled={!publishing && !apronEdit}
-                  onValueChange={value => selectDraftRunway(value)}>
-                  <Picker.Item label={t('pistaAdmin.chooseRunway')} value="" />
-                  {draftAirport.runways.map(runway => (
-                    <Picker.Item key={runway.id} label={runway.identA + '/' + runway.identB} value={runway.id} />
-                  ))}
-                </Picker>
+                <Text style={styles.step}>{t('pistaAdmin.summary', {
+                  a: draftAirport.runways[0].identA,
+                  b: draftAirport.runways[0].identB,
+                  active: cabeceraActiva === 'B' ? draftAirport.runways[0].identB : draftAirport.runways[0].identA,
+                })}</Text>
+                {draftAirport.runways.length > 1 && (
+                  <RunwayButton title={t('pistaAdmin.chooseRunway')} disabled={publishing || apronEdit}
+                    onPress={() => setShowRunwayPicker(true)} />
+                )}
                 {!!draftAirport.incompleteRunways && (
                   <Text style={styles.step}>{t('pistaAdmin.incompleteRunways', { n: draftAirport.incompleteRunways })}</Text>
                 )}
@@ -791,15 +826,8 @@ export default function PistaScreen() {
             {role === 'aeroclub' && (
               <>
                 {currentRunway && current.runways.length > 1 && (
-                  <>
-                    <Text>{t('pistaAdmin.chooseRunway')}</Text>
-                    <Picker selectedValue={currentRunway.id} enabled={!publishing}
-                      onValueChange={id => { if (id !== currentRunway.id) startEdit(false, id); }}>
-                      {current.runways.map(runway => (
-                        <Picker.Item key={runway.id} label={runway.identA + '/' + runway.identB} value={runway.id} />
-                      ))}
-                    </Picker>
-                  </>
+                  <RunwayButton title={t('pistaAdmin.chooseRunway')} disabled={publishing}
+                    onPress={() => setShowRunwayPicker(true)} />
                 )}
                 {currentRunway && (
                   <RunwayButton primary title={t('pistaAdmin.activate', { ident: currentRunway.active_end === 'B' ? currentRunway.identA : currentRunway.identB })}
@@ -825,29 +853,71 @@ export default function PistaScreen() {
           </Text>
         )}
       </View>
+      <Modal visible={showRunwayPicker} transparent animationType="fade"
+        onRequestClose={() => setShowRunwayPicker(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard} accessibilityViewIsModal>
+            <Text style={styles.text}>{t('pistaAdmin.chooseRunway')}</Text>
+            <ScrollView style={styles.runwayOptions} contentContainerStyle={styles.modalActions}>
+              {(mapAirport?.runways ?? []).map(runway => {
+                const selected = runway.id === (editing ? selectedRunwayId : currentRunway?.id);
+                return (
+                  <RunwayButton key={runway.id} primary={selected}
+                    title={runway.identA + '/' + runway.identB} onPress={() => {
+                      setShowRunwayPicker(false);
+                      if (selected) return;
+                      if (editing) selectDraftRunway(runway.id);
+                      else startEdit(false, runway.id);
+                    }} />
+                );
+              })}
+            </ScrollView>
+            <RunwayButton title={t('common.cancel')} onPress={() => setShowRunwayPicker(false)} />
+          </View>
+        </View>
+      </Modal>
       <Modal visible={showImport} transparent animationType="fade"
         onRequestClose={() => { if (!importing) setShowImport(false); }}>
-        <View style={styles.modalBackdrop}>
+        <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           <View style={styles.modalCard}>
             <Text style={styles.text}>{t('pistaAdmin.importAirport')}</Text>
             <TextInput
               style={styles.input}
-              placeholder="EHRD"
-              accessibilityLabel={t('pistaAdmin.icao')}
-              autoCapitalize="characters"
+              placeholder={t('pistaAdmin.airportSearch')}
+              accessibilityLabel={t('pistaAdmin.airportSearch')}
+              autoCapitalize="none"
               autoCorrect={false}
-              maxLength={4}
+              maxLength={100}
               editable={!importing}
-              value={icao}
-              onChangeText={value => setIcao(value.toUpperCase())}
+              value={airportQuery}
+              onChangeText={value => {
+                setAirportQuery(value);
+                setAirportSearch(null);
+              }}
             />
+            {!importing && searchResult && (
+              searchResult.matches.length ? (
+                <ScrollView keyboardShouldPersistTaps="handled" style={styles.runwayOptions}
+                  contentContainerStyle={styles.modalActions}>
+                  {searchResult.matches.map(airport => (
+                    <RunwayButton key={airport.icao}
+                      title={airport.name + '\n' + [airport.icao, airport.iata, airport.city].filter(Boolean).join(' · ')}
+                      onPress={() => void importAirport(airport.icao)} />
+                  ))}
+                </ScrollView>
+              ) : (
+                <Text style={styles.step}>{t(searchResult.failed ? 'pistaAdmin.catalogError' : 'pistaAdmin.airportNotFound')}</Text>
+              )
+            )}
             <View style={styles.modalActions}>
-              <RunwayButton primary title={t(importing ? 'pistaAdmin.importing' : 'pistaAdmin.lookupAirport')}
-                disabled={importing || !/^[A-Z]{4}$/.test(icao)} onPress={() => void importAirport()} />
+              {(importing || exactIcao) && (
+                <RunwayButton primary title={t(importing ? 'pistaAdmin.importing' : 'pistaAdmin.lookupAirport')}
+                  disabled={importing} onPress={() => void importAirport(searchQuery)} />
+              )}
               <RunwayButton title={t('common.cancel')} disabled={importing} onPress={() => setShowImport(false)} />
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
       <Modal visible={!!confirmation} transparent animationType="fade"
         onRequestClose={() => setConfirmation(null)}>
@@ -876,6 +946,7 @@ const styles = StyleSheet.create({
   modalBackdrop: { flex: 1, justifyContent: "center", padding: 32, backgroundColor: "rgba(0,0,0,0.45)" },
   modalCard: { padding: 20, borderRadius: 12, backgroundColor: "#fff" },
   modalActions: { gap: 8 },
+  runwayOptions: { maxHeight: 300, marginBottom: 8 },
   apronAttribution: { color: '#35465C', fontSize: 11, textDecorationLine: 'underline' },
   button: {
     minHeight: 48,

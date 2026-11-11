@@ -1,5 +1,5 @@
 const express = require('express');
-const { lookupAirport } = require('./airportCatalog');
+const { lookupAirport, searchAirports } = require('./airportCatalog');
 const { suggestAirportAprons } = require('./apronCatalog');
 const cors = require('cors');
 const http = require('http');
@@ -2962,6 +2962,16 @@ app.get('/api/locations', (req, res) => {
 app.get('/api/airfield', (req, res) => {
   if (!lastAirfield) return res.status(404).json({ error: 'No airfield set' });
   res.json(lastAirfield);
+});
+
+app.get('/api/airports', async (req, res) => {
+  const query = typeof req.query.query === 'string' ? req.query.query.trim().slice(0, 100) : '';
+  try {
+    return res.json(await searchAirports(query));
+  } catch (error) {
+    console.error('Airport catalog search failed:', error);
+    return res.status(503).json({ error: 'catalog-unavailable' });
+  }
 });
 
 app.get('/api/airports/:icao', async (req, res) => {

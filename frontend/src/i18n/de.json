@@ -1,5 +1,6 @@
 {
   "pistaAdmin": {
+    "airportSearch": "Name, Stadt oder Code (ICAO/IATA)",
     "importAirport": "Flugplatz importieren",
     "icao": "ICAO-Code",
     "lookupAirport": "Flugplatz suchen",
@@ -154,6 +155,8 @@
     "continueAsAdmin": "Als Administrator fortfahren"
   },
   "index": {
+    "searchAircraft": "Flugzeugmodell suchen",
+    "noAircraftMatches": "Keine passenden Modelle.",
     "select": "Auswählen …",
     "enter": "Weiter",
     "goPistaAdmin": "Zur Pistenverwaltung",

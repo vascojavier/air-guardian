@@ -15,6 +15,8 @@ import {
   ScrollView,
   Image,
   TouchableOpacity,
+  Modal,
+  FlatList,
 } from "react-native";
 import { Picker } from "@react-native-picker/picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -49,6 +51,10 @@ const modelosDesdeLista = aircraftList.reduce(
   { motor: [], glider: [] } as { motor: string[]; glider: string[] }
 );
 
+function normalizeModelSearch(value: string) {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+
 export default function IndexScreen() {
   const { t } = useTranslation();
   const { setUser, setAircraft } = useUser();
@@ -58,6 +64,8 @@ export default function IndexScreen() {
   const [country, setCountry] = useState("");
   const [aircraftType, setAircraftType] = useState<"motor" | "glider" | "">("");
   const [aircraftModel, setAircraftModel] = useState("");
+  const [showModelPicker, setShowModelPicker] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
   const [otroModelo, setOtroModelo] = useState("");
   const [customIcon, setCustomIcon] = useState("");
   const [iconoPreview, setIconoPreview] = useState("");
@@ -253,6 +261,29 @@ export default function IndexScreen() {
     setCountry("");
   };
 
+  const specialModels = aircraftType === "glider"
+    ? [{ value: "Parapente", label: t("index.paraglider") }, { value: "Ala delta", label: t("index.hangGlider") }]
+    : [{ value: "Paramotor", label: t("index.paramotor") }, { value: "Ala delta motor", label: t("index.hangGliderMotor") }];
+  const modelOptions = [
+    ...specialModels,
+    ...(aircraftType === "motor" ? modelosMotor : modelosGlider)
+      .filter(model => !specialModels.some(option => option.value === model))
+      .map(model => ({ value: model, label: model })),
+  ];
+  const queryWords = normalizeModelSearch(modelQuery).split(/\s+/).filter(Boolean);
+  const matchingModels = modelOptions.filter(({ value, label }) => {
+    const searchable = normalizeModelSearch(value + " " + label);
+    return queryWords.every(word => searchable.includes(word));
+  });
+  const selectedModelLabel = aircraftModel === "otro"
+    ? t("index.other")
+    : modelOptions.find(option => option.value === aircraftModel)?.label || aircraftModel || t("index.select");
+
+  function selectModel(value: string) {
+    setShowModelPicker(false);
+    setAircraftModel(value);
+  }
+
 return (
   <>
     <Stack.Screen
@@ -344,32 +375,13 @@ return (
           {aircraftType !== "" && (
             <>
               <Text style={styles.label}>{t("index.aircraftModelLabel")}:</Text>
-              <Picker
-                selectedValue={aircraftModel}
-                onValueChange={setAircraftModel}
-                style={styles.picker}
-              >
-                <Picker.Item label={t("index.select")} value="" />
-                <Picker.Item label={t("index.other")} value="otro" />
-
-                {aircraftType === "glider" && (
-                  <>
-                    <Picker.Item label={t("index.paraglider")} value="Parapente" />
-                    <Picker.Item label={t("index.hangGlider")} value="Ala delta" />
-                  </>
-                )}
-
-                {aircraftType === "motor" && (
-                  <>
-                    <Picker.Item label={t("index.paramotor")} value="Paramotor" />
-                    <Picker.Item label={t("index.hangGliderMotor")} value="Ala delta motor" />
-                  </>
-                )}
-
-                {(aircraftType === "motor" ? modelosMotor : modelosGlider).map((modelo) => (
-                  <Picker.Item key={modelo} label={modelo} value={modelo} />
-                ))}
-              </Picker>
+              <Button
+                title={selectedModelLabel}
+                onPress={() => {
+                  setModelQuery("");
+                  setShowModelPicker(true);
+                }}
+              />
 
               {aircraftModel === "otro" && (
                 <>
@@ -425,12 +437,56 @@ return (
         </ScrollView>
       </View>
     </KeyboardAvoidingView>
+    <Modal visible={showModelPicker} transparent onRequestClose={() => setShowModelPicker(false)}>
+      <KeyboardAvoidingView style={styles.modelBackdrop} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+        <View style={styles.modelCard} accessibilityViewIsModal>
+          <Text style={styles.modelTitle}>{t("index.aircraftModelLabel")}</Text>
+          <TextInput
+            style={styles.input}
+            value={modelQuery}
+            onChangeText={setModelQuery}
+            placeholder={t("index.searchAircraft")}
+            accessibilityLabel={t("index.searchAircraft")}
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoFocus
+          />
+          <FlatList
+            data={matchingModels}
+            style={styles.modelResults}
+            keyExtractor={item => item.value}
+            keyboardShouldPersistTaps="handled"
+            ListEmptyComponent={<Text style={styles.modelOption}>{t("index.noAircraftMatches")}</Text>}
+            renderItem={({ item }) => (
+              <TouchableOpacity accessibilityRole="button"
+                accessibilityState={{ selected: item.value === aircraftModel }}
+                style={[styles.modelOption, item.value === aircraftModel && styles.modelOptionSelected]}
+                onPress={() => selectModel(item.value)}>
+                <Text style={styles.modelOptionText}>{item.label}</Text>
+              </TouchableOpacity>
+            )}
+          />
+          <View style={styles.modelActions}>
+            <Button title={t("index.other")} onPress={() => selectModel("otro")} />
+            <Button title={t("common.cancel")} onPress={() => setShowModelPicker(false)} />
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
   </>
 );
 
 }
 
 const styles = StyleSheet.create({
+  modelBackdrop: { flex: 1, justifyContent: "center", padding: 20, backgroundColor: "rgba(0,0,0,0.45)" },
+  modelCard: { backgroundColor: "#fff", padding: 16, borderRadius: 12, maxHeight: "90%", flexShrink: 1 },
+  modelTitle: { color: "#17191E", fontWeight: "700", marginBottom: 10 },
+  modelResults: { maxHeight: 300, flexGrow: 0, flexShrink: 1 },
+  modelOption: { minHeight: 44, justifyContent: "center", padding: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: "#ccc" },
+  modelOptionSelected: { backgroundColor: "#E8EEFA" },
+  modelOptionText: { color: "#17191E" },
+  modelActions: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
   container: { flexGrow: 1, padding: 20, paddingBottom: 120 },
   label: { marginTop: 10 },
   input: {

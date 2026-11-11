@@ -1,5 +1,6 @@
 {
   "pistaAdmin": {
+    "airportSearch": "Naam, plaats of code (ICAO/IATA)",
     "importAirport": "Luchthaven importeren",
     "icao": "ICAO-code",
     "lookupAirport": "Luchthaven zoeken",
@@ -154,6 +155,8 @@
     "continueAsAdmin": "Doorgaan als beheerder"
   },
   "index": {
+    "searchAircraft": "Vliegtuigmodel zoeken",
+    "noAircraftMatches": "Geen overeenkomende modellen.",
     "select": "Selecteren …",
     "enter": "Doorgaan",
     "goPistaAdmin": "Naar baanbeheer",

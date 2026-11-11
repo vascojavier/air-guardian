@@ -2,6 +2,12 @@ const DATA_URL = 'https://raw.githubusercontent.com/davidmegginson/ourairports-d
 const CACHE_MS = 24 * 60 * 60 * 1000;
 const FEET_TO_METERS = 0.3048;
 const ICAO = /^[A-Z]{4}$/;
+const searchMetadata = new WeakMap();
+
+function normalizeSearch(value) {
+  return value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
 
 function* csvRows(text) {
   let row = [];
@@ -93,6 +99,14 @@ function buildAirportCatalog(airportCsv, runwayCsv) {
     };
     airports.set(icao, airport);
     byIdent.set(ident, airport);
+    const city = row('municipality');
+    const terms = normalizeSearch([icao, airport.iata, airport.name, city, row('keywords')].join(' '));
+    searchMetadata.set(airport, {
+      city,
+      words: terms.split(' '),
+      name: normalizeSearch(airport.name),
+      priority: ['small_airport', 'medium_airport', 'large_airport'].indexOf(row('type')),
+    });
   }
   for (const row of csvRecords(runwayCsv, ['id', 'airport_ident', 'closed', 'le_ident', 'he_ident',
     'le_latitude_deg', 'le_longitude_deg', 'he_latitude_deg', 'he_longitude_deg'])) {
@@ -133,8 +147,7 @@ async function download(filename) {
   return response.text();
 }
 
-async function lookupAirport(icao) {
-  if (!ICAO.test(icao)) return null;
+async function loadCatalog() {
   if (!cache || Date.now() >= cache.expires) {
     loading ??= Promise.all([download('airports.csv'), download('runways.csv')])
       .then(([airports, runways]) => {
@@ -147,7 +160,36 @@ async function lookupAirport(icao) {
       .finally(() => { loading = null; });
     await loading;
   }
-  return cache.airports.get(icao) ?? null;
+  return cache.airports;
 }
 
-module.exports = { lookupAirport, buildAirportCatalog };
+async function lookupAirport(icao) {
+  if (!ICAO.test(icao)) return null;
+  return (await loadCatalog()).get(icao) ?? null;
+}
+
+async function searchAirports(query) {
+  const normalized = normalizeSearch(query);
+  if (!normalized) return [];
+  const tokens = normalized.split(' ');
+  const matches = [];
+  for (const airport of (await loadCatalog()).values()) {
+    if (!airport.runways.length) continue;
+    const { city, words, name, priority } = searchMetadata.get(airport);
+    if (!tokens.every(token => words.some(word => word.startsWith(token)))) continue;
+
+    const codes = [airport.icao.toLowerCase(), airport.iata?.toLowerCase() ?? ''];
+    let rank = tokens.filter(token => words.includes(token)).length * 10;
+    if (name.startsWith(normalized)) rank += 4;
+    if (codes.some(code => code.startsWith(normalized))) rank += 8;
+    if (codes.includes(normalized)) rank += 100;
+    matches.push({ airport, city, rank, priority });
+  }
+  matches.sort((a, b) => b.rank - a.rank || b.priority - a.priority ||
+    a.airport.name.localeCompare(b.airport.name));
+  return matches.slice(0, 8).map(({ airport, city }) => ({
+    icao: airport.icao, iata: airport.iata, name: airport.name, city,
+  }));
+}
+
+module.exports = { lookupAirport, searchAirports, buildAirportCatalog };

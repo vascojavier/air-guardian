@@ -1,5 +1,6 @@
 {
   "pistaAdmin": {
+    "airportSearch": "Name, city or code (ICAO/IATA)",
     "importAirport": "Import airport",
     "icao": "ICAO code",
     "lookupAirport": "Find airport",
@@ -165,6 +166,8 @@
   },
 
   "index": {
+    "searchAircraft": "Search aircraft models",
+    "noAircraftMatches": "No matching models.",
   "select": "Select...",
   "enter": "Enter",
   "goPistaAdmin": "Go to Runway (admin)",
