@@ -454,6 +454,10 @@ const refreshPinnedDistance = () => {
       landings?: any[];
       takeoffs?: any[];
       inUse?: any | null;
+      runwayId?: string;
+      runwayEnd?: 'A' | 'B';
+      awaitingRunway?: boolean;
+      requestOperation?: 'arrival' | 'departure';
       timeline?: any[];
       serverTime?: number;
 
@@ -1511,7 +1515,14 @@ function applyPublishedAirfield(value: Airfield | null | undefined) {
 }
 
 // Derivados de la runway activa (si existe)
-const rw = airfield?.runways?.[0];
+const assignedRunwayId = runwayState?.state?.runwayId;
+const assignedRunwayEnd = runwayState?.state?.runwayEnd;
+const rw = useMemo(() => {
+  const runways = airfield?.runways;
+  const runway = runways?.find(item => item.id === assignedRunwayId) ?? runways?.[0];
+  if (!runway || !assignedRunwayEnd || assignedRunwayEnd === (runway.active_end ?? 'A')) return runway;
+  return { ...runway, active_end: assignedRunwayEnd, beacons: runway.beaconsByEnd?.[assignedRunwayEnd] };
+}, [airfield, assignedRunwayId, assignedRunwayEnd]);
 
 const getLon = (o: any) =>
   typeof o?.lng === "number" ? o.lng :
@@ -2292,6 +2303,8 @@ flashBanner(t("runway.goToHoldShort"), 'go-hold-short');
 
 
 const cancelRunwayLabel = () => {
+  const fix = getBackendTargetForMe()?.fix;
+  if (airfield?.multiRunway && (fix === 'FINAL' || fix === 'RWY' || iAmOccupyingRef.current)) return;
   cancelMyRequest();
   landingRequestedRef.current = false;
   takeoffRequestedRef.current = false;
@@ -3394,6 +3407,17 @@ s.on('runway-state', (payload: any) => {
   setRunwayState(payload);
 
   try {
+    const state = payload?.state;
+    if (state?.requestOperation === 'departure') takeoffRequestedRef.current = true;
+    if (state?.requestOperation === 'arrival' && !state.inUse) landingRequestedRef.current = true;
+    if (state?.runwayId && keysForMe().includes(state.inUse?.name) &&
+        (state.inUse.action === 'landing' || state.inUse.action === 'takeoff') &&
+        !iAmOccupyingRef.current && !navGuidanceEndedRef.current &&
+        lastOpsStateRef.current !== 'RUNWAY_CLEAR') {
+      iAmOccupyingRef.current = state.inUse.action;
+      lastOpsStateRef.current = 'RUNWAY_OCCUPIED';
+      if (state.inUse.action === 'landing') landingRequestedRef.current = false;
+    }
     const map = payload?.state?.assignedOps as Record<string,string> | undefined;
     const targets = payload?.state?.opsTargets as Record<string, {fix:string; lat:number; lon:number}> | undefined;
 
@@ -4562,7 +4586,7 @@ useEffect(() => {
 
 
 
-        {airfield?.runways.slice(1).map(runway => {
+        {airfield?.runways.filter(runway => runway.id !== rw?.id).map(runway => {
           const endA = runway.endA ?? runway.thresholdA;
           const endB = runway.endB ?? runway.thresholdB;
           const A = { latitude: endA.lat, longitude: endA.lng };
@@ -4685,6 +4709,12 @@ useEffect(() => {
             onPress={() => { void Linking.openURL('https://www.openstreetmap.org/copyright').catch(() => {}); }}>
             © OpenStreetMap contributors
           </Text>
+        )}
+        {runwayState?.state?.awaitingRunway && (
+          <Text style={styles.assignmentStatus}>{t('pistaAdmin.awaitingAssignment')}</Text>
+        )}
+        {assignedRunwayId && activeIdent && (
+          <Text style={styles.assignmentStatus}>{t('pistaAdmin.assignedRunway', { ident: activeIdent })}</Text>
         )}
         <View style={styles.controlsBox}>
           <Text style={styles.label}>✈️ {t("radar.heading")}: {myPlane.heading.toFixed(0)}°</Text>
@@ -4854,6 +4884,8 @@ useEffect(() => {
           (action==='takeoff' && takeoffRequestedRef.current);
 
         if (already) {
+          const fix = getBackendTargetForMe()?.fix;
+          if (airfield?.multiRunway && (fix === 'FINAL' || fix === 'RWY' || iAmOccupyingRef.current)) return null;
           return (
             <TouchableOpacity onPress={cancelRunwayLabel}
               style={{backgroundColor:'#eee', paddingHorizontal:12, paddingVertical:8, borderRadius:10}}>
@@ -5044,6 +5076,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     backgroundColor: '#FFFFFF',
   },
+  assignmentStatus: { backgroundColor: '#FFF2CF', color: '#382707', padding: 8, textAlign: 'center' },
   controlsBox: {
     backgroundColor: 'white',
     padding: 10,

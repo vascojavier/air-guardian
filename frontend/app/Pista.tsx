@@ -1,17 +1,20 @@
 // C:\air-guardian\frontend\app\Pista.tsx
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, Pressable, StyleSheet, Alert, TextInput, Modal, Linking, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, Pressable, StyleSheet, Alert, TextInput, Modal, Linking, ScrollView, KeyboardAvoidingView, Platform, Switch } from 'react-native';
 import MapView, { Marker, Polyline, MapPressEvent, Region } from 'react-native-maps';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useUser } from '../context/UserContext';
 import { useFocusEffect, useRouter } from 'expo-router';
-import type { Airfield, Runway, RunwayBeacon, RunwayEndId } from '../types/airfield';
+import type { Airfield, AssignmentMode, Runway, RunwayBeacon, RunwayEndId, RunwayUse } from '../types/airfield';
 import { socket } from '../utils/socket';
+import { Picker } from '@react-native-picker/picker';
 import { BACKEND_URL } from '../utils/config';
 import { useTranslation } from 'react-i18next';
 
 // ---------------------- Tipos locales ----------------------
 type LatLng = { latitude: number; longitude: number };
+type PendingRunway = { name: string; callsign?: string; operation: 'arrival' | 'departure' };
+const RUNWAY_USES: RunwayUse[] = ['closed', 'arrival', 'departure', 'mixed'];
 
 // ---------------------- Helpers ----------------------
 const uuid = () =>
@@ -205,6 +208,12 @@ export default function PistaScreen() {
   const [selectedRunwayId, setSelectedRunwayId] = useState('');
   const [showImport, setShowImport] = useState(false);
   const [showRunwayPicker, setShowRunwayPicker] = useState(false);
+  const [multiConfig, setMultiConfig] = useState<{ value: Airfield; expected: Airfield } | null>(null);
+  const [multiAdminKey, setMultiAdminKey] = useState('');
+  const [multiUnlocked, setMultiUnlocked] = useState(false);
+  const [unlockingMulti, setUnlockingMulti] = useState(false);
+  const [pendingRunways, setPendingRunways] = useState<PendingRunway[]>([]);
+  const [assigningRunway, setAssigningRunway] = useState<PendingRunway | null>(null);
   const [confirmation, setConfirmation] = useState<{
     title: string;
     message: string;
@@ -274,6 +283,16 @@ export default function PistaScreen() {
       }
     };
     const request = () => socket.emit('airfield-get');
+    const resetMultiAccess = () => {
+      setMultiUnlocked(false);
+      setPendingRunways([]);
+      setAssigningRunway(null);
+    };
+    const receivePendingRunways = (items: PendingRunway[]) => {
+      if (role === 'aeroclub' && Array.isArray(items)) setPendingRunways(items);
+    };
+    socket.on('disconnect', resetMultiAccess);
+    socket.on('multi-runway-pending', receivePendingRunways);
     socket.on('airfield-update', receive);
     socket.on('connect', request);
     if (socket.connected) request();
@@ -316,6 +335,8 @@ export default function PistaScreen() {
       disposed = true;
       socket.off('airfield-update', receive);
       socket.off('connect', request);
+      socket.off('disconnect', resetMultiAccess);
+      socket.off('multi-runway-pending', receivePendingRunways);
       importRequestRef.current?.abort();
       importRequestRef.current = null;
     };
@@ -517,11 +538,81 @@ export default function PistaScreen() {
       cancelEdit();
     } catch (error) {
       Alert.alert(t(error instanceof Error && error.message === 'runway-busy'
-        ? 'pistaAdmin.runwayBusy' : 'pistaAdmin.publishError'));
+        ? 'pistaAdmin.runwayBusy' : error instanceof Error && error.message === 'admin-required'
+          ? 'pistaAdmin.multiAccess' : 'pistaAdmin.publishError'));
     } finally {
       publishingRef.current = false;
       setPublishing(false);
     }
+  }
+
+  function openMultiConfig() {
+    if (!current) return;
+    const value = {
+      ...current,
+      runways: current.runways.map((runway, index) => ({
+        ...runway,
+        active_end: runway.active_end ?? 'A',
+        operationUse: runway.operationUse ?? (index === 0 ? 'mixed' : 'closed'),
+      })),
+    } satisfies Airfield;
+    setMultiConfig({ value, expected: current });
+  }
+
+  function sendMultiRunwayAction(
+    event: 'multi-runway-admin' | 'multi-runway-assign',
+    payload: string | { name: string; runwayId: string; end: RunwayEndId },
+    onResult: (ok: boolean) => void
+  ) {
+    if (!socket.connected) {
+      onResult(false);
+      return;
+    }
+    let finished = false;
+    const timer = setTimeout(() => {
+      finished = true;
+      onResult(false);
+    }, 5000);
+    socket.emit(event, payload, (result?: { ok: boolean }) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      onResult(result?.ok === true);
+    });
+  }
+
+  function unlockMultiRunway() {
+    if (unlockingMulti) return;
+    setUnlockingMulti(true);
+    sendMultiRunwayAction('multi-runway-admin', multiAdminKey, ok => {
+      setUnlockingMulti(false);
+      setMultiAdminKey('');
+      if (!ok) {
+        Alert.alert(t('pistaAdmin.multiAccess'));
+        return;
+      }
+      setMultiUnlocked(true);
+    });
+  }
+
+  function updateMultiRunway(id: string, patch: Partial<Runway>) {
+    setMultiConfig(draft => draft && {
+      ...draft,
+      value: {
+        ...draft.value,
+        runways: draft.value.runways.map(runway => runway.id === id ? { ...runway, ...patch } : runway),
+      },
+    });
+  }
+
+  function assignPendingRunway(runwayId: string, end: RunwayEndId) {
+    if (!assigningRunway) return;
+    sendMultiRunwayAction('multi-runway-assign', {
+      name: assigningRunway.name, runwayId, end,
+    }, ok => {
+      if (!ok) Alert.alert(t('pistaAdmin.assignmentError'));
+      else setAssigningRunway(null);
+    });
   }
 
   function confirmEndChange() {
@@ -751,7 +842,7 @@ export default function PistaScreen() {
                   active: cabeceraActiva === 'B' ? draftAirport.runways[0].identB : draftAirport.runways[0].identA,
                 })}</Text>
                 {draftAirport.runways.length > 1 && (
-                  <RunwayButton title={t('pistaAdmin.chooseRunway')} disabled={publishing || apronEdit}
+                  <RunwayButton title={t(draftAirport.multiRunway ? 'pistaAdmin.edit' : 'pistaAdmin.chooseRunway')} disabled={publishing || apronEdit}
                     onPress={() => setShowRunwayPicker(true)} />
                 )}
                 {!!draftAirport.incompleteRunways && (
@@ -825,11 +916,24 @@ export default function PistaScreen() {
             )}
             {role === 'aeroclub' && (
               <>
-                {currentRunway && current.runways.length > 1 && (
+                {currentRunway && !current.multiRunway && current.runways.length > 1 && (
                   <RunwayButton title={t('pistaAdmin.chooseRunway')} disabled={publishing}
                     onPress={() => setShowRunwayPicker(true)} />
                 )}
-                {currentRunway && (
+                {current && (
+                  <RunwayButton title={t('pistaAdmin.multiTitle')} disabled={publishing} onPress={openMultiConfig} />
+                )}
+                {current?.multiRunway && pendingRunways.length > 0 && (
+                  <ScrollView style={styles.pendingRunways} contentContainerStyle={styles.modalActions}>
+                    {pendingRunways.map(item => (
+                      <RunwayButton key={item.name} primary title={t('pistaAdmin.requestRunway', {
+                        name: item.callsign || item.name,
+                        operation: t('pistaAdmin.use_' + item.operation),
+                      })} onPress={() => setAssigningRunway(item)} />
+                    ))}
+                  </ScrollView>
+                )}
+                {currentRunway && !current?.multiRunway && (
                   <RunwayButton primary title={t('pistaAdmin.activate', { ident: currentRunway.active_end === 'B' ? currentRunway.identA : currentRunway.identB })}
                     disabled={publishing} onPress={confirmEndChange} />
                 )}
@@ -853,11 +957,114 @@ export default function PistaScreen() {
           </Text>
         )}
       </View>
+      <Modal visible={!!multiConfig} transparent animationType="fade"
+        onRequestClose={() => setMultiConfig(null)}>
+        <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={styles.modalCard} accessibilityViewIsModal>
+            <Text style={styles.text}>{t('pistaAdmin.multiTitle')}</Text>
+            {multiConfig && !multiUnlocked && (
+              <View style={styles.modalActions}>
+                <TextInput style={styles.input} value={multiAdminKey} onChangeText={setMultiAdminKey}
+                  placeholder={t('pistaAdmin.serverKey')} accessibilityLabel={t('pistaAdmin.serverKey')}
+                  secureTextEntry autoCapitalize="none" autoCorrect={false} />
+                <RunwayButton primary title={t('welcome.continueAsAdmin')}
+                  disabled={unlockingMulti || !multiAdminKey} onPress={unlockMultiRunway} />
+              </View>
+            )}
+            {multiConfig && multiUnlocked && (
+              <>
+                <ScrollView style={styles.multiOptions} keyboardShouldPersistTaps="handled">
+                  <View style={styles.actions}>
+                    <Text style={styles.step}>{t('pistaAdmin.enableMulti')}</Text>
+                    <Switch accessibilityLabel={t('pistaAdmin.enableMulti')}
+                      value={!!multiConfig.value.multiRunway} onValueChange={enabled => setMultiConfig(draft =>
+                        draft && { ...draft, value: {
+                          ...draft.value,
+                          multiRunway: enabled ? { arrival: 'automatic', departure: 'automatic' } : undefined,
+                        } })} />
+                  </View>
+                  {multiConfig.value.multiRunway && (
+                    <>
+                      {(['arrival', 'departure'] as const).map(operation => (
+                        <View key={operation}>
+                          <Text>{t('pistaAdmin.use_' + operation)}</Text>
+                          <Picker selectedValue={multiConfig.value.multiRunway?.[operation]}
+                            onValueChange={(mode: AssignmentMode) => setMultiConfig(draft => draft?.value.multiRunway
+                              ? { ...draft, value: { ...draft.value, multiRunway: { ...draft.value.multiRunway, [operation]: mode } } }
+                              : draft)}>
+                            <Picker.Item value="automatic" label={t('pistaAdmin.modeAutomatic')} />
+                            <Picker.Item value="manual" label={t('pistaAdmin.modeManual')} />
+                          </Picker>
+                        </View>
+                      ))}
+                      {multiConfig.value.runways.map(runway => (
+                        <View key={runway.id} style={styles.runwayConfigRow}>
+                          <Text style={styles.text}>{runway.identA}/{runway.identB}</Text>
+                          <Picker accessibilityLabel={t('pistaAdmin.runwayUse')}
+                            selectedValue={runway.operationUse}
+                            onValueChange={(operationUse: RunwayUse) => updateMultiRunway(runway.id, { operationUse })}>
+                            {RUNWAY_USES.map(use => <Picker.Item key={use} value={use} label={t('pistaAdmin.use_' + use)} />)}
+                          </Picker>
+                          <Picker accessibilityLabel={t('pistaAdmin.chooseEnd')} selectedValue={runway.active_end}
+                            onValueChange={(end: RunwayEndId) => updateMultiRunway(runway.id, changeRunwayEnd(runway, end))}>
+                            <Picker.Item value="A" label={runway.identA} />
+                            <Picker.Item value="B" label={runway.identB} />
+                          </Picker>
+                          {!!(runway.apronSuggestion || multiConfig.value.apron) && (
+                            <Picker accessibilityLabel={t('pista.apron')} selectedValue={runway.apron ? 'specific' : 'shared'}
+                              onValueChange={value => updateMultiRunway(runway.id, {
+                                apron: value === 'specific' ? runway.apron ?? runway.apronSuggestion ?? multiConfig.value.apron : undefined,
+                              })}>
+                              <Picker.Item value="shared" label={t('pistaAdmin.apronShared')} />
+                              <Picker.Item value="specific" label={t('pistaAdmin.apronSpecific')} />
+                            </Picker>
+                          )}
+                        </View>
+                      ))}
+                    </>
+                  )}
+                </ScrollView>
+                <RunwayButton primary title={t('pistaAdmin.publish')}
+                  disabled={!!multiConfig.value.multiRunway && multiConfig.value.runways.every(runway => runway.operationUse === 'closed')}
+                  onPress={() => {
+                    setConfirmation({
+                      title: t('pistaAdmin.multiTitle'),
+                      message: t('pistaAdmin.confirmEnd'),
+                      airfield: multiConfig.value,
+                      expected: multiConfig.expected,
+                    });
+                    setMultiConfig(null);
+                  }} />
+              </>
+            )}
+            <RunwayButton title={t('common.cancel')} onPress={() => setMultiConfig(null)} />
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+      <Modal visible={!!assigningRunway} transparent animationType="fade"
+        onRequestClose={() => setAssigningRunway(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard} accessibilityViewIsModal>
+            <Text style={styles.text}>{assigningRunway?.callsign || assigningRunway?.name}</Text>
+            <ScrollView style={styles.runwayOptions} contentContainerStyle={styles.modalActions}>
+              {current?.runways.filter(runway => runway.operationUse === 'mixed' ||
+                runway.operationUse === assigningRunway?.operation).flatMap(runway =>
+                (['A', 'B'] as const).map(end => (
+                  <RunwayButton key={runway.id + end} title={t('pistaAdmin.assignEnd', {
+                    ident: end === 'A' ? runway.identA : runway.identB,
+                  })} onPress={() => assignPendingRunway(runway.id, end)} />
+                ))
+              )}
+            </ScrollView>
+            <RunwayButton title={t('common.cancel')} onPress={() => setAssigningRunway(null)} />
+          </View>
+        </View>
+      </Modal>
       <Modal visible={showRunwayPicker} transparent animationType="fade"
         onRequestClose={() => setShowRunwayPicker(false)}>
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard} accessibilityViewIsModal>
-            <Text style={styles.text}>{t('pistaAdmin.chooseRunway')}</Text>
+            <Text style={styles.text}>{t(draftAirport?.multiRunway ? 'pistaAdmin.edit' : 'pistaAdmin.chooseRunway')}</Text>
             <ScrollView style={styles.runwayOptions} contentContainerStyle={styles.modalActions}>
               {(mapAirport?.runways ?? []).map(runway => {
                 const selected = runway.id === (editing ? selectedRunwayId : currentRunway?.id);
@@ -947,6 +1154,9 @@ const styles = StyleSheet.create({
   modalCard: { padding: 20, borderRadius: 12, backgroundColor: "#fff" },
   modalActions: { gap: 8 },
   runwayOptions: { maxHeight: 300, marginBottom: 8 },
+  multiOptions: { maxHeight: 460, flexShrink: 1, marginBottom: 8 },
+  pendingRunways: { maxHeight: 120 },
+  runwayConfigRow: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: '#aab1ba', paddingTop: 8 },
   apronAttribution: { color: '#35465C', fontSize: 11, textDecorationLine: 'underline' },
   button: {
     minHeight: 48,

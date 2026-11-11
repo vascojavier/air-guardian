@@ -1,4 +1,6 @@
 const express = require('express');
+const { timingSafeEqual } = require('node:crypto');
+const { createMultiRunway, validConfiguration } = require('./multiRunway');
 const { lookupAirport, searchAirports } = require('./airportCatalog');
 const { suggestAirportAprons } = require('./apronCatalog');
 const cors = require('cors');
@@ -630,8 +632,7 @@ const approachAssign = new Map(); // name -> { b1:{lat,lon}, b2:{lat,lon} }
 const lastInstr = new Map();      // name -> { phase:'B2'|'B1'|'CLRD', ts:number }
 
 // ========= Geometría de pista activa + beacons =========
-function activeRunwayGeom() {
-  const rw = lastAirfield?.runways?.[0];
+function activeRunwayGeom(rw = lastAirfield?.runways?.[0]) {
   if (!rw || ![rw.thresholdA, rw.thresholdB].every(
     point => Number.isFinite(point?.lat) && Number.isFinite(point?.lng)
   )) return null;
@@ -1337,6 +1338,7 @@ function maybeSendInstruction(opId, opsById) {
 function getApronPointFromAirfield(g = activeRunwayGeom()) {
   const airfield = lastAirfield;
   const candidates = [
+    g?.rw?.operationUse && multiRunwayEnabled() ? g.rw.apron : undefined,
     airfield?.apron, airfield?.parking, airfield?.stands, airfield?.stand, airfield?.ramp,
     airfield?.runways?.[0]?.apron, airfield?.runways?.[0]?.parking,
   ];
@@ -1354,8 +1356,7 @@ function getApronPointFromAirfield(g = activeRunwayGeom()) {
   return destinationPoint(g.departureStart.lat, g.departureStart.lon, (axis + 90) % 360, 180);
 }
 
-function getHoldShortPointFromAirfield() {
-  const g = activeRunwayGeom();
+function getHoldShortPointFromAirfield(g = activeRunwayGeom()) {
   if (!g) return null;
 
   const axis = bearingDeg(g.endA.lat, g.endA.lon, g.endB.lat, g.endB.lon);
@@ -1368,7 +1369,32 @@ function getHoldShortPointFromAirfield() {
   return destinationPoint(beforeThreshold.lat, beforeThreshold.lon, side, 80);
 }
 
+const multiRunwayAdminKey = process.env.MULTI_RUNWAY_ADMIN_KEY;
+const multiRunwayAdmins = new Set();
+const multiRunway = createMultiRunway({
+  airfield: () => lastAirfield,
+  geometry: activeRunwayGeom,
+  holdShort: getHoldShortPointFromAirfield,
+  apron: getApronPointFromAirfield,
+  distance: getDistance,
+  now: () => Date.now(),
+});
+
+function multiRunwayEnabled() {
+  return Boolean(multiRunwayAdminKey && lastAirfield?.multiRunway);
+}
+
+function publishMultiRunwayState() {
+  multiRunway.advance();
+  for (const [id, name] of Object.entries(socketIdToName)) {
+    io.to(id).emit('runway-state', { airfield: lastAirfield, state: multiRunway.snapshot(name) });
+  }
+  const pending = multiRunway.pending();
+  for (const id of multiRunwayAdmins) io.to(id).emit('multi-runway-pending', pending);
+}
+
 function publishRunwayState() {
+  if (multiRunwayEnabled()) return publishMultiRunwayState();
   pruneStaleOps();   // ✅ PRIMERO
   const now = Date.now();
 
@@ -2045,6 +2071,12 @@ runwayState.lastOrder.takeoffs = newTk;
 /* Recompute periódico */
 setInterval(() => {
   try {
+    if (multiRunwayEnabled()) {
+      if (multiRunway.expire(name => Date.now() - (userLocations[name]?.timestamp ?? 0) < 60_000)) {
+        publishMultiRunwayState();
+      }
+      return;
+    }
     if (runwayState.landings.length || runwayState.takeoffs.length) {
       // ✅ actualizar latch para todos los que están en la cola de aterrizaje
       for (const L of runwayState.landings) {
@@ -2069,6 +2101,25 @@ setInterval(() => {
 
 io.on('connection', (socket) => {
   console.log('🟢 Cliente conectado vía WebSocket:', socket.id);
+
+  socket.on('multi-runway-admin', (key, acknowledge) => {
+    if (typeof acknowledge !== 'function') return;
+    const expected = Buffer.from(multiRunwayAdminKey || '');
+    const actual = Buffer.from(typeof key === 'string' ? key : '');
+    const ok = expected.length > 0 && actual.length === expected.length && timingSafeEqual(actual, expected);
+    if (ok) multiRunwayAdmins.add(socket.id);
+    else multiRunwayAdmins.delete(socket.id);
+    acknowledge({ ok });
+    if (ok && multiRunwayEnabled()) socket.emit('multi-runway-pending', multiRunway.pending());
+  });
+
+  socket.on('multi-runway-assign', (assignment, acknowledge) => {
+    const ok = multiRunwayEnabled() && multiRunwayAdmins.has(socket.id) &&
+      multiRunway.pending().some(item => item.name === assignment?.name) &&
+      multiRunway.assign(assignment?.name, assignment?.runwayId, assignment?.end);
+    if (typeof acknowledge === 'function') acknowledge({ ok });
+    if (ok) publishMultiRunwayState();
+  });
 
   socket.on('update', (data) => {
     console.log('✈️ UPDATE recibido:', data);
@@ -2120,7 +2171,11 @@ io.on('connection', (socket) => {
       socketId: socket.id
     };
 
+    const newlyRegistered = socketIdToName[socket.id] !== name;
     socketIdToName[socket.id] = name;
+    if (newlyRegistered && multiRunwayEnabled()) {
+      socket.emit('runway-state', { airfield: lastAirfield, state: multiRunway.snapshot(name) });
+    }
 
     const currentOps = opsReportedByName.get(name);
     if (currentOps?.state === 'FINAL' || currentOps?.state === 'B1') {
@@ -2227,6 +2282,16 @@ socket.on('ops/state', (msg) => {
     // ✅ Anti-spoof / desync: este socket solo puede reportar su propio "name"
     const currentName = socketIdToName[socket.id];
     if (currentName && name && currentName !== name) return;
+
+    if (multiRunwayEnabled() && multiRunway.has(name)) {
+      if (currentName !== name || !multiRunway.report(name, state, userLocations[name], aux)) return;
+      const update = { name, state, ts: Date.now(), aux: aux || null };
+      opsReportedByName.set(name, update);
+      lastOpsStateByName.set(name, state);
+      io.emit('ops/state', update);
+      publishMultiRunwayState();
+      return;
+    }
 
     // ✅ VALID dinámico: B1..B30 + estados tierra/pista
     const B_STATES = new Set(Array.from({ length: 30 }, (_, i) => `B${i + 1}`));
@@ -2463,6 +2528,24 @@ if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
   socket.on('airfield-upsert', ({ airfield }, acknowledge) => {
     try {
       if (!airfield || typeof airfield !== 'object') return;
+      if (lastAirfield?.multiRunway || airfield.multiRunway) {
+        if (!multiRunwayAdmins.has(socket.id)) {
+          if (typeof acknowledge === 'function') acknowledge({ error: 'admin-required' });
+          return;
+        }
+        if (airfield.multiRunway && !validConfiguration(airfield)) {
+          if (typeof acknowledge === 'function') acknowledge({ error: 'invalid-multi-runway' });
+          return;
+        }
+        const onlyModesChanged = lastAirfield?.multiRunway && airfield.multiRunway &&
+          JSON.stringify({ ...lastAirfield, lastUpdated: 0, multiRunway: null }) ===
+          JSON.stringify({ ...airfield, lastUpdated: 0, multiRunway: null });
+        if (!onlyModesChanged && (multiRunway.busy() || runwayState.inUse ||
+            runwayState.landings.length || runwayState.takeoffs.length)) {
+          if (typeof acknowledge === 'function') acknowledge({ error: 'runway-busy' });
+          return;
+        }
+      }
       const previousRunway = lastAirfield?.runways?.[0];
       const nextRunway = airfield.runways?.[0];
       const changesRunway = previousRunway && (!nextRunway ||
@@ -2498,6 +2581,7 @@ if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
         planRunwaySequence();
         publishRunwayState();
       }
+      if (multiRunwayEnabled()) publishMultiRunwayState();
       for (const update of resetDepartures) io.emit('ops/state', update);
       if (typeof acknowledge === 'function') acknowledge({ ok: true });
     } catch (e) {
@@ -2510,6 +2594,10 @@ if (acceptedState === 'TAXI_APRON' || acceptedState === 'APRON_STOP') {
       if (lastAirfield) {
         socket.emit('airfield-update', { airfield: lastAirfield }); // solo al solicitante
         console.log('📨 airfield-get → enviado airfield-update al solicitante');
+      }
+      if (multiRunwayEnabled()) {
+        socket.emit('runway-state', { airfield: lastAirfield, state: multiRunway.snapshot(socketIdToName[socket.id]) });
+        return;
       }
       // ►► (AGREGADO) también enviar estado de pista al abrir cartel
       publishRunwayState();
@@ -2654,6 +2742,7 @@ publishRunwayState();
 
   // 🔌 Cliente se desconecta físicamente (cierra app o pierde conexión)
   socket.on('disconnect', () => {
+    multiRunwayAdmins.delete(socket.id);
     console.log('🔌 Cliente desconectado:', socket.id);
 
     const name = socketIdToName[socket.id];
@@ -2715,6 +2804,13 @@ socket.on('runway-request', (msg) => {
   try {
     const { action, name, callsign, aircraft, type, emergency, altitude, ready } = msg || {};
     if (!name || !action) return;
+    if (multiRunwayEnabled()) {
+      if (socketIdToName[socket.id] !== name || !['land', 'takeoff'].includes(action)) return;
+      if (multiRunway.request(name, action === 'land' ? 'arrival' : 'departure', callsign, emergency)) {
+        publishMultiRunwayState();
+      }
+      return;
+    }
 
     if (action === 'land') {
       setUserIntent(name, 'landing');
@@ -2810,6 +2906,11 @@ else if (action === 'takeoff') {
 
   // Cancelar solicitud
 socket.on('runway-cancel', (msg) => {
+  if (multiRunwayEnabled()) {
+    const name = socketIdToName[socket.id];
+    if (name && name === msg?.name && multiRunway.cancel(name)) publishMultiRunwayState();
+    return;
+  }
   try {
     const { name } = msg || {};
     if (!name) return;
@@ -2836,6 +2937,7 @@ socket.on('runway-cancel', (msg) => {
 
   // Marcar pista ocupada (cuando inicia final corta o rueda para despegar)
 socket.on('runway-occupy', (msg) => {
+  if (multiRunwayEnabled()) return;
   try {
     const { action, name, callsign, slotMin } = msg || {};
     if (!action || !name) return;
@@ -2869,6 +2971,7 @@ socket.on('runway-occupy', (msg) => {
   
   // Liberar pista
 socket.on('runway-clear', () => {
+  if (multiRunwayEnabled()) return;
   try {
     const lastName = runwayState.inUse?.name;
 
@@ -2890,6 +2993,10 @@ socket.on('runway-clear', () => {
 
   // Obtener estado de pista bajo demanda (al abrir el panel en Radar)
   socket.on('runway-get', () => {
+    if (multiRunwayEnabled()) {
+      socket.emit('runway-state', { airfield: lastAirfield, state: multiRunway.snapshot(socketIdToName[socket.id]) });
+      return;
+    }
     try {
       cleanupInUseIfDone();
       publishRunwayState();
@@ -2900,6 +3007,11 @@ socket.on('runway-clear', () => {
 
   // Reporte de arremetida (go-around): libera slot / quita freeze y reingresa
 socket.on('go-around', (msg = {}) => {
+  if (multiRunwayEnabled()) {
+    const name = socketIdToName[socket.id];
+    if (name && multiRunway.goAround(name)) publishMultiRunwayState();
+    return;
+  }
   try {
     const name = String(msg.name || socketIdToName[socket.id] || '');
     if (!name) return;
