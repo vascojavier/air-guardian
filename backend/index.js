@@ -78,6 +78,7 @@ function pruneStaleOps() {
       const keepStrongState =
         st === 'FINAL' ||
         st === 'B1' ||
+        st === 'AIRBORNE' ||
         st === 'RUNWAY_OCCUPIED' ||
         st === 'RUNWAY_CLEAR' ||
         st === 'TAXI_APRON' ||
@@ -140,6 +141,13 @@ function dropFromLandings(name, reason) {
   // reset de FSM sticky (si querés mantenerlo, comentá estas 2 líneas)
   try { landingStateByName.delete(name); } catch {}
   try { approachPhaseByName.delete(name); } catch {}
+  setFinalLatched(name, false);
+  clearUserIntent(name);
+  clearATC(name);
+  const airborne = { name, state: 'AIRBORNE', ts: Date.now(), aux: null };
+  opsReportedByName.set(name, airborne);
+  lastOpsStateByName.set(name, airborne.state);
+  io.emit('ops/state', airborne);
 
   const r = String(reason || '').toLowerCase();
 
@@ -2248,6 +2256,10 @@ socket.on('ops/state', (msg) => {
     if (typeof state === 'string' && state.startsWith('A_TO_')) return;
     if (!FRONTEND_ALLOWED_OPS.has(state)) return;
     if (!name || !state) return;
+
+    // Un reporte de aproximación en tránsito no puede recuperar un turno perdido.
+    if ((B_STATES.has(state) || state === 'FINAL' || state === 'LAND_QUEUE') &&
+        !runwayState.landings.some(landing => landing.name === name)) return;
 
     // Ignorar una confirmación enviada justo antes de cambiar la cabecera.
     if (state === 'HOLD_SHORT' && aux?.holdShortTarget) {

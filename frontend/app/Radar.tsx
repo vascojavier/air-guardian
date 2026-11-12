@@ -3077,6 +3077,8 @@ useEffect(() => {
 s.on('atc-instruction', (instr: any) => {
   (serverATCRef.current ||= true);
   if (!instr?.type) return;
+  if (navGuidanceEndedRef.current &&
+      ['goto-beacon', 'turn-to-B1', 'cleared-to-land'].includes(instr.type)) return;
 
   const messageLanguage = resolveLanguage(i18n.resolvedLanguage || i18n.language);
   const translate = i18n.getFixedT(messageLanguage);
@@ -3214,7 +3216,7 @@ s.on('atc-instruction', (instr: any) => {
     setWarnings(prev => ({ ...prev, [enrichedWarning.id]: enrichedWarning }));
     setBackendWarning(enrichedWarning);
 
-    const BW_TTL_MS = 4000;
+    const BW_TTL_MS = level === 'TA' ? 4000 : 6000;
     if ((s as any).__bwTtlTimer) clearTimeout((s as any).__bwTtlTimer);
     (s as any).__bwTtlTimer = setTimeout(() => {
       const holdUntil = raHoldUntilRef.current[effectiveId] ?? 0;
@@ -3274,6 +3276,10 @@ s.on('ops/state', (msg: any) => {
       landingRequestedRef.current = false;
     }
 
+    if (next === 'AIRBORNE' && landingRequestedRef.current) {
+      endLostLandingTurn();
+    }
+
     if (next === 'AIRBORNE' && intentRef.current === 'takeoff') {
       intentRef.current = null;
       takeoffRequestedRef.current = false;
@@ -3286,6 +3292,12 @@ s.on('ops/state', (msg: any) => {
 
   // (1) fuente de verdad en mapa
   setOpsStates(prev => (prev[name] === next ? prev : { ...prev, [name]: next }));
+
+  if (next === 'AIRBORNE') {
+    setSelected(prev => prev?.id === name
+      ? { ...prev, ops: next, atcAssigned: null, atcTarget: null }
+      : prev);
+  }
 
   // (2) espejo dentro del Plane (para UI/tap/markers)
   setTraffic(prev => {
@@ -3429,18 +3441,32 @@ s.on('runway-state', (payload: any) => {
 
 
 
-  // ✅ runway-msg
- s.on('runway-msg', (m: any) => {
+function endLostLandingTurn() {
+  const me = myPlaneRef.current?.id || username;
+  landingRequestedRef.current = false;
+  navGuidanceEndedRef.current = true;
+  if (intentRef.current === 'landing') intentRef.current = null;
+  finalLockedRef.current = false;
+  freezeBeaconEngineRef.current = false;
+  assignedRef.current = null;
+  opsTargetsRef.current = null;
+  navPhaseRef.current = null;
+  prevIdxRef.current = null;
+  lastOpsStateRef.current = 'AIRBORNE';
+  lastOpsStateTsRef.current = Date.now();
+  setOpsStates(prev => prev[me] === 'AIRBORNE' ? prev : { ...prev, [me]: 'AIRBORNE' });
+  setSelected(prev => prev?.id === me
+    ? { ...prev, ops: 'AIRBORNE', atcAssigned: null, atcTarget: null }
+    : prev);
+  setNavTargetSafe(null);
+  setNavPlan({ path: [] });
+}
+
+s.on('runway-msg', (m: any) => {
   const landingTimedOut = m?.key === 'landing-timeout';
-  if (landingTimedOut) {
-    landingRequestedRef.current = false;
-    navGuidanceEndedRef.current = true;
-    if (intentRef.current === 'landing') intentRef.current = null;
-    finalLockedRef.current = false;
-    navPhaseRef.current = null;
-    prevIdxRef.current = null;
-    setNavTargetSafe(null);
-    setNavPlan({ path: [] });
+  if (landingTimedOut || m?.key === 'landing-drift' ||
+      m?.key === 'landing-out' || m?.key === 'landing-turn-lost') {
+    endLostLandingTurn();
   }
 
   const messageLanguage = resolveLanguage(i18n.resolvedLanguage || i18n.language);
@@ -4159,7 +4185,7 @@ const cameraPreviewRef = useRef<{
   kind: 'warning' | 'route' | 'aircraft';
   restoreRegion: Region;
   timer: ReturnType<typeof setTimeout>;
-  warning?: { id: string; priority: number };
+  warning?: { id: string; priority: number; position: LatLon; remote: LatLon; updatedAt: number };
   aircraft?: { id: string; position: LatLon; updatedAt: number };
 } | null>(null);
 const lastCameraWarningRef = useRef<{ key: string; seenAt: number } | null>(null);
@@ -4213,7 +4239,12 @@ function previewCamera(
   const aircraft = aircraftId
     ? { id: aircraftId, position: coordinates[0], updatedAt: Date.now() }
     : undefined;
-  cameraPreviewRef.current = { kind, restoreRegion, timer, warning, aircraft };
+  cameraPreviewRef.current = {
+    kind, restoreRegion, timer, aircraft,
+    warning: warning
+      ? { ...warning, position: coordinates[0], remote: coordinates[1], updatedAt: Date.now() }
+      : undefined,
+  };
   if (aircraft) {
     map.animateToRegion({ ...restoreRegion, ...aircraft.position }, 350);
   } else {
@@ -4248,6 +4279,15 @@ function holdAircraftLabel(duration: number) {
   }, duration);
 }
 
+function warningBounds(position: LatLon, remote: LatLon): LatLon[] {
+  return [
+    position,
+    remote,
+    movePoint(position.latitude, position.longitude, 45, 150),
+    movePoint(position.latitude, position.longitude, 225, 150),
+  ];
+}
+
 function cameraContains(point: LatLon) {
   const region = mapRegionRef.current;
   if (!region) return false;
@@ -4269,31 +4309,57 @@ useEffect(() => {
   if (!mapReady || !isFocusedRef.current || mapGestureRef.current) return;
 
   const position = { latitude: myPlane.lat, longitude: myPlane.lon };
-  const warning = prioritizedWarning ?? conflict;
-  const warningPriority = ['TA', 'RA_LOW', 'RA_HIGH'].indexOf(warning?.alertLevel ?? '');
+  const levels = ['TA', 'RA_LOW', 'RA_HIGH'];
   const now = Date.now();
-  if (warning && warningPriority >= 0) {
+  let warning: Warning | Plane | null = null;
+  let warningPriority = -1;
+  for (const candidate of [prioritizedWarning, conflict, localWarning, backendWarning]) {
+    if (!candidate) continue;
+    const priority = levels.indexOf(candidate.alertLevel ?? '');
+    if (priority > warningPriority) {
+      warning = candidate;
+      warningPriority = priority;
+    }
+  }
+  if (warning) {
     const key = warning.id + ':' + warning.alertLevel;
     const last = lastCameraWarningRef.current;
-    if (last?.key === key) last.seenAt = now;
-    const activePriority = cameraPreviewRef.current?.warning?.priority ?? -1;
-    if (warningPriority > activePriority && (last?.key !== key || now - last.seenAt >= 15_000)) {
-      const currentPlane = traffic.find(plane => plane.id === warning.id) ?? warning;
+    const activeWarning = cameraPreviewRef.current?.warning;
+    const activePriority = activeWarning?.priority ?? -1;
+    const isSameWarning = activeWarning?.id === warning.id && activePriority === warningPriority;
+    if (isSameWarning) lastCameraWarningRef.current = { key, seenAt: now };
+    if (!isSameWarning && warningPriority >= activePriority &&
+        (last?.key !== key || now - last.seenAt >= 3000)) {
+      const currentPlane = traffic.find(plane => plane.id === warning?.id) ?? warning;
       const remote = { latitude: currentPlane.lat, longitude: currentPlane.lon };
-      const bounds = [
-        position,
-        remote,
-        movePoint(position.latitude, position.longitude, 45, 150),
-        movePoint(position.latitude, position.longitude, 225, 150),
-      ];
-      if (previewCamera('warning', bounds, 15_000, { id: warning.id, priority: warningPriority })) {
+      if (previewCamera('warning', warningBounds(position, remote), 25_000, { id: warning.id, priority: warningPriority })) {
         lastCameraWarningRef.current = { key, seenAt: now };
+        trackedRouteCameraRef.current = null;
         setCameraWarning(warning);
       }
     }
   }
 
-  const target = getBackendTargetForMe();
+  const trackedWarning = cameraPreviewRef.current?.warning;
+  if (trackedWarning && now - trackedWarning.updatedAt >= 750) {
+    const plane = traffic.find(plane => plane.id === trackedWarning.id);
+    const remote = plane ? { latitude: plane.lat, longitude: plane.lon } : trackedWarning.remote;
+    const own = trackedWarning.position;
+    const previousRemote = trackedWarning.remote;
+    if (getDistance(own.latitude, own.longitude, position.latitude, position.longitude) >= 8 ||
+        getDistance(previousRemote.latitude, previousRemote.longitude, remote.latitude, remote.longitude) >= 8) {
+      Object.assign(trackedWarning, { position, remote, updatedAt: now });
+      mapRef.current?.fitToCoordinates(warningBounds(position, remote), {
+        edgePadding: { top: 80, bottom: 190, left: 42, right: 42 },
+        animated: true,
+      });
+    }
+  }
+
+  const target = getBackendTargetForMe() ??
+    (getBackendAssignedForMe2() === 'FINAL' && activeThreshold
+      ? { fix: 'FINAL', lat: activeThreshold.latitude, lon: activeThreshold.longitude }
+      : null);
   const fix = target?.fix;
   const tracksRoute = fix === 'FINAL' || fix === 'HOLD_SHORT';
   const routeKey = target && fix && (/^B\d+$/.test(fix) || tracksRoute)
@@ -4327,21 +4393,21 @@ useEffect(() => {
   }
 
   const changingRoute = preview?.kind === 'route' && lastCameraRouteRef.current !== routeKey;
-  if ((preview && !changingRoute) || warningPriority >= 0 ||
-      (runwayTapEnd && now < runwayLabelUntil)) return;
+  if ((preview && !changingRoute) ||
+      (fix !== 'FINAL' && runwayTapEnd && now < runwayLabelUntil)) return;
 
   if (tracksRoute) {
     if (pausedTrackedRouteKeyRef.current === routeKey) return;
     const destination = { latitude: target.lat, longitude: target.lon };
-    if (fix === 'FINAL' && (!runwayEndA || !runwayEndB)) return;
-    const coordinates = fix === 'FINAL' && runwayEndA && runwayEndB
-      ? [position, runwayEndA, runwayEndB]
+    const finalThreshold = rw?.active_end === 'B' ? runwayEndB : runwayEndA;
+    const oppositeThreshold = rw?.active_end === 'B' ? runwayEndA : runwayEndB;
+    const coordinates = fix === 'FINAL'
+      ? [position, finalThreshold ?? activeThreshold ?? destination, ...(oppositeThreshold ? [oppositeThreshold] : [])]
       : [position, destination, ...(activeThreshold ? [activeThreshold] : [])];
-    const minMovement = fix === 'HOLD_SHORT' ? 8 : 25;
     const previous = trackedRouteCameraRef.current;
     if (previous?.key === routeKey &&
         (now - previous.updatedAt < 750 ||
-         getDistance(previous.position.latitude, previous.position.longitude, position.latitude, position.longitude) < minMovement)) return;
+         getDistance(previous.position.latitude, previous.position.longitude, position.latitude, position.longitude) < 8)) return;
 
     if (changingRoute) finishCameraPreview(false);
     trackedRouteCameraRef.current = { key: routeKey, position, updatedAt: now };
@@ -4379,8 +4445,8 @@ useEffect(() => {
     lastCameraRouteRef.current = routeKey;
   }
 }, [
-  mapReady, cameraTick, myPlane, traffic, prioritizedWarning, conflict, runwayState,
-  runwayTapEnd, runwayLabelUntil, beaconB1, beaconB2, extraBeacons, activeThreshold, rw,
+  mapReady, cameraTick, myPlane, traffic, prioritizedWarning, conflict, localWarning, backendWarning, runwayState,
+  runwayTapEnd, runwayLabelUntil, beaconB1, beaconB2, extraBeacons, activeThreshold, runwayEndA, runwayEndB, rw,
 ]);
 
   useEffect(() => {
