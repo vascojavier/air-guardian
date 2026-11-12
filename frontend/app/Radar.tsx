@@ -454,16 +454,12 @@ const refreshPinnedDistance = () => {
       landings?: any[];
       takeoffs?: any[];
       inUse?: any | null;
-      runwayId?: string;
-      runwayEnd?: 'A' | 'B';
-      awaitingRunway?: boolean;
-      requestOperation?: 'arrival' | 'departure';
       timeline?: any[];
       serverTime?: number;
 
       // ✅ NUEVO (backend truth)
       assignedOps?: Record<string, string>;
-      opsTargets?: Record<string, { fix?: string; lat: number; lon: number; runwayId?: string }>;
+      opsTargets?: Record<string, { fix?: string; lat: number; lon: number }>;
     };
   }>(null);
 
@@ -1064,22 +1060,21 @@ type NavLL = { latitude: number; longitude: number };
 type NavPlan = { path: NavLL[]; holdingLabel?: { fix: string; position: NavLL } };
 
 function assignedBeaconLabels(
-  targets: Record<string, { fix?: string; lat: number; lon: number; runwayId?: string }> | undefined,
-  holdingLabel: NavPlan['holdingLabel'],
-  runwayId?: string
+  targets: Record<string, { fix?: string; lat: number; lon: number }> | undefined,
+  holdingLabel: NavPlan['holdingLabel']
 ) {
-  const labels = new Map<string, { fix: string; position: NavLL }>();
+  const labels = new Map<string, NavLL>();
   for (const target of Object.values(targets ?? {})) {
     const fix = target?.fix;
-    if (!fix || !/^B[1-9]\d*$/.test(fix) ||
+    if (!fix || !/^B[1-9]\d*$/.test(fix) || labels.has(fix) ||
         !Number.isFinite(target.lat) || !Number.isFinite(target.lon)) continue;
-    const key = (target.runwayId ?? '') + ':' + fix;
-    if (labels.has(key)) continue;
-    const position = holdingLabel?.fix === fix && target.runwayId === runwayId
-      ? holdingLabel.position : { latitude: target.lat, longitude: target.lon };
-    labels.set(key, { fix, position });
+    labels.set(fix, { latitude: target.lat, longitude: target.lon });
   }
-  return Array.from(labels, ([key, label]) => ({ key, ...label }));
+
+  if (holdingLabel && labels.has(holdingLabel.fix)) {
+    labels.set(holdingLabel.fix, holdingLabel.position);
+  }
+  return Array.from(labels, ([fix, position]) => ({ fix, position }));
 }
 
 function normalizeHeadingDeg(h?: number): number {
@@ -1251,16 +1246,10 @@ function buildApproachToHoldEntry(
   return [from, entryPoint];
 }
 
-function hasReachedFinalThreshold(
-  position: NavLL,
-  threshold: NavLL,
-  runwayCourseDeg: number,
-  maxLateralDistanceM = Infinity
-): boolean {
+function hasReachedFinalThreshold(position: NavLL, threshold: NavLL, runwayCourseDeg: number): boolean {
   const distance = getDistance(threshold.latitude, threshold.longitude, position.latitude, position.longitude);
   const bearing = bearingDeg(threshold.latitude, threshold.longitude, position.latitude, position.longitude);
-  const angle = toRad(bearing - runwayCourseDeg);
-  return distance * Math.cos(angle) >= 0 && Math.abs(distance * Math.sin(angle)) <= maxLateralDistanceM;
+  return distance * Math.cos(toRad(bearing - runwayCourseDeg)) >= 0;
 }
 
 function buildFinalTransitionPath(
@@ -1270,7 +1259,7 @@ function buildFinalTransitionPath(
   runwayCourseDeg: number,
   radiusM: number
 ): NavLL[] {
-  if (hasReachedFinalThreshold(from, threshold, runwayCourseDeg, 30)) return [];
+  if (hasReachedFinalThreshold(from, threshold, runwayCourseDeg)) return [];
 
   const hdg = normalizeHeadingDeg(currentHeadingDeg);
   const finalCourse = normalizeHeadingDeg(runwayCourseDeg);
@@ -1299,9 +1288,7 @@ function buildFinalTransitionPath(
     interceptPoint.latitude,
     interceptPoint.longitude
   ) * Math.cos(toRad(toIntercept - finalCourse));
-  if (interceptAheadM <= 1 && !hasReachedFinalThreshold(from, threshold, finalCourse)) {
-    return [from, threshold];
-  }
+  if (interceptAheadM <= 1) return [from, threshold];
 
   const turnDeg = normalizeHeadingDeg(toIntercept - hdg + 180) - 180;
   const firstTurnClockwise = turnDeg >= 0;
@@ -1524,14 +1511,7 @@ function applyPublishedAirfield(value: Airfield | null | undefined) {
 }
 
 // Derivados de la runway activa (si existe)
-const assignedRunwayId = runwayState?.state?.runwayId;
-const assignedRunwayEnd = runwayState?.state?.runwayEnd;
-const rw = useMemo(() => {
-  const runways = airfield?.runways;
-  const runway = runways?.find(item => item.id === assignedRunwayId) ?? runways?.[0];
-  if (!runway || !assignedRunwayEnd || assignedRunwayEnd === (runway.active_end ?? 'A')) return runway;
-  return { ...runway, active_end: assignedRunwayEnd, beacons: runway.beaconsByEnd?.[assignedRunwayEnd] };
-}, [airfield, assignedRunwayId, assignedRunwayEnd]);
+const rw = airfield?.runways?.[0];
 
 const getLon = (o: any) =>
   typeof o?.lng === "number" ? o.lng :
@@ -2040,9 +2020,7 @@ function iAmGroundish(): boolean {
   return false;
 }
 
-type PlaneIdentity = Pick<Plane, 'id' | 'name' | 'callsign'>;
-
-function isPlaneInAssignedOps(p: PlaneIdentity): boolean {
+function isPlaneInAssignedOps(p: Plane): boolean {
   const st: any = runwayState?.state;
   const map = st?.assignedOps as Record<string, string> | undefined;
   if (!map) return false;
@@ -2053,9 +2031,8 @@ function isPlaneInAssignedOps(p: PlaneIdentity): boolean {
   return false;
 }
 
-function isPlaneInQueues(p: PlaneIdentity): boolean {
+function isPlaneInQueues(p: Plane): boolean {
   const st: any = runwayState?.state;
-  if (Array.isArray(st?.queuedNames)) return keysForPlane(p).some(key => st.queuedNames.includes(key));
   const land = Array.isArray(st?.landings) ? st.landings : [];
   const tk   = Array.isArray(st?.takeoffs) ? st.takeoffs : [];
 
@@ -2125,7 +2102,7 @@ function getBackendAssignedForMe2(): string | null {
 }
 
 
-function keysForPlane(p: PlaneIdentity): string[] {
+function keysForPlane(p: Plane): string[] {
   const keys = [p.id, p.name, p.callsign].filter(Boolean) as string[];
   // único + estable
   return Array.from(new Set(keys.map(String)));
@@ -2171,7 +2148,7 @@ function shouldShowNavForPlane(p: Plane): boolean {
 
 
 // ATC (backend) asignación A_TO_Bx / FINAL
-function getAssignedOpsOfPlane(p: PlaneIdentity): AtcAssigned {
+function getAssignedOpsOfPlane(p: Plane): AtcAssigned {
   const st: any = runwayState?.state;
   const map = st?.assignedOps as Record<string, string> | undefined;
   if (!map) return null;
@@ -2184,7 +2161,7 @@ function getAssignedOpsOfPlane(p: PlaneIdentity): AtcAssigned {
 }
 
 // Target (backend) fix + lat/lon
-function getOpsTargetOfPlane(p: PlaneIdentity): AtcTarget {
+function getOpsTargetOfPlane(p: Plane): AtcTarget {
   const st: any = runwayState?.state;
   const map = st?.opsTargets as Record<string, any> | undefined;
   if (!map) return null;
@@ -2204,14 +2181,6 @@ function getOpsTargetOfPlane(p: PlaneIdentity): AtcTarget {
   return null;
 }
 
-
-function withCurrentAssignment<T extends PlaneIdentity>(plane: T) {
-  return {
-    ...plane,
-    atcAssigned: getAssignedOpsOfPlane(plane),
-    atcTarget: isPlaneInAssignedOps(plane) && isPlaneInQueues(plane) ? getOpsTargetOfPlane(plane) : null,
-  };
-}
 
 function inferOpsForDisplay(p: Plane): OpsState | null {
   const fieldElev = getFieldElevationM() ?? 0;
@@ -2323,8 +2292,6 @@ flashBanner(t("runway.goToHoldShort"), 'go-hold-short');
 
 
 const cancelRunwayLabel = () => {
-  const fix = getBackendTargetForMe()?.fix;
-  if (airfield?.multiRunway && (fix === 'FINAL' || fix === 'RWY' || iAmOccupyingRef.current)) return;
   cancelMyRequest();
   landingRequestedRef.current = false;
   takeoffRequestedRef.current = false;
@@ -3427,17 +3394,6 @@ s.on('runway-state', (payload: any) => {
   setRunwayState(payload);
 
   try {
-    const state = payload?.state;
-    if (state?.requestOperation === 'departure') takeoffRequestedRef.current = true;
-    if (state?.requestOperation === 'arrival' && !state.inUse) landingRequestedRef.current = true;
-    if (state?.runwayId && keysForMe().includes(state.inUse?.name) &&
-        (state.inUse.action === 'landing' || state.inUse.action === 'takeoff') &&
-        !iAmOccupyingRef.current && !navGuidanceEndedRef.current &&
-        lastOpsStateRef.current !== 'RUNWAY_CLEAR') {
-      iAmOccupyingRef.current = state.inUse.action;
-      lastOpsStateRef.current = 'RUNWAY_OCCUPIED';
-      if (state.inUse.action === 'landing') landingRequestedRef.current = false;
-    }
     const map = payload?.state?.assignedOps as Record<string,string> | undefined;
     const targets = payload?.state?.opsTargets as Record<string, {fix:string; lat:number; lon:number}> | undefined;
 
@@ -4160,10 +4116,7 @@ useEffect(() => {
   const backendTarget = getBackendTargetForMe();
   const currentOps = lastOpsStateRef.current as OpsState | null;
 
-  const hasLandingTarget = landingRequestedRef.current &&
-    (backendTarget?.fix === 'FINAL' || /^B\d+$/.test(backendTarget?.fix ?? ''));
-  if (iAmOccupyingRef.current === 'landing' ||
-      (currentOps === 'RUNWAY_CLEAR' && !hasLandingTarget) || backendTarget?.fix === 'APRON') {
+  if (iAmOccupyingRef.current === 'landing' || currentOps === 'RUNWAY_CLEAR' || backendTarget?.fix === 'APRON') {
     const apron = backendTarget?.fix === 'APRON'
       ? { latitude: backendTarget.lat, longitude: backendTarget.lon }
       : getApronPoint();
@@ -4343,7 +4296,6 @@ useEffect(() => {
   const target = getBackendTargetForMe();
   const fix = target?.fix;
   const tracksRoute = fix === 'FINAL' || fix === 'HOLD_SHORT';
-  const hasLandingTarget = landingRequestedRef.current && (fix === 'FINAL' || /^B\d+$/.test(fix ?? ''));
   const routeKey = target && fix && (/^B\d+$/.test(fix) || tracksRoute)
     ? [fix, target.lat, target.lon].join(':')
     : null;
@@ -4376,7 +4328,7 @@ useEffect(() => {
 
   const changingRoute = preview?.kind === 'route' && lastCameraRouteRef.current !== routeKey;
   if ((preview && !changingRoute) || warningPriority >= 0 ||
-      (!hasLandingTarget && runwayTapEnd && now < runwayLabelUntil)) return;
+      (runwayTapEnd && now < runwayLabelUntil)) return;
 
   if (tracksRoute) {
     if (pausedTrackedRouteKeyRef.current === routeKey) return;
@@ -4404,6 +4356,12 @@ useEffect(() => {
 
   if (lastCameraRouteRef.current === routeKey) return;
   const destination = { latitude: target.lat, longitude: target.lon };
+  if (cameraContains(destination) && cameraContains(position)) {
+    if (changingRoute) finishCameraPreview(true);
+    lastCameraRouteRef.current = routeKey;
+    return;
+  }
+
   const { path } = buildAdvancedNavPathForMeV3({
     myPlane,
     assigned: getBackendAssignedForMe2(),
@@ -4417,15 +4375,7 @@ useEffect(() => {
     fallbackNavTarget: null,
   });
   if (path.length < 2) return;
-  const coordinates = hasLandingTarget && runwayEndA && runwayEndB
-    ? [...path, destination, runwayEndA, runwayEndB]
-    : [...path, destination];
-  if (coordinates.every(cameraContains)) {
-    if (changingRoute) finishCameraPreview(true);
-    lastCameraRouteRef.current = routeKey;
-    return;
-  }
-  if (previewCamera('route', coordinates, 10_000)) {
+  if (previewCamera('route', [...path, destination], 10_000)) {
     lastCameraRouteRef.current = routeKey;
   }
 }, [
@@ -4612,7 +4562,7 @@ useEffect(() => {
 
 
 
-        {airfield?.runways.filter(runway => runway.id !== rw?.id).map(runway => {
+        {airfield?.runways.slice(1).map(runway => {
           const endA = runway.endA ?? runway.thresholdA;
           const endB = runway.endB ?? runway.thresholdB;
           const A = { latitude: endA.lat, longitude: endA.lng };
@@ -4704,8 +4654,8 @@ useEffect(() => {
           />
         )}
 
-        {assignedBeaconLabels(runwayState?.state?.opsTargets, holdingLabel, assignedRunwayId).map(({ key, fix, position }) => (
-          <Marker key={key} coordinate={position} title={fix} anchor={{ x: 0.5, y: 0.5 }}>
+        {assignedBeaconLabels(runwayState?.state?.opsTargets, holdingLabel).map(({ fix, position }) => (
+          <Marker key={fix} coordinate={position} title={fix} anchor={{ x: 0.5, y: 0.5 }}>
             <View style={{
               backgroundColor: fix === 'B1' ? '#4CAF50' : fix === 'B2' ? '#673AB7' : '#214F86',
               padding: 3,
@@ -4735,12 +4685,6 @@ useEffect(() => {
             onPress={() => { void Linking.openURL('https://www.openstreetmap.org/copyright').catch(() => {}); }}>
             © OpenStreetMap contributors
           </Text>
-        )}
-        {runwayState?.state?.awaitingRunway && (
-          <Text style={styles.assignmentStatus}>{t('pistaAdmin.awaitingAssignment')}</Text>
-        )}
-        {assignedRunwayId && activeIdent && (
-          <Text style={styles.assignmentStatus}>{t('pistaAdmin.assignedRunway', { ident: activeIdent })}</Text>
         )}
         <View style={styles.controlsBox}>
           <Text style={styles.label}>✈️ {t("radar.heading")}: {myPlane.heading.toFixed(0)}°</Text>
@@ -4772,24 +4716,24 @@ useEffect(() => {
       {prioritizedWarning ? (
         // prioritizedWarning es Warning: tiene distanceMeters ✅
         <TrafficWarningCard
-          aircraft={withCurrentAssignment(prioritizedWarning)}
+          aircraft={prioritizedWarning}
           distance={prioritizedWarning.distanceMeters}
         />
       ) : cameraWarning ? (
         <TrafficWarningCard
-          aircraft={withCurrentAssignment(cameraWarning)}
+          aircraft={cameraWarning}
           distance={getDistanceTo(cameraWarning)}
         />
       ) : conflict ? (
         // conflict es Plane: calculá on-the-fly
         <TrafficWarningCard
-          aircraft={withCurrentAssignment(conflict)}
+          aircraft={conflict}
           distance={getDistanceTo(conflict)}
         />
       ) : selected ? (
         // selected es Plane: calculá on-the-fly
         <TrafficWarningCard
-          aircraft={withCurrentAssignment(selected)}
+          aircraft={selected}
           distance={getDistanceTo(selected)}
         />
       ) : null}
@@ -4910,8 +4854,6 @@ useEffect(() => {
           (action==='takeoff' && takeoffRequestedRef.current);
 
         if (already) {
-          const fix = getBackendTargetForMe()?.fix;
-          if (airfield?.multiRunway && (fix === 'FINAL' || fix === 'RWY' || iAmOccupyingRef.current)) return null;
           return (
             <TouchableOpacity onPress={cancelRunwayLabel}
               style={{backgroundColor:'#eee', paddingHorizontal:12, paddingVertical:8, borderRadius:10}}>
@@ -5102,7 +5044,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     backgroundColor: '#FFFFFF',
   },
-  assignmentStatus: { backgroundColor: '#FFF2CF', color: '#382707', padding: 8, textAlign: 'center' },
   controlsBox: {
     backgroundColor: 'white',
     padding: 10,

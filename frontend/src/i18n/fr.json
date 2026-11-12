@@ -1,7 +1,5 @@
 {
   "pistaAdmin": {
-    "editBeacons": "Ajuster B1 et B2",
-    "tapRunwayLabel": "Touchez le numéro de piste sur la carte.",
     "airportSearch": "Nom, ville ou code (OACI/IATA)",
     "importAirport": "Importer un aérodrome",
     "icao": "Code OACI",

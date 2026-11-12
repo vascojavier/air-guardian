@@ -1,7 +1,5 @@
 {
   "pistaAdmin": {
-    "editBeacons": "Regola B1 e B2",
-    "tapRunwayLabel": "Tocca il numero della pista sulla mappa.",
     "airportSearch": "Nome, città o codice (ICAO/IATA)",
     "importAirport": "Importa aeroporto",
     "icao": "Codice ICAO",

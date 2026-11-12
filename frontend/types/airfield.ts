@@ -13,8 +13,6 @@ export type Meteo = {
 
 // Identificador de cabecera
 export type RunwayEndId = 'A' | 'B';
-export type RunwayUse = 'closed' | 'arrival' | 'departure' | 'mixed';
-export type AssignmentMode = 'automatic' | 'manual';
 
 // Beacons de secuenciación (B1 = freeze / final, B2 = pre-secuencia)
 export type RunwayBeacon = {
@@ -53,8 +51,6 @@ export type Runway = {
   width_m?: number;
   surface?: string;         // "asphalt" | "grass" | ...
   active_end?: RunwayEndId; // cabecera activa ('A' | 'B')
-  operationUse?: RunwayUse;
-  apron?: { lat: number; lng: number };
   beacons?: RunwayBeacon[]; // <<< NUEVO: B1 y B2 para aproximación
   beaconsByEnd?: Partial<Record<RunwayEndId, RunwayBeacon[]>>;
   notes?: string;
@@ -73,7 +69,6 @@ export type Airfield = {
   meteo?: Meteo;
   apron?: { lat: number; lng: number };
   apronSource?: 'openstreetmap';
-  multiRunway?: { arrival: AssignmentMode; departure: AssignmentMode };
   lastUpdated: number;
   source: 'manual' | 'ourairports' | 'mixed' | 'openaip';
 

@@ -1,7 +1,5 @@
 {
   "pistaAdmin": {
-    "editBeacons": "B1 en B2 aanpassen",
-    "tapRunwayLabel": "Tik op de baanaanduiding op de kaart.",
     "airportSearch": "Naam, plaats of code (ICAO/IATA)",
     "importAirport": "Luchthaven importeren",
     "icao": "ICAO-code",
